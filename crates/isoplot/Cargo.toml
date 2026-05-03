@@ -1,7 +1,0 @@
-[package]
-name = "isoplot"
-description = "Isosurface extraction and visualization"
-version.workspace = true
-edition.workspace = true
-repository.workspace = true
-license.workspace = true
