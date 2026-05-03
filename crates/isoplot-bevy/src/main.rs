@@ -13,7 +13,7 @@ use crate::{
     controls::{CameraControls, CameraControlsPlugin},
     plot::{Plot, PlotPlugin},
 };
-use isoplot_mesh::{NormalField, Point};
+use isoplot_mesh::{Point, ScalarField};
 
 struct EllipticParaboloid {
     pub a: f32,
@@ -26,14 +26,10 @@ impl EllipticParaboloid {
     }
 }
 
-impl NormalField for EllipticParaboloid {
+impl ScalarField for EllipticParaboloid {
     fn sample(&self, point: Point) -> f32 {
-        let [x, y, z] = point.0.to_array();
+        let [x, y, z] = (point.0 - glam::Vec3::splat(0.5)).to_array();
         y - (x * x / self.a + z * z / self.b)
-    }
-
-    fn sample_normal(&self, point: Point) -> glam::Vec3 {
-        point.0
     }
 }
 
@@ -59,7 +55,7 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
     });
 
     commands.spawn((
-        Plot::new(EllipticParaboloid::new(1.0, 1.0)),
+        Plot::new(EllipticParaboloid::new(0.2, 0.2)),
         MeshMaterial3d(simple_material),
         Wireframe,
         Transform::from_xyz(0.0, -0.5, -2.0),

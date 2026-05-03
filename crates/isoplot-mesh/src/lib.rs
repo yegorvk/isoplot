@@ -3,13 +3,48 @@ use glam::{Vec3, vec3};
 #[derive(Copy, Clone, Debug)]
 pub struct Point(pub Vec3);
 
-/// A scalar field source for isosurface extraction
-pub trait NormalField {
+/// A scalar field with source for isosurface extraction
+pub trait ScalarField {
     /// Samples the scalar field at the specified point.
     fn sample(&self, point: Point) -> f32;
+}
 
+/// A scalar field source with normals
+pub trait NormalField: ScalarField {
     /// Samples the scalar field normal at the specified point.
     fn sample_normal(&self, point: Point) -> Vec3;
+}
+
+pub struct CentralDifference<'a, S: ?Sized> {
+    field: &'a S,
+    epsilon: f32,
+}
+
+impl<'a, S: ?Sized> CentralDifference<'a, S> {
+    pub fn new(field: &'a S, epsilon: f32) -> Self {
+        Self { field, epsilon }
+    }
+}
+
+impl<S: ?Sized + ScalarField> ScalarField for CentralDifference<'_, S> {
+    fn sample(&self, point: Point) -> f32 {
+        self.field.sample(point)
+    }
+}
+
+impl<S: ?Sized + ScalarField> NormalField for CentralDifference<'_, S> {
+    fn sample_normal(&self, point: Point) -> Vec3 {
+        let p = point.0;
+        let e = self.epsilon;
+
+        let f = |p: Vec3| self.field.sample(Point(p));
+
+        let dx = f(p + Vec3::X * e) - f(p - Vec3::X * e);
+        let dy = f(p + Vec3::Y * e) - f(p - Vec3::Y * e);
+        let dz = f(p + Vec3::Z * e) - f(p - Vec3::Z * e);
+
+        vec3(dx, dy, dz).normalize_or_zero()
+    }
 }
 
 /// A mesh vertex in the local coordinate frame
@@ -30,7 +65,6 @@ impl Vertex {
     }
 }
 
-/// A policy to iteratively build a triangular mesh
 pub trait PopulateMesh {
     /// A previous added vertex index
     type Index: Copy;
@@ -96,12 +130,30 @@ impl<'a, S: ?Sized + NormalField> DualContouring<'a, S> {
     where
         P: PopulateMesh,
     {
-        sink.add_quad([
-            Vertex::new(vec3(0.0, 0.5, 0.0), Vec3::Y),
-            Vertex::new(vec3(0.0, 0.5, 1.0), Vec3::Y),
-            Vertex::new(vec3(1.0, 0.5, 1.0), Vec3::Y),
-            Vertex::new(vec3(1.0, 0.5, 0.0), Vec3::Y),
-        ]);
+        const SUBDIV: u32 = 25;
+
+        let cell_size = (SUBDIV as f32).recip();
+
+        for i in 0..SUBDIV {
+            for j in 0..SUBDIV {
+                let x = i as f32 * cell_size;
+                let z = j as f32 * cell_size;
+
+                let positions = [
+                    vec3(x, 0.5, z),
+                    vec3(x, 0.5, z + cell_size),
+                    vec3(x + cell_size, 0.5, z + cell_size),
+                    vec3(x + cell_size, 0.5, z),
+                ];
+
+                let vertices = positions.map(|position| {
+                    let normal = self.field.sample_normal(Point(position));
+                    Vertex::new(position, normal)
+                });
+
+                sink.add_quad(vertices);
+            }
+        }
 
         Ok(())
     }

@@ -4,25 +4,25 @@ use bevy::{
     prelude::*,
 };
 use bytemuck::cast_vec;
-use isoplot_mesh::{DualContouring, ExtractError, NormalField, SeparateNormals};
+use isoplot_mesh::{CentralDifference, DualContouring, ExtractError, ScalarField, SeparateNormals};
 
 #[derive(Component)]
 pub struct Plot {
-    source: Box<dyn NormalField + Send + Sync>,
+    field: Box<dyn ScalarField + Send + Sync>,
 }
 
 impl Plot {
-    pub fn new<S>(source: S) -> Self
+    pub fn new<S>(field: S) -> Self
     where
-        S: NormalField + Send + Sync + 'static,
+        S: ScalarField + Send + Sync + 'static,
     {
         Plot {
-            source: Box::new(source),
+            field: Box::new(field),
         }
     }
 
     fn build_mesh_data(&self) -> Result<SeparateNormals, ExtractError> {
-        Ok(DualContouring::new(self.source.as_ref()).extract()?)
+        DualContouring::new(&CentralDifference::new(self.field.as_ref(), 1e-4)).extract()
     }
 }
 
