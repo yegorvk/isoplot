@@ -9,4 +9,11 @@ repository = "https://github.com/yegorvk/isoplot"
 license = "MPL-2.0"
 
 [workspace.dependencies]
+# Workspace
+isoplot-mesh = { path = "crates/isoplot-mesh", version = "0.1.0" }
+
+# External
 glam = "0.32.1"
+
+[profile.dev]
+opt-level = 1
