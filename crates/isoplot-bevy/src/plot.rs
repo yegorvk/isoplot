@@ -4,7 +4,9 @@ use bevy::{
     prelude::*,
 };
 use bytemuck::cast_vec;
-use isoplot_mesh::{CentralDifference, DualContouring, ExtractError, ScalarField, SeparateNormals};
+use isoplot_mesh::{
+    CentralDifference, DualContouring, ExtractError, ScalarField, SeparateNormals, Translated,
+};
 
 #[derive(Component)]
 pub struct Plot {
@@ -22,7 +24,8 @@ impl Plot {
     }
 
     fn build_mesh_data(&self) -> Result<SeparateNormals, ExtractError> {
-        DualContouring::new(&CentralDifference::new(self.field.as_ref(), 1e-4)).extract()
+        let normal_field = CentralDifference::new(self.field.as_ref(), 1e-4);
+        DualContouring::new(&Translated::new(&normal_field, glam::Vec3::splat(0.5))).extract()
     }
 }
 

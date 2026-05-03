@@ -15,6 +15,35 @@ pub trait NormalField: ScalarField {
     fn sample_normal(&self, point: Point) -> Vec3;
 }
 
+pub struct Translated<'a, S: ?Sized> {
+    field: &'a S,
+    delta: Vec3,
+}
+
+impl<'a, S: ?Sized> Translated<'a, S> {
+    pub fn new(field: &'a S, delta: Vec3) -> Self {
+        Self { field, delta }
+    }
+}
+
+impl<'a, S> ScalarField for Translated<'a, S>
+where
+    S: ?Sized + ScalarField,
+{
+    fn sample(&self, point: Point) -> f32 {
+        self.field.sample(Point(point.0 - self.delta))
+    }
+}
+
+impl<'a, S> NormalField for Translated<'a, S>
+where
+    S: ?Sized + NormalField,
+{
+    fn sample_normal(&self, point: Point) -> Vec3 {
+        self.field.sample_normal(Point(point.0 - self.delta))
+    }
+}
+
 pub struct CentralDifference<'a, S: ?Sized> {
     field: &'a S,
     epsilon: f32,
@@ -47,7 +76,7 @@ impl<S: ?Sized + ScalarField> NormalField for CentralDifference<'_, S> {
     }
 }
 
-/// A mesh vertex in the local coordinate frame
+/// A mesh vertex
 #[derive(Copy, Clone, Debug)]
 pub struct Vertex {
     position: Vec3,

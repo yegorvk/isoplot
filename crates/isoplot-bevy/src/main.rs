@@ -28,8 +28,8 @@ impl EllipticParaboloid {
 
 impl ScalarField for EllipticParaboloid {
     fn sample(&self, point: Point) -> f32 {
-        let [x, y, z] = (point.0 - glam::Vec3::splat(0.5)).to_array();
-        y - (x * x / self.a + z * z / self.b)
+        let [x, y, z] = point.0.to_array();
+        y - (x * x / (self.a * self.a) + z * z / (self.b * self.b))
     }
 }
 
@@ -55,10 +55,10 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
     });
 
     commands.spawn((
-        Plot::new(EllipticParaboloid::new(0.2, 0.2)),
+        Plot::new(EllipticParaboloid::new(0.4, 0.4)),
         MeshMaterial3d(simple_material),
         Wireframe,
-        Transform::from_xyz(0.0, -0.5, -2.0),
+        Transform::from_xyz(-0.5, -0.5, -0.5),
     ));
 
     commands.spawn((
@@ -76,7 +76,7 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
 
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(0.0, 0.0, 0.0).looking_to(Dir3::NEG_Z, Dir3::Y),
+        Transform::from_xyz(0.0, 0.4, 1.0).looking_to(Dir3::NEG_Z, Dir3::Y),
         CameraControls::default(),
     ));
 }
