@@ -7,8 +7,10 @@ license.workspace = true
 
 [dependencies]
 isoplot-mesh.workspace = true
+glam.workspace = true
+bytemuck = "1.25.0"
 
 [dependencies.bevy]
 version = "0.18.1"
 default-features = false
-features = ["default_platform", "3d_bevy_render"]
+features = ["default_platform", "3d_bevy_render", "bevy_log"]

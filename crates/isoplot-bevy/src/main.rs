@@ -1,4 +1,5 @@
 mod controls;
+mod plot;
 
 use std::f32::consts::PI;
 
@@ -8,7 +9,33 @@ use bevy::{
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
 
-use crate::controls::{CameraControls, CameraControlsPlugin};
+use crate::{
+    controls::{CameraControls, CameraControlsPlugin},
+    plot::{Plot, PlotPlugin},
+};
+use isoplot_mesh::{NormalField, Point};
+
+struct EllipticParaboloid {
+    pub a: f32,
+    pub b: f32,
+}
+
+impl EllipticParaboloid {
+    fn new(a: f32, b: f32) -> Self {
+        Self { a, b }
+    }
+}
+
+impl NormalField for EllipticParaboloid {
+    fn sample(&self, point: Point) -> f32 {
+        let [x, y, z] = point.0.to_array();
+        y - (x * x / self.a + z * z / self.b)
+    }
+
+    fn sample_normal(&self, point: Point) -> glam::Vec3 {
+        point.0
+    }
+}
 
 fn main() {
     App::new()
@@ -17,29 +44,25 @@ fn main() {
         .add_plugins((
             DefaultPlugins,
             WireframePlugin::default(),
+            PlotPlugin,
             CameraControlsPlugin,
         ))
         .run();
 }
 
-fn setup(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
+fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
     let simple_material = materials.add(StandardMaterial {
         base_color: Color::LinearRgba(LinearRgba::GREEN),
         perceptual_roughness: 0.5,
+        cull_mode: None,
         ..default()
     });
 
-    let sphere_mesh = meshes.add(Sphere::new(0.5));
-
     commands.spawn((
-        Mesh3d(sphere_mesh),
+        Plot::new(EllipticParaboloid::new(1.0, 1.0)),
         MeshMaterial3d(simple_material),
         Wireframe,
-        Transform::from_xyz(0.0, 0.0, -2.0),
+        Transform::from_xyz(0.0, -0.5, -2.0),
     ));
 
     commands.spawn((
