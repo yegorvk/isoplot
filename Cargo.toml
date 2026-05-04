@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,10 +13,17 @@ license = "MPL-2.0"
 isoplot-mesh = { path = "crates/isoplot-mesh", version = "0.1.0" }
 
 # External
+anyhow = "1.0"
 arrayvec = "0.7.6"
 bilge = "0.3.0"
 derive-where = "1.6.1"
 glam = "0.32.1"
 
-[profile.dev]
+[profile.dev.package.isoplot-bevy]
 opt-level = 1
+
+[profile.dev.package.isoplot-mesh]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
