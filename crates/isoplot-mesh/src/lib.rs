@@ -1,3 +1,6 @@
+mod octree;
+mod quant;
+
 use glam::{Vec3, vec3};
 
 #[derive(Copy, Clone, Debug)]
@@ -187,11 +190,11 @@ impl<'a, S: ?Sized + NormalField> DualContouring<'a, S> {
         Ok(())
     }
 
-    pub fn extract<E>(self) -> Result<E, ExtractError>
+    pub fn extract<P>(self) -> Result<P, ExtractError>
     where
-        E: Default + PopulateMesh,
+        P: Default + PopulateMesh,
     {
-        let mut extractor = E::default();
+        let mut extractor = P::default();
         self.extract_with(&mut extractor)?;
         Ok(extractor)
     }

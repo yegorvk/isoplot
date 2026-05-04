@@ -13,6 +13,9 @@ license = "MPL-2.0"
 isoplot-mesh = { path = "crates/isoplot-mesh", version = "0.1.0" }
 
 # External
+arrayvec = "0.7.6"
+bilge = "0.3.0"
+derive-where = "1.6.1"
 glam = "0.32.1"
 
 [profile.dev]
