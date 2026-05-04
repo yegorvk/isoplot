@@ -1,7 +1,7 @@
 use arrayvec::ArrayVec;
 use bilge::prelude::*;
 use derive_where::derive_where;
-use std::marker::PhantomData;
+use std::{marker::PhantomData, mem};
 
 use crate::quant::Quant;
 
@@ -17,44 +17,90 @@ const _: () = {
 
 pub trait OctreeSource<T: Payload> {
     /// Returns `true` if the given node is empty (void).
-    fn is_empty(&self, node: Quant) -> bool;
+    fn is_empty(&self, key: Quant) -> bool;
 
     /// Returns `true` if the given node is a leaf.
-    fn is_leaf(&self, node: Quant) -> bool;
+    fn is_leaf(&self, key: Quant) -> bool;
 
     /// Create a payload for the given leaf node.
     ///
     /// The provided node is guaranteed to be a leaf, meaning that `is_leaf`
     /// has previously returned `true` for it at least once.
-    fn new_payload(&self, leaf: Quant) -> T;
+    fn new_payload(&self, leaf_key: Quant) -> T;
 }
-
-/// An octree construction error
-#[derive(Debug)]
-pub struct BuildError;
 
 pub struct Octree<T> {
     levels: ArrayVec<Level<T>, { MAX_LEVELS as usize }>,
 }
 
 impl<T: Payload> Octree<T> {
-    pub fn build<S>(source: &S) -> Result<Self, BuildError> {
-        todo!()
+    pub fn build<S>(source: &S) -> Self
+    where
+        S: OctreeSource<T>,
+    {
+        let mut levels = ArrayVec::new();
+
+        let mut this_keys = Vec::new();
+        let mut next_keys = vec![Quant::root()];
+
+        for _ in 0..MAX_LEVELS {
+            let mut nodes = Vec::new();
+
+            for key in next_keys.iter().copied() {
+                if source.is_leaf(key) {
+                    let payload = source.new_payload(key);
+                    nodes.push(Leaf::new(payload).into());
+                    continue;
+                }
+
+                let mut mask = 0u8;
+                let offset = this_keys.len() as u32;
+
+                for i in 0..8u8 {
+                    let child_key = key.child(ChildIndex::new(i)).unwrap();
+
+                    if !source.is_empty(child_key) {
+                        mask |= 1u8 << i;
+                        this_keys.push(child_key);
+                    }
+                }
+
+                nodes.push(Branch::new(mask, offset).into());
+            }
+
+            levels.push(Level::new(nodes));
+
+            mem::swap(&mut this_keys, &mut next_keys);
+            this_keys.clear();
+
+            if next_keys.is_empty() {
+                break;
+            }
+        }
+
+        Self { levels }
     }
 }
 
+#[derive(Debug)]
 struct Level<T> {
     nodes: Vec<Node<T>>,
 }
 
-#[derive_where(Copy, Clone, Debug)]
+impl<T: Payload> Level<T> {
+    fn new(nodes: Vec<Node<T>>) -> Self {
+        Self { nodes }
+    }
+}
+
+#[derive_where(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 #[repr(transparent)]
 struct Node<T> {
     inner: RawNode,
     _ty: PhantomData<T>,
 }
 
-impl<T> Node<T> {
+impl<T: Payload> Node<T> {
     #[inline]
     fn new_branch(branch: Branch) -> Self {
         Self {
@@ -70,10 +116,34 @@ impl<T> Node<T> {
             _ty: PhantomData,
         }
     }
+
+    fn is_leaf(self) -> bool {
+        matches!(self.inner.kind(), NodeKind::Leaf)
+    }
+
+    fn as_leaf(self) -> Option<Leaf<T>> {
+        if self.is_leaf() {
+            Some(unsafe { Leaf::from_bits(self.inner.data()) })
+        } else {
+            None
+        }
+    }
+}
+
+impl<T: Payload> From<Branch> for Node<T> {
+    fn from(value: Branch) -> Self {
+        Self::new_branch(value)
+    }
+}
+
+impl<T: Payload> From<Leaf<T>> for Node<T> {
+    fn from(value: Leaf<T>) -> Self {
+        Self::new_leaf(value)
+    }
 }
 
 #[bitsize(32)]
-#[derive(Copy, Clone, DebugBits)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, DebugBits)]
 struct RawNode {
     kind: NodeKind,
     data: u31,
@@ -89,21 +159,26 @@ impl RawNode {
     #[inline]
     fn new_leaf<T>(leaf: Leaf<T>) -> Self {
         let data = leaf.payload;
-        Self::new(NodeKind::Branch, data)
+        Self::new(NodeKind::Leaf, data)
     }
 }
 
 #[bitsize(1)]
-#[derive(Copy, Clone, Debug, FromBits)]
+#[derive(Copy, Clone, Debug, Hash, FromBits)]
 enum NodeKind {
     Branch = 0,
     Leaf = 1,
 }
 
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 #[repr(transparent)]
 pub struct Branch(RawBranch);
 
 impl Branch {
+    fn new(mask: u8, offset: u32) -> Self {
+        Self(RawBranch::new(mask, u23::new(offset)))
+    }
+
     #[inline]
     fn mask(self) -> u8 {
         self.0.mask()
@@ -126,18 +201,19 @@ impl ChildIndex {
 }
 
 #[bitsize(31)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, DebugBits)]
 struct RawBranch {
-    /// Offset (in nodes) to the first child in the next level
-    offset: u23,
-
     /// Bitmask of non-empty children
     ///
     /// Children are stored contiguously and only those with set bits
     /// are present, in order.
     mask: u8,
+
+    /// Offset (in nodes) to the first child in the next level
+    offset: u23,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive_where(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 #[repr(transparent)]
 pub struct Leaf<T> {
     payload: u31,
@@ -149,6 +225,13 @@ impl<T: Payload> Leaf<T> {
     pub fn new(data: T) -> Self {
         Self {
             payload: data.into_bits(),
+            _ty: PhantomData,
+        }
+    }
+
+    unsafe fn from_bits(bits: u31) -> Self {
+        Self {
+            payload: bits,
             _ty: PhantomData,
         }
     }
@@ -206,6 +289,86 @@ impl Branch {
         unsafe {
             let indices = CHILD_INDICES.get_unchecked(mask as usize);
             indices.get_unchecked(0..count)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeSet, HashSet};
+
+    use super::*;
+
+    #[test]
+    fn test_octree_degenerate() {
+        struct Source;
+
+        impl OctreeSource<Quant> for Source {
+            fn is_empty(&self, _: Quant) -> bool {
+                false
+            }
+
+            fn is_leaf(&self, _: Quant) -> bool {
+                true
+            }
+
+            fn new_payload(&self, leaf_key: Quant) -> Quant {
+                leaf_key
+            }
+        }
+
+        let octree = Octree::build(&Source);
+        assert_eq!(octree.levels.len(), 1);
+
+        let nodes = &octree.levels[0].nodes;
+        assert_eq!(nodes.as_slice(), &[Leaf::new(Quant::root()).into()]);
+    }
+
+    #[test]
+    fn test_octree_uniform() {
+        struct Source;
+
+        impl OctreeSource<Quant> for Source {
+            fn is_empty(&self, _: Quant) -> bool {
+                false
+            }
+
+            fn is_leaf(&self, key: Quant) -> bool {
+                key.level() == 4
+            }
+
+            fn new_payload(&self, leaf_key: Quant) -> Quant {
+                leaf_key
+            }
+        }
+
+        let octree = Octree::build(&Source);
+        assert_eq!(octree.levels.len(), 5);
+
+        let mut leaves = HashSet::new();
+
+        for (i, level) in octree.levels.iter().enumerate() {
+            let nodes = &level.nodes;
+            assert_eq!(nodes.len(), 1usize << (3 * i));
+
+            if i < 4 {
+                for node in nodes {
+                    assert!(!node.is_leaf());
+                }
+            }
+
+            if i == 4 {
+                for node in nodes {
+                    leaves.insert(node.as_leaf().unwrap());
+                }
+            }
+        }
+
+        assert_eq!(leaves.len(), octree.levels[4].nodes.len());
+
+        for leaf in leaves {
+            let payload = leaf.get();
+            assert_eq!(payload.level(), 4);
         }
     }
 }

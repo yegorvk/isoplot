@@ -4,7 +4,7 @@ use glam::{U16Vec3, Vec3, u16vec3, vec3};
 use crate::octree::{ChildIndex, Payload};
 
 /// A quantized point in a unit cube
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Hash, Debug)]
 #[repr(transparent)]
 pub struct Quant(RawQuant);
 
@@ -14,6 +14,10 @@ impl Quant {
 
     pub fn root() -> Self {
         Self(RawQuant::root())
+    }
+
+    pub fn level(self) -> u8 {
+        self.0.level()
     }
 
     pub fn child(self, index: ChildIndex) -> Option<Quant> {
@@ -42,7 +46,7 @@ impl Payload for Quant {
 }
 
 #[bitsize(31)]
-#[derive(Copy, Clone, DebugBits)]
+#[derive(Copy, Clone, Hash, DebugBits)]
 struct RawQuant {
     x: u11,
     y: u10,
@@ -57,6 +61,10 @@ impl RawQuant {
     fn from_raw_parts(raw_x: u16, y: u16, z: u16) -> Self {
         debug_assert!(raw_x != 0);
         Self::new(u11::new(raw_x), u10::new(y), u10::new(z))
+    }
+
+    fn level(self) -> u8 {
+        quant_level(self.x().value())
     }
 
     fn child(self, which: u3) -> Option<RawQuant> {
