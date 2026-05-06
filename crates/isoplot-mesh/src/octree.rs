@@ -30,7 +30,7 @@ pub trait OctreeSource<T: Payload> {
 }
 
 pub struct Octree<T> {
-    levels: ArrayVec<Level<T>, { MAX_LEVELS as usize }>,
+    nodes: Vec<Node<T>>,
 }
 
 impl<T: Payload> Octree<T> {
@@ -38,14 +38,12 @@ impl<T: Payload> Octree<T> {
     where
         S: OctreeSource<T>,
     {
-        let mut levels = ArrayVec::new();
+        let mut nodes = Vec::new();
 
         let mut this_keys = Vec::new();
         let mut next_keys = vec![Quant::root()];
 
         for _ in 0..MAX_LEVELS {
-            let mut nodes = Vec::new();
-
             for key in next_keys.iter().copied() {
                 if source.is_leaf(key) {
                     let payload = source.new_payload(key);
@@ -56,19 +54,17 @@ impl<T: Payload> Octree<T> {
                 let mut mask = 0u8;
                 let offset = this_keys.len() as u32;
 
-                for i in 0..8u8 {
-                    let child_key = key.child(ChildIndex::new(i)).unwrap();
+                for index in ChildIndex::enumerate() {
+                    let child = key.child(index).unwrap();
 
-                    if !source.is_empty(child_key) {
-                        mask |= 1u8 << i;
-                        this_keys.push(child_key);
+                    if !source.is_empty(child) {
+                        mask |= 1u8 << index.0.value();
+                        this_keys.push(child);
                     }
                 }
 
                 nodes.push(Branch::new(mask, offset).into());
             }
-
-            levels.push(Level::new(nodes));
 
             mem::swap(&mut this_keys, &mut next_keys);
             this_keys.clear();
@@ -78,17 +74,6 @@ impl<T: Payload> Octree<T> {
             }
         }
 
-        Self { levels }
-    }
-}
-
-#[derive(Debug)]
-struct Level<T> {
-    nodes: Vec<Node<T>>,
-}
-
-impl<T: Payload> Level<T> {
-    fn new(nodes: Vec<Node<T>>) -> Self {
         Self { nodes }
     }
 }
@@ -198,6 +183,10 @@ impl ChildIndex {
     pub fn new(index: u8) -> Self {
         Self(u3::new(index))
     }
+
+    pub fn enumerate() -> impl Iterator<Item = Self> {
+        (0..8u8).map(|i| ChildIndex(u3::new(i)))
+    }
 }
 
 #[bitsize(31)]
@@ -253,50 +242,48 @@ pub trait Payload: Copy {
     unsafe fn from_bits(bits: u31) -> Self;
 }
 
-const CHILD_INDICES: [[ChildIndex; 8]; 256] = generate_child_indices();
+// const CHILD_INDICES: [[ChildIndex; 8]; 256] = generate_child_indices();
 
-const fn generate_child_indices() -> [[ChildIndex; 8]; 256] {
-    let mut table = [[ChildIndex(u3::ZERO); 8]; 256];
+// const fn generate_child_indices() -> [[ChildIndex; 8]; 256] {
+//     let mut table = [[ChildIndex(u3::ZERO); 8]; 256];
 
-    let mut mask = 0;
-    while mask < 256 {
-        let row = &mut table[mask];
+//     let mut mask = 0;
+//     while mask < 256 {
+//         let row = &mut table[mask];
 
-        let mut next = 0;
-        let mut bit = 0u8;
+//         let mut next = 0;
+//         let mut bit = 0u8;
 
-        while bit < 8 {
-            if (mask >> bit) & 1 != 0 {
-                row[next] = ChildIndex(u3::new(bit as u8));
-                next += 1;
-            }
-            bit += 1;
-        }
+//         while bit < 8 {
+//             if (mask >> bit) & 1 != 0 {
+//                 row[next] = ChildIndex(u3::new(bit as u8));
+//                 next += 1;
+//             }
+//             bit += 1;
+//         }
 
-        mask += 1;
-    }
+//         mask += 1;
+//     }
 
-    table
-}
+//     table
+// }
 
-impl Branch {
-    #[inline]
-    fn child_indices(self) -> &'static [ChildIndex] {
-        let mask = self.mask();
-        let count = mask.count_ones() as usize;
+// impl Branch {
+//     #[inline]
+//     fn child_indices(self) -> &'static [ChildIndex] {
+//         let mask = self.mask();
+//         let count = mask.count_ones() as usize;
 
-        // SAFETY: `mask` cannot exceed 255 and `count` cannot exceed 8.
-        unsafe {
-            let indices = CHILD_INDICES.get_unchecked(mask as usize);
-            indices.get_unchecked(0..count)
-        }
-    }
-}
+//         // SAFETY: `mask` cannot exceed 255 and `count` cannot exceed 8.
+//         unsafe {
+//             let indices = CHILD_INDICES.get_unchecked(mask as usize);
+//             indices.get_unchecked(0..count)
+//         }
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeSet, HashSet};
-
     use super::*;
 
     #[test]
@@ -318,14 +305,13 @@ mod tests {
         }
 
         let octree = Octree::build(&Source);
-        assert_eq!(octree.levels.len(), 1);
-
-        let nodes = &octree.levels[0].nodes;
-        assert_eq!(nodes.as_slice(), &[Leaf::new(Quant::root()).into()]);
+        assert_eq!(octree.nodes.as_slice(), &[Leaf::new(Quant::root()).into()]);
     }
 
     #[test]
     fn test_octree_uniform() {
+        use std::collections::HashSet;
+
         struct Source;
 
         impl OctreeSource<Quant> for Source {
@@ -343,32 +329,18 @@ mod tests {
         }
 
         let octree = Octree::build(&Source);
-        assert_eq!(octree.levels.len(), 5);
-
         let mut leaves = HashSet::new();
 
-        for (i, level) in octree.levels.iter().enumerate() {
-            let nodes = &level.nodes;
-            assert_eq!(nodes.len(), 1usize << (3 * i));
-
-            if i < 4 {
-                for node in nodes {
-                    assert!(!node.is_leaf());
-                }
-            }
-
-            if i == 4 {
-                for node in nodes {
-                    leaves.insert(node.as_leaf().unwrap());
-                }
+        for node in octree.nodes {
+            if node.is_leaf() {
+                leaves.insert(node.as_leaf().unwrap());
             }
         }
 
-        assert_eq!(leaves.len(), octree.levels[4].nodes.len());
+        assert_eq!(leaves.len(), 4096);
 
-        for leaf in leaves {
-            let payload = leaf.get();
-            assert_eq!(payload.level(), 4);
+        for leaf in &leaves {
+            assert_eq!(leaf.get().level(), 4);
         }
     }
 }

@@ -3,13 +3,46 @@ mod quant;
 
 use glam::{Vec3, vec3};
 
+use crate::quant::Quant;
+
 #[derive(Copy, Clone, Debug)]
 pub struct Point(pub Vec3);
+
+#[derive(Copy, Clone, Debug)]
+pub struct Volume {
+    min_point: Vec3,
+    size: f32,
+}
+
+impl Volume {
+    fn from_key(key: Quant) -> Self {
+        let (min_point, size) = key.min_point_size();
+        Self { min_point, size }
+    }
+
+    pub fn min_point(&self) -> Vec3 {
+        self.min_point
+    }
+
+    pub fn size(&self) -> f32 {
+        self.size
+    }
+}
 
 /// A scalar field with source for isosurface extraction
 pub trait ScalarField {
     /// Samples the scalar field at the specified point.
     fn sample(&self, point: Point) -> f32;
+
+    /// Returns `true` only when the specified cell contains no sign changes.
+    ///
+    /// Note that it is correct to return `false` even when there are
+    /// no surface intersections (sign changes), although doing so
+    /// may negatively affect performance.
+    fn is_empty_weak(&self, cell: Volume) -> bool {
+        _ = cell;
+        false
+    }
 }
 
 /// A scalar field source with normals
