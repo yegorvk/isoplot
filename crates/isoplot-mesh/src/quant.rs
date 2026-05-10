@@ -4,7 +4,7 @@ use glam::{U16Vec3, Vec3, u16vec3, vec3};
 use crate::octree::{ChildIndex, Payload};
 
 /// A quantized point in a unit cube
-#[derive(Copy, Clone, Hash, Debug)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 #[repr(transparent)]
 pub struct Quant(RawQuant);
 
@@ -20,8 +20,8 @@ impl Quant {
         self.0.level()
     }
 
-    pub fn child(self, index: ChildIndex) -> Option<Quant> {
-        self.0.child(index.0).map(|child| Quant(child))
+    pub fn child(self, which: ChildIndex) -> Option<Quant> {
+        self.0.child(which.0).map(|child| Quant(child))
     }
 
     pub fn min_point_size(self) -> (Vec3, f32) {
@@ -32,6 +32,33 @@ impl Quant {
         let z = fract_u32_to_f32(parts.z as u32, level as u32);
 
         (vec3(x, y, z), f32_exp2_small(-(level as i8)))
+    }
+
+    pub fn center_point(self) -> Vec3 {
+        let (min_point, size) = self.min_point_size();
+        min_point + size * 0.5
+    }
+
+    pub fn for_each_corner<F>(self, mut f: F)
+    where
+        F: FnMut(u8, Vec3),
+    {
+        const CORNERS: [Vec3; 8] = [
+            vec3(0.0, 0.0, 0.0),
+            vec3(1.0, 0.0, 0.0),
+            vec3(0.0, 1.0, 0.0),
+            vec3(1.0, 1.0, 0.0),
+            vec3(0.0, 0.0, 1.0),
+            vec3(1.0, 0.0, 1.0),
+            vec3(0.0, 1.0, 1.0),
+            vec3(1.0, 1.0, 1.0),
+        ];
+
+        let (min_point, size) = self.min_point_size();
+
+        for (i, corner) in CORNERS.iter().enumerate() {
+            f(i as u8, min_point + size * corner);
+        }
     }
 }
 
@@ -46,7 +73,7 @@ impl Payload for Quant {
 }
 
 #[bitsize(31)]
-#[derive(Copy, Clone, Hash, DebugBits)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, DebugBits)]
 struct RawQuant {
     x: u11,
     y: u10,

@@ -1,54 +1,35 @@
+mod grid;
 mod octree;
 mod quant;
+mod tables;
+mod utils;
 
 use glam::{Vec3, vec3};
 
-use crate::quant::Quant;
+use crate::grid::AdaptiveGrid;
 
-#[derive(Copy, Clone, Debug)]
-pub struct Point(pub Vec3);
-
-#[derive(Copy, Clone, Debug)]
-pub struct Volume {
-    min_point: Vec3,
-    size: f32,
-}
-
-impl Volume {
-    fn from_key(key: Quant) -> Self {
-        let (min_point, size) = key.min_point_size();
-        Self { min_point, size }
-    }
-
-    pub fn min_point(&self) -> Vec3 {
-        self.min_point
-    }
-
-    pub fn size(&self) -> f32 {
-        self.size
-    }
-}
-
-/// A scalar field with source for isosurface extraction
+/// A scalar field source for isosurface extraction
 pub trait ScalarField {
     /// Samples the scalar field at the specified point.
-    fn sample(&self, point: Point) -> f32;
+    fn sample(&self, point: Vec3) -> f32;
+}
 
-    /// Returns `true` only when the specified cell contains no sign changes.
-    ///
-    /// Note that it is correct to return `false` even when there are
-    /// no surface intersections (sign changes), although doing so
-    /// may negatively affect performance.
-    fn is_empty_weak(&self, cell: Volume) -> bool {
-        _ = cell;
-        false
+impl<S: ?Sized + ScalarField> ScalarField for &S {
+    fn sample(&self, point: Vec3) -> f32 {
+        <S as ScalarField>::sample(self, point)
     }
 }
 
 /// A scalar field source with normals
 pub trait NormalField: ScalarField {
     /// Samples the scalar field normal at the specified point.
-    fn sample_normal(&self, point: Point) -> Vec3;
+    fn sample_normal(&self, point: Vec3) -> Vec3;
+}
+
+impl<S: ?Sized + NormalField> NormalField for &S {
+    fn sample_normal(&self, point: Vec3) -> Vec3 {
+        <S as NormalField>::sample_normal(self, point)
+    }
 }
 
 pub struct Translated<'a, S: ?Sized> {
@@ -66,8 +47,8 @@ impl<'a, S> ScalarField for Translated<'a, S>
 where
     S: ?Sized + ScalarField,
 {
-    fn sample(&self, point: Point) -> f32 {
-        self.field.sample(Point(point.0 - self.delta))
+    fn sample(&self, point: Vec3) -> f32 {
+        self.field.sample(point - self.delta)
     }
 }
 
@@ -75,8 +56,8 @@ impl<'a, S> NormalField for Translated<'a, S>
 where
     S: ?Sized + NormalField,
 {
-    fn sample_normal(&self, point: Point) -> Vec3 {
-        self.field.sample_normal(Point(point.0 - self.delta))
+    fn sample_normal(&self, point: Vec3) -> Vec3 {
+        self.field.sample_normal(point - self.delta)
     }
 }
 
@@ -92,17 +73,17 @@ impl<'a, S: ?Sized> CentralDifference<'a, S> {
 }
 
 impl<S: ?Sized + ScalarField> ScalarField for CentralDifference<'_, S> {
-    fn sample(&self, point: Point) -> f32 {
+    fn sample(&self, point: Vec3) -> f32 {
         self.field.sample(point)
     }
 }
 
 impl<S: ?Sized + ScalarField> NormalField for CentralDifference<'_, S> {
-    fn sample_normal(&self, point: Point) -> Vec3 {
-        let p = point.0;
+    fn sample_normal(&self, point: Vec3) -> Vec3 {
+        let p = point;
         let e = self.epsilon;
 
-        let f = |p: Vec3| self.field.sample(Point(p));
+        let f = |p: Vec3| self.field.sample(p);
 
         let dx = f(p + Vec3::X * e) - f(p - Vec3::X * e);
         let dy = f(p + Vec3::Y * e) - f(p - Vec3::Y * e);
@@ -112,7 +93,6 @@ impl<S: ?Sized + ScalarField> NormalField for CentralDifference<'_, S> {
     }
 }
 
-/// A mesh vertex
 #[derive(Copy, Clone, Debug)]
 pub struct Vertex {
     position: Vec3,
@@ -180,45 +160,54 @@ impl PopulateMesh for SeparateNormals {
 pub struct ExtractError;
 
 /// Dual contouring algorithm
-pub struct DualContouring<'a, S: ?Sized> {
-    field: &'a S,
+pub struct DualContouring<S> {
+    scalar_field: S,
+    max_level: u8,
 }
 
-impl<'a, S: ?Sized> DualContouring<'a, S> {
-    pub fn new(field: &'a S) -> Self {
-        Self { field }
+impl<'a, S> DualContouring<S> {
+    pub fn new(scalar_field: S, max_level: u8) -> Self {
+        Self {
+            scalar_field,
+            max_level,
+        }
     }
 }
 
-impl<'a, S: ?Sized + NormalField> DualContouring<'a, S> {
+impl<S> DualContouring<S>
+where
+    S: NormalField,
+{
     pub fn extract_with<P>(self, sink: &mut P) -> Result<(), ExtractError>
     where
         P: PopulateMesh,
     {
-        const SUBDIV: u32 = 25;
+        let grid = AdaptiveGrid::build(&self.scalar_field, self.max_level, |feature| {
+            feature.center_point()
+        });
 
-        let cell_size = (SUBDIV as f32).recip();
-
-        for i in 0..SUBDIV {
-            for j in 0..SUBDIV {
-                let x = i as f32 * cell_size;
-                let z = j as f32 * cell_size;
-
-                let positions = [
-                    vec3(x, 0.5, z),
-                    vec3(x, 0.5, z + cell_size),
-                    vec3(x + cell_size, 0.5, z + cell_size),
-                    vec3(x + cell_size, 0.5, z),
-                ];
-
-                let vertices = positions.map(|position| {
-                    let normal = self.field.sample_normal(Point(position));
-                    Vertex::new(position, normal)
-                });
-
-                sink.add_quad(vertices);
+        grid.for_each_feature_edge(|mut vertices| {
+            if vertices[0] == vertices[1] {
+                vertices[1] = vertices[3];
+                vertices[3] = vertices[2];
             }
-        }
+
+            if vertices[1] == vertices[2] {
+                vertices[2] = vertices[3];
+            }
+
+            let n = self.scalar_field.sample_normal(vertices[0]);
+
+            if should_flip_face(vertices[0], vertices[1], vertices[2], n) {
+                vertices.reverse();
+            }
+
+            sink.add_quad(
+                vertices.map(|position| {
+                    Vertex::new(position, self.scalar_field.sample_normal(position))
+                }),
+            );
+        });
 
         Ok(())
     }
@@ -231,4 +220,8 @@ impl<'a, S: ?Sized + NormalField> DualContouring<'a, S> {
         self.extract_with(&mut extractor)?;
         Ok(extractor)
     }
+}
+
+fn should_flip_face(a: Vec3, b: Vec3, c: Vec3, n: Vec3) -> bool {
+    (b - a).cross(c - a).dot(n) < 0.0
 }

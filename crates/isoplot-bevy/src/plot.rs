@@ -25,7 +25,7 @@ impl Plot {
 
     fn build_mesh_data(&self) -> Result<SeparateNormals, ExtractError> {
         let normal_field = CentralDifference::new(self.field.as_ref(), 1e-4);
-        DualContouring::new(&Translated::new(&normal_field, glam::Vec3::splat(0.5))).extract()
+        DualContouring::new(&Translated::new(&normal_field, glam::Vec3::splat(0.5)), 7).extract()
     }
 }
 
