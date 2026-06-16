@@ -32,58 +32,50 @@ impl<S: ?Sized + NormalField> NormalField for &S {
     }
 }
 
-pub struct Translated<'a, S: ?Sized> {
-    field: &'a S,
+pub struct Translated<S> {
+    source: S,
     delta: Vec3,
 }
 
-impl<'a, S: ?Sized> Translated<'a, S> {
-    pub fn new(field: &'a S, delta: Vec3) -> Self {
-        Self { field, delta }
+impl<'a, S> Translated<&'a S> {
+    pub fn new(source: &'a S, delta: Vec3) -> Self {
+        Self { source, delta }
     }
 }
 
-impl<'a, S> ScalarField for Translated<'a, S>
-where
-    S: ?Sized + ScalarField,
-{
+impl<S: ScalarField> ScalarField for Translated<S> {
     fn sample(&self, point: Vec3) -> f32 {
-        self.field.sample(point - self.delta)
+        self.source.sample(point - self.delta)
     }
 }
 
-impl<'a, S> NormalField for Translated<'a, S>
-where
-    S: ?Sized + NormalField,
-{
+impl<S: NormalField> NormalField for Translated<S> {
     fn sample_normal(&self, point: Vec3) -> Vec3 {
-        self.field.sample_normal(point - self.delta)
+        self.source.sample_normal(point - self.delta)
     }
 }
 
-pub struct CentralDifference<'a, S: ?Sized> {
-    field: &'a S,
-    epsilon: f32,
+pub struct CentralDifference<S> {
+    source: S,
+    delta: f32,
 }
 
-impl<'a, S: ?Sized> CentralDifference<'a, S> {
-    pub fn new(field: &'a S, epsilon: f32) -> Self {
-        Self { field, epsilon }
+impl<S: ScalarField> CentralDifference<S> {
+    pub fn new(source: S, delta: f32) -> Self {
+        Self { source, delta }
     }
 }
 
-impl<S: ?Sized + ScalarField> ScalarField for CentralDifference<'_, S> {
+impl<S: ScalarField> ScalarField for CentralDifference<S> {
     fn sample(&self, point: Vec3) -> f32 {
-        self.field.sample(point)
+        self.source.sample(point)
     }
 }
 
-impl<S: ?Sized + ScalarField> NormalField for CentralDifference<'_, S> {
+impl<S: ScalarField> NormalField for CentralDifference<S> {
     fn sample_normal(&self, point: Vec3) -> Vec3 {
-        let p = point;
-        let e = self.epsilon;
-
-        let f = |p: Vec3| self.field.sample(p);
+        let (p, e) = (point, self.delta);
+        let f = |p: Vec3| self.source.sample(p);
 
         let dx = f(p + Vec3::X * e) - f(p - Vec3::X * e);
         let dy = f(p + Vec3::Y * e) - f(p - Vec3::Y * e);
