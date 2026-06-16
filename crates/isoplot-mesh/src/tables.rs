@@ -26,25 +26,14 @@ pub enum EdgeKind {
     Z = 2,
 }
 
+const fn c(corner: u8) -> Corner {
+    Corner::new(corner)
+}
+
 const CELL_FACES: [[[Corner; 2]; 4]; 3] = [
-    [
-        [Corner::new(0), Corner::new(1)],
-        [Corner::new(2), Corner::new(3)],
-        [Corner::new(6), Corner::new(7)],
-        [Corner::new(4), Corner::new(5)],
-    ],
-    [
-        [Corner::new(0), Corner::new(2)],
-        [Corner::new(1), Corner::new(3)],
-        [Corner::new(5), Corner::new(7)],
-        [Corner::new(4), Corner::new(6)],
-    ],
-    [
-        [Corner::new(0), Corner::new(4)],
-        [Corner::new(1), Corner::new(5)],
-        [Corner::new(3), Corner::new(7)],
-        [Corner::new(2), Corner::new(6)],
-    ],
+    [[c(0), c(1)], [c(2), c(3)], [c(6), c(7)], [c(4), c(5)]],
+    [[c(0), c(2)], [c(1), c(3)], [c(5), c(7)], [c(4), c(6)]],
+    [[c(0), c(4)], [c(1), c(5)], [c(3), c(7)], [c(2), c(6)]],
 ];
 
 pub fn for_each_cell_face<T, B, R, F>(cell: T, kind: FaceKind, mut refine: R, mut f: F)
@@ -58,48 +47,9 @@ where
 }
 
 const CELL_EDGES: [[[Corner; 4]; 2]; 3] = [
-    [
-        [
-            Corner::new(0),
-            Corner::new(2),
-            Corner::new(6),
-            Corner::new(4),
-        ],
-        [
-            Corner::new(1),
-            Corner::new(3),
-            Corner::new(7),
-            Corner::new(5),
-        ],
-    ],
-    [
-        [
-            Corner::new(0),
-            Corner::new(1),
-            Corner::new(5),
-            Corner::new(4),
-        ],
-        [
-            Corner::new(2),
-            Corner::new(3),
-            Corner::new(7),
-            Corner::new(6),
-        ],
-    ],
-    [
-        [
-            Corner::new(0),
-            Corner::new(1),
-            Corner::new(3),
-            Corner::new(2),
-        ],
-        [
-            Corner::new(4),
-            Corner::new(5),
-            Corner::new(7),
-            Corner::new(6),
-        ],
-    ],
+    [[c(0), c(2), c(6), c(4)], [c(1), c(3), c(7), c(5)]],
+    [[c(0), c(1), c(5), c(4)], [c(2), c(3), c(7), c(6)]],
+    [[c(0), c(1), c(3), c(2)], [c(4), c(5), c(7), c(6)]],
 ];
 
 pub fn for_each_cell_edge<T, B, R, F>(cell: T, kind: EdgeKind, mut refine: R, mut f: F)
@@ -113,24 +63,9 @@ where
 }
 
 const SUB_FACES: [[[Corner; 2]; 4]; 3] = [
-    [
-        [Corner::new(1), Corner::new(0)],
-        [Corner::new(3), Corner::new(2)],
-        [Corner::new(7), Corner::new(6)],
-        [Corner::new(5), Corner::new(4)],
-    ],
-    [
-        [Corner::new(2), Corner::new(0)],
-        [Corner::new(3), Corner::new(1)],
-        [Corner::new(7), Corner::new(5)],
-        [Corner::new(6), Corner::new(4)],
-    ],
-    [
-        [Corner::new(4), Corner::new(0)],
-        [Corner::new(5), Corner::new(1)],
-        [Corner::new(7), Corner::new(3)],
-        [Corner::new(6), Corner::new(2)],
-    ],
+    [[c(1), c(0)], [c(3), c(2)], [c(7), c(6)], [c(5), c(4)]],
+    [[c(2), c(0)], [c(3), c(1)], [c(7), c(5)], [c(6), c(4)]],
+    [[c(4), c(0)], [c(5), c(1)], [c(7), c(3)], [c(6), c(2)]],
 ];
 
 pub fn for_each_sub_face<T, B, R, F>(face: [T; 2], kind: FaceKind, refine: R, mut f: F)
@@ -146,92 +81,32 @@ where
 const FACE_EDGES: [[[[(u8, Corner); 4]; 2]; 2]; 3] = [
     [
         [
-            [
-                (0, Corner::new(1)),
-                (1, Corner::new(0)),
-                (1, Corner::new(4)),
-                (0, Corner::new(5)),
-            ],
-            [
-                (0, Corner::new(3)),
-                (1, Corner::new(2)),
-                (1, Corner::new(6)),
-                (0, Corner::new(7)),
-            ],
+            [(0, c(1)), (1, c(0)), (1, c(4)), (0, c(5))],
+            [(0, c(3)), (1, c(2)), (1, c(6)), (0, c(7))],
         ],
         [
-            [
-                (0, Corner::new(1)),
-                (1, Corner::new(0)),
-                (1, Corner::new(2)),
-                (0, Corner::new(3)),
-            ],
-            [
-                (0, Corner::new(5)),
-                (1, Corner::new(4)),
-                (1, Corner::new(6)),
-                (0, Corner::new(7)),
-            ],
+            [(0, c(1)), (1, c(0)), (1, c(2)), (0, c(3))],
+            [(0, c(5)), (1, c(4)), (1, c(6)), (0, c(7))],
         ],
     ],
     [
         [
-            [
-                (0, Corner::new(2)),
-                (1, Corner::new(0)),
-                (1, Corner::new(4)),
-                (0, Corner::new(6)),
-            ],
-            [
-                (0, Corner::new(3)),
-                (1, Corner::new(1)),
-                (1, Corner::new(5)),
-                (0, Corner::new(7)),
-            ],
+            [(0, c(2)), (1, c(0)), (1, c(4)), (0, c(6))],
+            [(0, c(3)), (1, c(1)), (1, c(5)), (0, c(7))],
         ],
         [
-            [
-                (0, Corner::new(2)),
-                (0, Corner::new(3)),
-                (1, Corner::new(1)),
-                (1, Corner::new(0)),
-            ],
-            [
-                (0, Corner::new(6)),
-                (0, Corner::new(7)),
-                (1, Corner::new(5)),
-                (1, Corner::new(4)),
-            ],
+            [(0, c(2)), (0, c(3)), (1, c(1)), (1, c(0))],
+            [(0, c(6)), (0, c(7)), (1, c(5)), (1, c(4))],
         ],
     ],
     [
         [
-            [
-                (0, Corner::new(4)),
-                (0, Corner::new(6)),
-                (1, Corner::new(2)),
-                (1, Corner::new(0)),
-            ],
-            [
-                (0, Corner::new(5)),
-                (0, Corner::new(7)),
-                (1, Corner::new(3)),
-                (1, Corner::new(1)),
-            ],
+            [(0, c(4)), (0, c(6)), (1, c(2)), (1, c(0))],
+            [(0, c(5)), (0, c(7)), (1, c(3)), (1, c(1))],
         ],
         [
-            [
-                (0, Corner::new(4)),
-                (0, Corner::new(5)),
-                (1, Corner::new(1)),
-                (1, Corner::new(0)),
-            ],
-            [
-                (0, Corner::new(6)),
-                (0, Corner::new(7)),
-                (1, Corner::new(3)),
-                (1, Corner::new(2)),
-            ],
+            [(0, c(4)), (0, c(5)), (1, c(1)), (1, c(0))],
+            [(0, c(6)), (0, c(7)), (1, c(3)), (1, c(2))],
         ],
     ],
 ];
@@ -257,48 +132,9 @@ where
 }
 
 const SUB_EDGES: [[[Corner; 4]; 2]; 3] = [
-    [
-        [
-            Corner::new(6),
-            Corner::new(4),
-            Corner::new(0),
-            Corner::new(2),
-        ],
-        [
-            Corner::new(7),
-            Corner::new(5),
-            Corner::new(1),
-            Corner::new(3),
-        ],
-    ],
-    [
-        [
-            Corner::new(5),
-            Corner::new(4),
-            Corner::new(0),
-            Corner::new(1),
-        ],
-        [
-            Corner::new(7),
-            Corner::new(6),
-            Corner::new(2),
-            Corner::new(3),
-        ],
-    ],
-    [
-        [
-            Corner::new(3),
-            Corner::new(2),
-            Corner::new(0),
-            Corner::new(1),
-        ],
-        [
-            Corner::new(7),
-            Corner::new(6),
-            Corner::new(4),
-            Corner::new(5),
-        ],
-    ],
+    [[c(6), c(4), c(0), c(2)], [c(7), c(5), c(1), c(3)]],
+    [[c(5), c(4), c(0), c(1)], [c(7), c(6), c(2), c(3)]],
+    [[c(3), c(2), c(0), c(1)], [c(7), c(6), c(4), c(5)]],
 ];
 
 pub fn for_each_sub_edge<T, B, R, F>(edge: [T; 4], kind: EdgeKind, refine: R, mut f: F)
