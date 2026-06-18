@@ -178,7 +178,7 @@ where
             feature.center_point()
         });
 
-        grid.for_each_feature_edge(|mut vertices| {
+        grid.for_each_quad(|mut vertices| {
             if vertices[0] == vertices[1] {
                 vertices[1] = vertices[3];
                 vertices[3] = vertices[2];

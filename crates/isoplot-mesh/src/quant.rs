@@ -1,7 +1,10 @@
 use bilge::prelude::*;
 use glam::{U16Vec3, Vec3, u16vec3, vec3};
 
-use crate::octree::{ChildIndex, Payload};
+use crate::{
+    octree::{ChildIndex, Payload},
+    tables::Corner,
+};
 
 /// A quantized point in a unit cube
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
@@ -41,7 +44,7 @@ impl Quant {
 
     pub fn for_each_corner<F>(self, mut f: F)
     where
-        F: FnMut(u8, Vec3),
+        F: FnMut(Corner, Vec3),
     {
         const CORNERS: [Vec3; 8] = [
             vec3(0.0, 0.0, 0.0),
@@ -56,8 +59,8 @@ impl Quant {
 
         let (min_point, size) = self.min_point_size();
 
-        for (i, corner) in CORNERS.iter().enumerate() {
-            f(i as u8, min_point + size * corner);
+        for (i, offset) in CORNERS.iter().enumerate() {
+            f(Corner::new(i as u8), min_point + size * offset);
         }
     }
 }

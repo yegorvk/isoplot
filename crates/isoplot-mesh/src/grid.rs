@@ -1,24 +1,24 @@
 use glam::Vec3;
-use std::collections::VecDeque;
+use std::mem;
 
 use crate::{
     ScalarField,
-    octree::{Branch, ChildIndex, ImplicitOctree, Node, Octree},
+    octree::{Branch, BuildOctree, ChildIndex, Key, Node, Octree},
     quant::Quant,
     tables::{
-        Corner, EdgeKind, FaceKind, for_each_cell_edge, for_each_cell_face, for_each_face_edge,
-        for_each_sub_edge, for_each_sub_face,
+        Corner, EdgeKind, FaceKind, edge_corners, for_each_cell_edge, for_each_cell_face,
+        for_each_face_edge, for_each_sub_edge, for_each_sub_face,
     },
     utils::array_transpose,
 };
 
-struct Implicit<S, P> {
+struct OctreeSource<S, P> {
     scalar_field: S,
     max_level: u8,
     place_feature: P,
 }
 
-impl<S, P> ImplicitOctree<Feature> for Implicit<S, P>
+impl<S, P> BuildOctree<Feature> for OctreeSource<S, P>
 where
     S: ScalarField,
     P: Fn(Quant) -> Vec3,
@@ -44,24 +44,24 @@ where
     }
 
     fn place_leaf(&mut self, tag: Self::Tag) -> Feature {
-        let corners = {
-            let mut corners = 0u8;
+        let p_mask = {
+            let mut mask = 0u8;
 
-            tag.for_each_corner(|i, corner| {
-                let value = self.scalar_field.sample(corner);
+            tag.for_each_corner(|corner, position| {
+                let value = self.scalar_field.sample(position);
 
                 if value.is_sign_positive() {
-                    corners |= 1u8 << i;
+                    mask |= 1u8 << corner.as_u8();
                 }
             });
 
-            corners
+            mask
         };
 
         Feature {
             vertex: (self.place_feature)(tag),
             quant: tag,
-            corners,
+            p_mask,
         }
     }
 }
@@ -70,7 +70,7 @@ where
 struct Feature {
     vertex: Vec3,
     quant: Quant,
-    corners: u8,
+    p_mask: u8,
 }
 
 impl Feature {
@@ -79,7 +79,7 @@ impl Feature {
     }
 
     fn is_corner_sign_positive(&self, corner: u8) -> bool {
-        self.corners & (1u8 << corner) != 0
+        self.p_mask & (1u8 << corner) != 0
     }
 }
 
@@ -93,7 +93,7 @@ impl AdaptiveGrid {
         S: ScalarField,
         P: Fn(Quant) -> Vec3,
     {
-        let mut source = Implicit {
+        let mut source = OctreeSource {
             scalar_field: field,
             max_level,
             place_feature,
@@ -104,198 +104,178 @@ impl AdaptiveGrid {
         }
     }
 
-    pub fn for_each_feature_edge<F>(&self, mut f: F)
+    pub fn for_each_quad<F>(&self, mut f: F)
     where
         F: FnMut([Vec3; 4]),
     {
-        let mut f = |kind: EdgeKind, edge: [Feature; 4]| {
-            let indices = match kind {
-                EdgeKind::X => [[6, 7], [4, 5], [0, 1], [2, 3]],
-                EdgeKind::Y => [[5, 7], [4, 6], [0, 2], [1, 3]],
-                EdgeKind::Z => [[3, 7], [2, 6], [0, 4], [1, 5]],
-            };
-
-            let (min_index, _) = (edge.iter().enumerate())
-                .max_by_key(|(_, feature)| feature.quant.level())
+        self.for_each_minimal_edge(|kind, keys| {
+            let (feature, [a, b]) = edge_corners(keys, kind, |_, corner| corner)
+                .map(|(key, [a, b])| {
+                    let feature = self.octree.get(key).unwrap().unwrap_leaf();
+                    (feature, [a, b])
+                })
+                .max_by_key(|(feature, _)| feature.quant.level())
                 .unwrap();
 
-            let [a, b] = indices[min_index];
-
-            if edge[min_index].is_feature_edge(a, b) {
-                f(edge.map(|feature| feature.vertex));
+            if feature.is_feature_edge(a.as_u8(), b.as_u8()) {
+                f(keys.map(|key| self.octree.get(key).unwrap().unwrap_leaf().vertex));
             }
-        };
+        });
+    }
 
-        let mut faces_x = VecDeque::new();
-        let mut faces_y = VecDeque::new();
-        let mut faces_z = VecDeque::new();
+    fn for_each_minimal_edge<F>(&self, mut f: F)
+    where
+        F: FnMut(EdgeKind, [Key; 4]),
+    {
+        let refine_branch =
+            |branch: &Branch, which: Corner| branch.child(ChildIndex::new(which.as_u8()));
 
-        let mut edges_x = VecDeque::new();
-        let mut edges_y = VecDeque::new();
-        let mut edges_z = VecDeque::new();
-
-        let refine_branch = |branch: &Branch, which: Corner| {
-            branch
-                .child(ChildIndex::new(which.as_u8()))
-                .map(|key| self.octree.get(key).unwrap().copied())
-        };
+        let mut faces = Faces::default();
+        let mut edges = Edges::default();
 
         self.octree.for_each_branch(|branch| {
-            for_each_cell_face(branch, FaceKind::X, refine_branch, |face| {
-                if let Some(face) = array_transpose(face) {
-                    faces_x.push_back(face);
-                }
+            faces.for_each_axis_mut(|kind, faces| {
+                for_each_cell_face(branch, kind, refine_branch, |keys| {
+                    if let Some(keys) = array_transpose(keys) {
+                        faces.push(keys);
+                    }
+                });
             });
 
-            for_each_cell_face(branch, FaceKind::Y, refine_branch, |face| {
-                if let Some(face) = array_transpose(face) {
-                    faces_y.push_back(face);
-                }
-            });
-
-            for_each_cell_face(branch, FaceKind::Z, refine_branch, |face| {
-                if let Some(face) = array_transpose(face) {
-                    faces_z.push_back(face);
-                }
-            });
-
-            for_each_cell_edge(branch, EdgeKind::X, refine_branch, |edge| {
-                if let Some(edge) = array_transpose(edge) {
-                    edges_x.push_back(edge);
-                }
-            });
-
-            for_each_cell_edge(branch, EdgeKind::Y, refine_branch, |edge| {
-                if let Some(edge) = array_transpose(edge) {
-                    edges_y.push_back(edge);
-                }
-            });
-
-            for_each_cell_edge(branch, EdgeKind::Z, refine_branch, |edge| {
-                if let Some(edge) = array_transpose(edge) {
-                    edges_z.push_back(edge);
-                }
+            edges.for_each_axis_mut(|kind, edges| {
+                for_each_cell_edge(branch, kind, refine_branch, |keys| {
+                    if let Some(keys) = array_transpose(keys) {
+                        edges.push(keys);
+                    }
+                });
             });
         });
 
-        let refine_node = |node: &Node<_>, which: Corner| -> Option<Node<Feature>> {
-            if let Node::Branch(branch) = node {
-                (branch.child(ChildIndex::new(which.as_u8())))
-                    .map(|key| self.octree.get(key).unwrap().copied())
+        let refine_node = |key: &Key, which: Corner| {
+            if let Node::Branch(branch) = self.octree.get(*key).unwrap() {
+                branch.child(ChildIndex::new(which.as_u8()))
             } else {
-                Some(*node)
+                Some(*key)
             }
         };
 
-        while let Some(face) = faces_x.pop_front() {
-            if face.iter().all(|node| node.is_leaf()) {
-                continue;
-            }
+        for (kind, faces) in faces.into_axes() {
+            traverse_ping_pong(faces, |current, next| {
+                for keys in current.iter().copied() {
+                    if keys.iter().all(|key| self.octree.is_leaf(*key)) {
+                        continue;
+                    }
 
-            for_each_sub_face(face, FaceKind::X, refine_node, |face| {
-                if let Some(face) = array_transpose(face) {
-                    faces_x.push_back(face);
-                }
-            });
+                    for_each_sub_face(keys, kind, refine_node, |sub_face| {
+                        if let Some(sub_face) = array_transpose(sub_face) {
+                            next.push(sub_face);
+                        }
+                    });
 
-            for_each_face_edge(face, (FaceKind::X, EdgeKind::Y), refine_node, |edge| {
-                if let Some(edge) = array_transpose(edge) {
-                    edges_y.push_back(edge);
-                }
-            });
-
-            for_each_face_edge(face, (FaceKind::X, EdgeKind::Z), refine_node, |edge| {
-                if let Some(edge) = array_transpose(edge) {
-                    edges_z.push_back(edge);
-                }
-            });
-        }
-
-        while let Some(face) = faces_y.pop_front() {
-            if face.iter().all(|node| node.is_leaf()) {
-                continue;
-            }
-
-            for_each_sub_face(face, FaceKind::Y, refine_node, |face| {
-                if let Some(face) = array_transpose(face) {
-                    faces_y.push_back(face);
-                }
-            });
-
-            for_each_face_edge(face, (FaceKind::Y, EdgeKind::X), refine_node, |edge| {
-                if let Some(edge) = array_transpose(edge) {
-                    edges_x.push_back(edge);
-                }
-            });
-
-            for_each_face_edge(face, (FaceKind::Y, EdgeKind::Z), refine_node, |edge| {
-                if let Some(edge) = array_transpose(edge) {
-                    edges_z.push_back(edge);
+                    for edge_kind in kind.tangent_edges() {
+                        for_each_face_edge(keys, (kind, edge_kind), refine_node, |edge| {
+                            if let Some(edge) = array_transpose(edge) {
+                                edges.insert(edge_kind, edge);
+                            }
+                        });
+                    }
                 }
             });
         }
 
-        while let Some(face) = faces_z.pop_front() {
-            if face.iter().all(|node| node.is_leaf()) {
-                continue;
-            }
+        for (kind, edges) in edges.into_axes() {
+            traverse_ping_pong(edges, |current, next| {
+                for keys in current.iter().copied() {
+                    if keys.iter().all(|key| self.octree.is_leaf(*key)) {
+                        f(kind, keys);
+                        continue;
+                    }
 
-            for_each_sub_face(face, FaceKind::Z, refine_node, |face| {
-                if let Some(face) = array_transpose(face) {
-                    faces_z.push_back(face);
-                }
-            });
-
-            for_each_face_edge(face, (FaceKind::Z, EdgeKind::X), refine_node, |edge| {
-                if let Some(edge) = array_transpose(edge) {
-                    edges_x.push_back(edge);
-                }
-            });
-
-            for_each_face_edge(face, (FaceKind::Z, EdgeKind::Y), refine_node, |edge| {
-                if let Some(edge) = array_transpose(edge) {
-                    edges_y.push_back(edge);
-                }
-            });
-        }
-
-        while let Some(edge) = edges_x.pop_front() {
-            if edge.iter().all(|node| node.is_leaf()) {
-                f(EdgeKind::X, edge.map(|node| node.unwrap_leaf()));
-                continue;
-            }
-
-            for_each_sub_edge(edge, EdgeKind::X, refine_node, |edge| {
-                if let Some(edge) = array_transpose(edge) {
-                    edges_x.push_back(edge);
-                }
-            });
-        }
-
-        while let Some(edge) = edges_y.pop_front() {
-            if edge.iter().all(|node| node.is_leaf()) {
-                f(EdgeKind::Y, edge.map(|node| node.unwrap_leaf()));
-                continue;
-            }
-
-            for_each_sub_edge(edge, EdgeKind::Y, refine_node, |edge| {
-                if let Some(edge) = array_transpose(edge) {
-                    edges_y.push_back(edge);
-                }
-            });
-        }
-
-        while let Some(edge) = edges_z.pop_front() {
-            if edge.iter().all(|node| node.is_leaf()) {
-                f(EdgeKind::Z, edge.map(|node| node.unwrap_leaf()));
-                continue;
-            }
-
-            for_each_sub_edge(edge, EdgeKind::Z, refine_node, |edge| {
-                if let Some(edge) = array_transpose(edge) {
-                    edges_z.push_back(edge);
+                    for_each_sub_edge(keys, kind, refine_node, |sub_edge| {
+                        if let Some(edge) = array_transpose(sub_edge) {
+                            next.push(edge);
+                        }
+                    });
                 }
             });
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct Faces {
+    x: Vec<[Key; 2]>,
+    y: Vec<[Key; 2]>,
+    z: Vec<[Key; 2]>,
+}
+
+impl Faces {
+    fn for_each_axis_mut<F>(&mut self, mut f: F)
+    where
+        F: FnMut(FaceKind, &mut Vec<[Key; 2]>),
+    {
+        f(FaceKind::X, &mut self.x);
+        f(FaceKind::Y, &mut self.y);
+        f(FaceKind::Z, &mut self.z);
+    }
+
+    fn into_axes(self) -> [(FaceKind, Vec<[Key; 2]>); 3] {
+        [
+            (FaceKind::X, self.x),
+            (FaceKind::Y, self.y),
+            (FaceKind::Z, self.z),
+        ]
+    }
+}
+
+#[derive(Debug, Default)]
+struct Edges {
+    x: Vec<[Key; 4]>,
+    y: Vec<[Key; 4]>,
+    z: Vec<[Key; 4]>,
+}
+
+impl Edges {
+    fn for_each_axis_mut<F>(&mut self, mut f: F)
+    where
+        F: FnMut(EdgeKind, &mut Vec<[Key; 4]>),
+    {
+        f(EdgeKind::X, &mut self.x);
+        f(EdgeKind::Y, &mut self.y);
+        f(EdgeKind::Z, &mut self.z);
+    }
+
+    fn into_axes(self) -> [(EdgeKind, Vec<[Key; 4]>); 3] {
+        [
+            (EdgeKind::X, self.x),
+            (EdgeKind::Y, self.y),
+            (EdgeKind::Z, self.z),
+        ]
+    }
+
+    fn insert(&mut self, kind: EdgeKind, edge: [Key; 4]) {
+        let edges = match kind {
+            EdgeKind::X => &mut self.x,
+            EdgeKind::Y => &mut self.y,
+            EdgeKind::Z => &mut self.z,
+        };
+
+        edges.push(edge);
+    }
+}
+
+fn traverse_ping_pong<T, F>(roots: Vec<T>, mut f: F) -> Vec<T>
+where
+    F: FnMut(&[T], &mut Vec<T>),
+{
+    let mut current = roots;
+    let mut next = Vec::new();
+
+    while !current.is_empty() {
+        next.clear();
+        f(&current, &mut next);
+        mem::swap(&mut current, &mut next);
+    }
+
+    next
 }

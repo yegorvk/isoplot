@@ -1,3 +1,5 @@
+use std::iter;
+
 #[derive(Copy, Clone, Debug)]
 pub struct Corner(u8);
 
@@ -17,6 +19,16 @@ pub enum FaceKind {
     X = 0,
     Y = 1,
     Z = 2,
+}
+
+impl FaceKind {
+    pub const fn tangent_edges(self) -> [EdgeKind; 2] {
+        match self {
+            FaceKind::X => [EdgeKind::Y, EdgeKind::Z],
+            FaceKind::Y => [EdgeKind::X, EdgeKind::Z],
+            FaceKind::Z => [EdgeKind::X, EdgeKind::Y],
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -150,4 +162,24 @@ where
             refine(&edge[3], indices[3]),
         ]);
     }
+}
+
+const EDGE_CORNERS: [[[Corner; 2]; 4]; 3] = [
+    [[c(6), c(7)], [c(4), c(5)], [c(0), c(1)], [c(2), c(3)]],
+    [[c(5), c(7)], [c(4), c(6)], [c(0), c(2)], [c(1), c(3)]],
+    [[c(3), c(7)], [c(2), c(6)], [c(0), c(4)], [c(1), c(5)]],
+];
+
+pub fn edge_corners<T, B, R>(
+    edge: [T; 4],
+    kind: EdgeKind,
+    refine: R,
+) -> impl Iterator<Item = (T, [B; 2])>
+where
+    R: Fn(&T, Corner) -> B,
+{
+    iter::zip(edge, EDGE_CORNERS[kind as usize].iter()).map(move |(cell, indices)| {
+        let sub_edges = [refine(&cell, indices[0]), refine(&cell, indices[1])];
+        (cell, sub_edges)
+    })
 }

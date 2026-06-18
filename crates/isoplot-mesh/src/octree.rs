@@ -8,7 +8,7 @@ use std::{marker::PhantomData, mem, ops::Index};
 /// so there is always at least 1 level.
 pub const MAX_LEVELS: u8 = 10;
 
-pub trait ImplicitOctree<T> {
+pub trait BuildOctree<T> {
     /// A unique identifier for an octree node
     type Tag: Copy;
 
@@ -37,9 +37,9 @@ impl<T> InlineOctree<T> {
 }
 
 impl<T: Payload> InlineOctree<T> {
-    pub fn build<I>(source: &mut I) -> Self
+    pub fn build<B>(source: &mut B) -> Self
     where
-        I: ?Sized + ImplicitOctree<T>,
+        B: ?Sized + BuildOctree<T>,
     {
         let mut nodes = Vec::new();
 
@@ -104,15 +104,15 @@ impl<T> Index<Key> for InlineOctree<T> {
 
 struct Collector<'a, T, I>
 where
-    I: ImplicitOctree<T>,
+    I: BuildOctree<T>,
 {
     source: &'a mut I,
     leaves: Vec<T>,
 }
 
-impl<T, I> ImplicitOctree<u31> for Collector<'_, T, I>
+impl<T, I> BuildOctree<u31> for Collector<'_, T, I>
 where
-    I: ImplicitOctree<T>,
+    I: BuildOctree<T>,
 {
     type Tag = I::Tag;
 
@@ -141,9 +141,9 @@ pub struct Octree<T> {
 }
 
 impl<T> Octree<T> {
-    pub fn build<I>(source: &mut I) -> Self
+    pub fn build<S>(source: &mut S) -> Self
     where
-        I: ImplicitOctree<T>,
+        S: BuildOctree<T>,
     {
         let mut collector = Collector {
             source,
@@ -170,6 +170,10 @@ impl<T> Octree<T> {
             let node = inline.as_node();
             node.map_leaf(|i| &self.leaves[i.as_usize()])
         })
+    }
+
+    pub fn is_leaf(&self, key: Key) -> bool {
+        self.get(key).unwrap().is_leaf()
     }
 }
 
@@ -203,12 +207,6 @@ impl<T> Node<T> {
             Node::Branch(branch) => Node::Branch(branch),
             Node::Leaf(leaf) => Node::Leaf(f(leaf)),
         }
-    }
-}
-
-impl<T: Copy> Node<&T> {
-    pub fn copied(&self) -> Node<T> {
-        self.map_leaf(|leaf| *leaf)
     }
 }
 
@@ -441,7 +439,7 @@ mod tests {
 
         struct Degenerate;
 
-        impl ImplicitOctree<Dummy> for Degenerate {
+        impl BuildOctree<Dummy> for Degenerate {
             type Tag = u32;
 
             fn root(&mut self) -> Self::Tag {
@@ -473,7 +471,7 @@ mod tests {
 
         struct Uniform;
 
-        impl ImplicitOctree<Quant> for Uniform {
+        impl BuildOctree<Quant> for Uniform {
             type Tag = Quant;
 
             fn root(&mut self) -> Self::Tag {
@@ -515,7 +513,7 @@ mod tests {
 
         struct Uniform;
 
-        impl ImplicitOctree<Quant> for Uniform {
+        impl BuildOctree<Quant> for Uniform {
             type Tag = Quant;
 
             fn root(&mut self) -> Self::Tag {
