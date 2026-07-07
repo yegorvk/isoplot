@@ -17,6 +17,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Action {
     Dev,
+    DevOpt,
 }
 
 static WORKSPACE_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
@@ -31,6 +32,7 @@ fn main() -> Result<()> {
 
     match cli.action {
         Action::Dev => dev()?,
+        Action::DevOpt => dev_opt()?,
     };
 
     Ok(())
@@ -45,6 +47,29 @@ fn dev() -> Result<()> {
             "run",
             "--package",
             "isoplot-bevy",
+            "-F",
+            "bevy/dynamic_linking",
+        ])
+        .status()
+        .expect("Failed to execute cargo run");
+
+    if !status.success() {
+        process::exit(status.code().unwrap_or(1));
+    }
+
+    Ok(())
+}
+
+fn dev_opt() -> Result<()> {
+    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+
+    let status = Command::new(cargo)
+        .current_dir(&*WORKSPACE_PATH)
+        .args(&[
+            "run",
+            "--package",
+            "isoplot-bevy",
+            "--release",
             "-F",
             "bevy/dynamic_linking",
         ])

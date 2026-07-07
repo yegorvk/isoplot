@@ -1,31 +1,57 @@
 use bevy::{
     asset::RenderAssetUsages,
     mesh::{Indices, PrimitiveTopology},
+    platform::collections::HashMap,
     prelude::*,
 };
 use bytemuck::cast_vec;
 use isoplot_mesh::{
-    CentralDifference, DualContouring, ExtractError, ScalarField, SeparateNormals, Translated,
+    CentralDifference, ExtractError, ScalarField, SeparateNormals, TranslateMesh, Translated,
+    dual_contouring::{Chunk, DualContouring, EmptyRegion, Region},
 };
 
 #[derive(Component)]
 pub struct Plot {
     field: Box<dyn ScalarField + Send + Sync>,
+    render_radius: u8,
 }
 
 impl Plot {
-    pub fn new<S>(field: S) -> Self
+    pub fn new<S>(field: S, render_radius: u8) -> Self
     where
         S: ScalarField + Send + Sync + 'static,
     {
         Plot {
             field: Box::new(field),
+            render_radius,
         }
     }
 
     fn build_mesh_data(&self) -> Result<SeparateNormals, ExtractError> {
-        let normal_field = CentralDifference::new(self.field.as_ref(), 1e-4);
-        DualContouring::new(&Translated::new(&normal_field, glam::Vec3::splat(0.5)), 7).extract()
+        let mut world = World::default();
+        let r = self.render_radius as i32;
+
+        let mut sink = SeparateNormals::default();
+
+        for x in -r..=r {
+            for y in -r..=r {
+                for z in -r..=r {
+                    let chunk_offset = glam::ivec3(x, y, z);
+                    let delta = chunk_offset.as_vec3();
+
+                    DualContouring::new(
+                        &Translated::new(&CentralDifference::new(self.field.as_ref(), 1e-4), delta),
+                        7,
+                    )
+                    .extract_with(
+                        &mut world.get_region(chunk_offset),
+                        &mut TranslateMesh::new(&mut sink, delta),
+                    )?;
+                }
+            }
+        }
+
+        Ok(sink)
     }
 }
 
@@ -64,4 +90,29 @@ fn build_bevy_mesh(data: SeparateNormals) -> Mesh {
     mesh.insert_indices(Indices::U32(cast_vec(data.indices)));
 
     mesh
+}
+
+#[derive(Default)]
+struct World {
+    chunks: HashMap<glam::IVec3, Chunk>,
+}
+
+impl World {
+    fn get_region(&mut self, origin: glam::IVec3) -> SimpleRegion<'_> {
+        SimpleRegion {
+            world: self,
+            origin,
+        }
+    }
+}
+
+struct SimpleRegion<'a> {
+    world: &'a mut World,
+    origin: glam::IVec3,
+}
+
+impl<'a> Region for SimpleRegion<'a> {
+    fn get_chunk(&mut self, offset: glam::IVec3) -> Option<&Chunk> {
+        self.world.chunks.get(&offset)
+    }
 }

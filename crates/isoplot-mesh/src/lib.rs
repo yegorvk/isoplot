@@ -1,12 +1,12 @@
-mod grid;
 mod octree;
 mod quant;
-mod tables;
+mod topology;
 mod utils;
 
-use glam::{Vec3, vec3};
+// Public modules
+pub mod dual_contouring;
 
-use crate::grid::AdaptiveGrid;
+use glam::{Vec3, vec3};
 
 /// A scalar field source for isosurface extraction
 pub trait ScalarField {
@@ -45,7 +45,7 @@ impl<'a, S> Translated<&'a S> {
 
 impl<S: ScalarField> ScalarField for Translated<S> {
     fn sample(&self, point: Vec3) -> f32 {
-        self.source.sample(point - self.delta)
+        self.source.sample(point + self.delta)
     }
 }
 
@@ -87,8 +87,8 @@ impl<S: ScalarField> NormalField for CentralDifference<S> {
 
 #[derive(Copy, Clone, Debug)]
 pub struct Vertex {
-    position: Vec3,
-    normal: Vec3,
+    pub position: Vec3,
+    pub normal: Vec3,
 }
 
 impl Vertex {
@@ -96,9 +96,8 @@ impl Vertex {
         Self { position, normal }
     }
 
-    #[inline]
-    pub fn position(&self) -> Vec3 {
-        self.position
+    fn translated(self, offset: Vec3) -> Self {
+        Self::new(self.position + offset, self.normal)
     }
 }
 
@@ -126,6 +125,42 @@ pub trait PopulateMesh {
     }
 }
 
+pub struct TranslateMesh<'a, P> {
+    sink: &'a mut P,
+    offset: Vec3,
+}
+
+impl<'a, P> TranslateMesh<'a, P> {
+    pub fn new(sink: &'a mut P, offset: Vec3) -> Self {
+        Self { sink, offset }
+    }
+}
+
+impl<'a, P> PopulateMesh for TranslateMesh<'a, P>
+where
+    P: PopulateMesh,
+{
+    type Index = P::Index;
+
+    fn add_vertex(&mut self, vertex: Vertex) -> Self::Index {
+        self.sink.add_vertex(vertex.translated(self.offset))
+    }
+
+    fn add_face(&mut self, indices: [Self::Index; 3]) {
+        self.sink.add_face(indices);
+    }
+
+    fn add_triangle(&mut self, vertices: [Vertex; 3]) {
+        let vertices = vertices.map(|v| v.translated(self.offset));
+        self.sink.add_triangle(vertices)
+    }
+
+    fn add_quad(&mut self, vertices: [Vertex; 4]) {
+        let vertices = vertices.map(|v| v.translated(self.offset));
+        self.sink.add_quad(vertices);
+    }
+}
+
 #[derive(Default)]
 pub struct SeparateNormals {
     pub positions: Vec<[f32; 3]>,
@@ -137,7 +172,7 @@ impl PopulateMesh for SeparateNormals {
     type Index = u32;
 
     fn add_vertex(&mut self, vertex: Vertex) -> Self::Index {
-        self.positions.push(vertex.position().to_array());
+        self.positions.push(vertex.position.to_array());
         self.normals.push(vertex.normal.to_array());
         (self.positions.len() - 1) as u32
     }
@@ -150,69 +185,6 @@ impl PopulateMesh for SeparateNormals {
 /// A mesh extraction error
 #[derive(Debug)]
 pub struct ExtractError;
-
-/// Dual contouring algorithm
-pub struct DualContouring<S> {
-    scalar_field: S,
-    max_level: u8,
-}
-
-impl<'a, S> DualContouring<S> {
-    pub fn new(scalar_field: S, max_level: u8) -> Self {
-        Self {
-            scalar_field,
-            max_level,
-        }
-    }
-}
-
-impl<S> DualContouring<S>
-where
-    S: NormalField,
-{
-    pub fn extract_with<P>(self, sink: &mut P) -> Result<(), ExtractError>
-    where
-        P: PopulateMesh,
-    {
-        let grid = AdaptiveGrid::build(&self.scalar_field, self.max_level, |feature| {
-            feature.center_point()
-        });
-
-        grid.for_each_quad(|mut vertices| {
-            if vertices[0] == vertices[1] {
-                vertices[1] = vertices[3];
-                vertices[3] = vertices[2];
-            }
-
-            if vertices[1] == vertices[2] {
-                vertices[2] = vertices[3];
-            }
-
-            let n = self.scalar_field.sample_normal(vertices[0]);
-
-            if should_flip_face(vertices[0], vertices[1], vertices[2], n) {
-                vertices.reverse();
-            }
-
-            sink.add_quad(
-                vertices.map(|position| {
-                    Vertex::new(position, self.scalar_field.sample_normal(position))
-                }),
-            );
-        });
-
-        Ok(())
-    }
-
-    pub fn extract<P>(self) -> Result<P, ExtractError>
-    where
-        P: Default + PopulateMesh,
-    {
-        let mut extractor = P::default();
-        self.extract_with(&mut extractor)?;
-        Ok(extractor)
-    }
-}
 
 fn should_flip_face(a: Vec3, b: Vec3, c: Vec3, n: Vec3) -> bool {
     (b - a).cross(c - a).dot(n) < 0.0

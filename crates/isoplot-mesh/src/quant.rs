@@ -3,7 +3,7 @@ use glam::{U16Vec3, Vec3, u16vec3, vec3};
 
 use crate::{
     octree::{ChildIndex, Payload},
-    tables::Corner,
+    topology::Corner,
 };
 
 /// A quantized point in a unit cube

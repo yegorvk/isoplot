@@ -1,16 +1,98 @@
-use glam::Vec3;
-use std::mem;
+use glam::{IVec3, Vec3};
 
 use crate::{
-    ScalarField,
+    ExtractError, NormalField, PopulateMesh, ScalarField, Vertex,
     octree::{Branch, BuildOctree, ChildIndex, Key, Node, Octree},
     quant::Quant,
-    tables::{
+    should_flip_face,
+    topology::{
         Corner, EdgeKind, FaceKind, edge_corners, for_each_cell_edge, for_each_cell_face,
         for_each_face_edge, for_each_sub_edge, for_each_sub_face,
     },
-    utils::array_transpose,
+    utils::{array_transpose, traverse_ping_pong},
 };
+
+pub struct Chunk {
+    grid: AdaptiveGrid,
+}
+
+/// A region of space with the current chunk at the origin
+pub trait Region {
+    fn get_chunk(&mut self, offset: IVec3) -> Option<&Chunk>;
+}
+
+pub struct EmptyRegion;
+
+impl Region for EmptyRegion {
+    fn get_chunk(&mut self, _: IVec3) -> Option<&Chunk> {
+        None
+    }
+}
+
+/// Dual contouring algorithm
+pub struct DualContouring<S> {
+    scalar_field: S,
+    max_level: u8,
+}
+
+impl<S> DualContouring<S> {
+    pub fn new(scalar_field: S, max_level: u8) -> Self {
+        Self {
+            scalar_field,
+            max_level,
+        }
+    }
+}
+
+impl<S> DualContouring<S>
+where
+    S: NormalField,
+{
+    pub fn extract_with<R, P>(&self, region: &mut R, sink: &mut P) -> Result<(), ExtractError>
+    where
+        R: Region,
+        P: PopulateMesh,
+    {
+        let grid = AdaptiveGrid::build(&self.scalar_field, self.max_level, |feature| {
+            feature.center_point()
+        });
+
+        grid.for_each_quad(|mut vertices| {
+            if vertices[0] == vertices[1] {
+                vertices[1] = vertices[3];
+                vertices[3] = vertices[2];
+            }
+
+            if vertices[1] == vertices[2] {
+                vertices[2] = vertices[3];
+            }
+
+            let n = self.scalar_field.sample_normal(vertices[0]);
+
+            if should_flip_face(vertices[0], vertices[1], vertices[2], n) {
+                vertices.reverse();
+            }
+
+            sink.add_quad(
+                vertices.map(|position| {
+                    Vertex::new(position, self.scalar_field.sample_normal(position))
+                }),
+            );
+        });
+
+        Ok(())
+    }
+
+    pub fn extract<R, P>(&self, region: &mut R) -> Result<P, ExtractError>
+    where
+        R: Region,
+        P: Default + PopulateMesh,
+    {
+        let mut extractor = P::default();
+        self.extract_with(region, &mut extractor)?;
+        Ok(extractor)
+    }
+}
 
 struct OctreeSource<S, P> {
     scalar_field: S,
@@ -83,7 +165,8 @@ impl Feature {
     }
 }
 
-pub struct AdaptiveGrid {
+#[derive(Debug)]
+struct AdaptiveGrid {
     octree: Octree<Feature>,
 }
 
@@ -262,20 +345,4 @@ impl Edges {
 
         edges.push(edge);
     }
-}
-
-fn traverse_ping_pong<T, F>(roots: Vec<T>, mut f: F) -> Vec<T>
-where
-    F: FnMut(&[T], &mut Vec<T>),
-{
-    let mut current = roots;
-    let mut next = Vec::new();
-
-    while !current.is_empty() {
-        next.clear();
-        f(&current, &mut next);
-        mem::swap(&mut current, &mut next);
-    }
-
-    next
 }

@@ -4,7 +4,11 @@ mod plot;
 use std::f32::consts::PI;
 
 use bevy::{
-    pbr::wireframe::{Wireframe, WireframePlugin},
+    anti_alias::taa::TemporalAntiAliasing,
+    pbr::{
+        ScreenSpaceAmbientOcclusion,
+        wireframe::{Wireframe, WireframePlugin},
+    },
     prelude::*,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
@@ -33,6 +37,15 @@ impl ScalarField for EllipticParaboloid {
     }
 }
 
+struct Waves2;
+
+impl ScalarField for Waves2 {
+    fn sample(&self, point: glam::Vec3) -> f32 {
+        let [x, y, z] = point.to_array();
+        (x + y).sin() + (1.4 * x - 0.9 * y).sin() + (2.3 * x + 1.7 * y).sin() - z
+    }
+}
+
 fn main() {
     App::new()
         .add_systems(Startup, setup)
@@ -51,21 +64,22 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
         base_color: Color::LinearRgba(LinearRgba::GREEN),
         perceptual_roughness: 0.5,
         cull_mode: None,
+        double_sided: true,
         ..default()
     });
 
     commands.spawn((
-        Plot::new(EllipticParaboloid::new(0.4, 0.4)),
+        Plot::new(EllipticParaboloid::new(0.4, 0.4), 1),
         MeshMaterial3d(simple_material.clone()),
-        Wireframe,
-        Transform::from_xyz(-0.5, -0.5, -0.5).with_scale(Vec3::splat(3.0)),
+        //Wireframe,
+        Transform::from_scale(Vec3::splat(3.0)),
     ));
 
     commands.spawn((
-        Plot::new(EllipticParaboloid::new(0.1, 0.1)),
-        MeshMaterial3d(simple_material),
-        Wireframe,
-        Transform::from_xyz(5.0, -0.5, -0.5).with_scale(Vec3::splat(5.0)),
+        Plot::new(Waves2, 1),
+        MeshMaterial3d(simple_material.clone()),
+        //Wireframe,
+        Transform::from_xyz(8.0, 0.0, 0.0).with_scale(Vec3::splat(3.0)),
     ));
 
     commands.spawn((
@@ -85,6 +99,16 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
         Camera3d::default(),
         Transform::from_xyz(0.0, 0.4, 1.0).looking_to(Dir3::NEG_Z, Dir3::Y),
         CameraControls::default(),
+        ScreenSpaceAmbientOcclusion {
+            quality_level: bevy::pbr::ScreenSpaceAmbientOcclusionQualityLevel::High,
+            ..Default::default()
+        },
+        TemporalAntiAliasing { reset: false },
+        Msaa::Off,
+        AmbientLight {
+            brightness: 120.0,
+            ..default()
+        },
     ));
 }
 

@@ -1,2 +1,3 @@
 [alias]
 dev = "run --package xtask -- dev"
+dev-opt = "run --package xtask -- dev-opt"

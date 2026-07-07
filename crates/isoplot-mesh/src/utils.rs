@@ -43,3 +43,19 @@ where
 unsafe fn assume_init_array<T, const N: usize>(array: [MaybeUninit<T>; N]) -> [T; N] {
     array.map(|elem| unsafe { elem.assume_init() })
 }
+
+pub(crate) fn traverse_ping_pong<T, F>(roots: Vec<T>, mut f: F) -> Vec<T>
+where
+    F: FnMut(&[T], &mut Vec<T>),
+{
+    let mut current = roots;
+    let mut next = Vec::new();
+
+    while !current.is_empty() {
+        next.clear();
+        f(&current, &mut next);
+        mem::swap(&mut current, &mut next);
+    }
+
+    next
+}
