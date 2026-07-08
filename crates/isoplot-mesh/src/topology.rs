@@ -1,3 +1,4 @@
+use bilge::arbitrary_int::{u1, u2};
 use std::iter;
 
 #[derive(Copy, Clone, Debug)]
@@ -29,6 +30,10 @@ impl FaceKind {
             FaceKind::Z => [EdgeKind::X, EdgeKind::Y],
         }
     }
+
+    const fn as_u2(self) -> u2 {
+        u2::new(self as u8)
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -36,6 +41,12 @@ pub enum EdgeKind {
     X = 0,
     Y = 1,
     Z = 2,
+}
+
+impl EdgeKind {
+    const fn as_u2(self) -> u2 {
+        u2::new(self as u8)
+    }
 }
 
 const fn c(corner: u8) -> Corner {
@@ -182,4 +193,32 @@ where
         let sub_edges = [refine(&cell, indices[0]), refine(&cell, indices[1])];
         (cell, sub_edges)
     })
+}
+
+/// A cube face index (from 0 to 5 inclusive)
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct FaceIndex(u8);
+
+impl FaceIndex {
+    const fn new(kind: FaceKind, which: u1) -> Self {
+        Self(kind.as_u2().value() * 2 + which.value())
+    }
+
+    pub(crate) const fn as_u8(self) -> u8 {
+        self.0
+    }
+}
+
+/// A cube edge index (from 0 to 11 inclusive)
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct EdgeIndex(u8);
+
+impl EdgeIndex {
+    const fn new(kind: EdgeKind, which: u1) -> Self {
+        Self(kind.as_u2().value() * 2 + which.value())
+    }
+
+    pub(crate) const fn as_u8(self) -> u8 {
+        self.0
+    }
 }

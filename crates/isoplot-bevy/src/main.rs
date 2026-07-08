@@ -71,14 +71,14 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
     commands.spawn((
         Plot::new(EllipticParaboloid::new(0.4, 0.4), 1),
         MeshMaterial3d(simple_material.clone()),
-        //Wireframe,
+        Wireframe,
         Transform::from_scale(Vec3::splat(3.0)),
     ));
 
     commands.spawn((
         Plot::new(Waves2, 1),
         MeshMaterial3d(simple_material.clone()),
-        //Wireframe,
+        Wireframe,
         Transform::from_xyz(8.0, 0.0, 0.0).with_scale(Vec3::splat(3.0)),
     ));
 

@@ -1,3 +1,4 @@
+use derive_where::derive_where;
 use glam::{IVec3, Vec3};
 
 use crate::{
@@ -12,20 +13,35 @@ use crate::{
     utils::{array_transpose, traverse_ping_pong},
 };
 
+// Public exports
+pub use crate::topology::{EdgeIndex, FaceIndex};
+
+#[derive(Debug)]
 pub struct Chunk {
     grid: AdaptiveGrid,
 }
 
-/// A region of space with the current chunk at the origin
-pub trait Region {
-    fn get_chunk(&mut self, offset: IVec3) -> Option<&Chunk>;
+#[derive(Debug, Default)]
+pub struct Neighborhood<'a> {
+    edges: [Option<&'a Chunk>; 12],
+    faces: [Option<&'a Chunk>; 6],
 }
 
-pub struct EmptyRegion;
+impl<'a> Neighborhood<'a> {
+    pub fn insert_face(&mut self, index: FaceIndex, chunk: &'a Chunk) {
+        self.faces[index.as_u8() as usize] = Some(chunk);
+    }
 
-impl Region for EmptyRegion {
-    fn get_chunk(&mut self, _: IVec3) -> Option<&Chunk> {
-        None
+    pub fn insert_edge(&mut self, index: EdgeIndex, chunk: &'a Chunk) {
+        self.edges[index.as_u8() as usize] = Some(chunk);
+    }
+
+    fn get_face(&self, index: FaceIndex) -> Option<&'a Chunk> {
+        self.faces[index.as_u8() as usize]
+    }
+
+    fn get_edge(&self, index: EdgeIndex) -> Option<&'a Chunk> {
+        self.edges[index.as_u8() as usize]
     }
 }
 
@@ -48,9 +64,8 @@ impl<S> DualContouring<S>
 where
     S: NormalField,
 {
-    pub fn extract_with<R, P>(&self, region: &mut R, sink: &mut P) -> Result<(), ExtractError>
+    pub fn extract_chunk<P>(&self, sink: &mut P) -> Result<Chunk, ExtractError>
     where
-        R: Region,
         P: PopulateMesh,
     {
         let grid = AdaptiveGrid::build(&self.scalar_field, self.max_level, |feature| {
@@ -80,17 +95,7 @@ where
             );
         });
 
-        Ok(())
-    }
-
-    pub fn extract<R, P>(&self, region: &mut R) -> Result<P, ExtractError>
-    where
-        R: Region,
-        P: Default + PopulateMesh,
-    {
-        let mut extractor = P::default();
-        self.extract_with(region, &mut extractor)?;
-        Ok(extractor)
+        Ok(Chunk { grid })
     }
 }
 
@@ -206,7 +211,7 @@ impl AdaptiveGrid {
         });
     }
 
-    fn for_each_minimal_edge<F>(&self, mut f: F)
+    fn for_each_minimal_edge<F>(&self, f: F)
     where
         F: FnMut(EdgeKind, [Key; 4]),
     {
@@ -242,23 +247,43 @@ impl AdaptiveGrid {
             }
         };
 
-        for (kind, faces) in faces.into_axes() {
+        MinimalEdges::new(faces, edges).traverse(|key| self.octree.is_leaf(*key), refine_node, f)
+    }
+}
+
+struct MinimalEdges<T> {
+    faces: Faces<T>,
+    edges: Edges<T>,
+}
+
+impl<T: Copy> MinimalEdges<T> {
+    fn new(faces: Faces<T>, edges: Edges<T>) -> Self {
+        Self { faces, edges }
+    }
+
+    fn traverse<L, R, F>(mut self, is_leaf: L, refine: R, mut f: F)
+    where
+        L: Fn(&T) -> bool,
+        R: Fn(&T, Corner) -> Option<T>,
+        F: FnMut(EdgeKind, [T; 4]),
+    {
+        for (kind, faces) in self.faces.into_axes() {
             traverse_ping_pong(faces, |current, next| {
                 for keys in current.iter().copied() {
-                    if keys.iter().all(|key| self.octree.is_leaf(*key)) {
+                    if keys.iter().all(|key| is_leaf(key)) {
                         continue;
                     }
 
-                    for_each_sub_face(keys, kind, refine_node, |sub_face| {
+                    for_each_sub_face(keys, kind, &refine, |sub_face| {
                         if let Some(sub_face) = array_transpose(sub_face) {
                             next.push(sub_face);
                         }
                     });
 
                     for edge_kind in kind.tangent_edges() {
-                        for_each_face_edge(keys, (kind, edge_kind), refine_node, |edge| {
+                        for_each_face_edge(keys, (kind, edge_kind), &refine, |edge| {
                             if let Some(edge) = array_transpose(edge) {
-                                edges.insert(edge_kind, edge);
+                                self.edges.insert(edge_kind, edge);
                             }
                         });
                     }
@@ -266,15 +291,15 @@ impl AdaptiveGrid {
             });
         }
 
-        for (kind, edges) in edges.into_axes() {
+        for (kind, edges) in self.edges.into_axes() {
             traverse_ping_pong(edges, |current, next| {
                 for keys in current.iter().copied() {
-                    if keys.iter().all(|key| self.octree.is_leaf(*key)) {
+                    if keys.iter().all(|key| is_leaf(key)) {
                         f(kind, keys);
                         continue;
                     }
 
-                    for_each_sub_edge(keys, kind, refine_node, |sub_edge| {
+                    for_each_sub_edge(keys, kind, &refine, |sub_edge| {
                         if let Some(edge) = array_transpose(sub_edge) {
                             next.push(edge);
                         }
@@ -285,24 +310,25 @@ impl AdaptiveGrid {
     }
 }
 
-#[derive(Debug, Default)]
-struct Faces {
-    x: Vec<[Key; 2]>,
-    y: Vec<[Key; 2]>,
-    z: Vec<[Key; 2]>,
+#[derive_where(Default)]
+#[derive(Debug)]
+struct Faces<T> {
+    x: Vec<[T; 2]>,
+    y: Vec<[T; 2]>,
+    z: Vec<[T; 2]>,
 }
 
-impl Faces {
+impl<T> Faces<T> {
     fn for_each_axis_mut<F>(&mut self, mut f: F)
     where
-        F: FnMut(FaceKind, &mut Vec<[Key; 2]>),
+        F: FnMut(FaceKind, &mut Vec<[T; 2]>),
     {
         f(FaceKind::X, &mut self.x);
         f(FaceKind::Y, &mut self.y);
         f(FaceKind::Z, &mut self.z);
     }
 
-    fn into_axes(self) -> [(FaceKind, Vec<[Key; 2]>); 3] {
+    fn into_axes(self) -> [(FaceKind, Vec<[T; 2]>); 3] {
         [
             (FaceKind::X, self.x),
             (FaceKind::Y, self.y),
@@ -311,24 +337,25 @@ impl Faces {
     }
 }
 
-#[derive(Debug, Default)]
-struct Edges {
-    x: Vec<[Key; 4]>,
-    y: Vec<[Key; 4]>,
-    z: Vec<[Key; 4]>,
+#[derive_where(Default)]
+#[derive(Debug)]
+struct Edges<T> {
+    x: Vec<[T; 4]>,
+    y: Vec<[T; 4]>,
+    z: Vec<[T; 4]>,
 }
 
-impl Edges {
+impl<T> Edges<T> {
     fn for_each_axis_mut<F>(&mut self, mut f: F)
     where
-        F: FnMut(EdgeKind, &mut Vec<[Key; 4]>),
+        F: FnMut(EdgeKind, &mut Vec<[T; 4]>),
     {
         f(EdgeKind::X, &mut self.x);
         f(EdgeKind::Y, &mut self.y);
         f(EdgeKind::Z, &mut self.z);
     }
 
-    fn into_axes(self) -> [(EdgeKind, Vec<[Key; 4]>); 3] {
+    fn into_axes(self) -> [(EdgeKind, Vec<[T; 4]>); 3] {
         [
             (EdgeKind::X, self.x),
             (EdgeKind::Y, self.y),
@@ -336,7 +363,7 @@ impl Edges {
         ]
     }
 
-    fn insert(&mut self, kind: EdgeKind, edge: [Key; 4]) {
+    fn insert(&mut self, kind: EdgeKind, edge: [T; 4]) {
         let edges = match kind {
             EdgeKind::X => &mut self.x,
             EdgeKind::Y => &mut self.y,
