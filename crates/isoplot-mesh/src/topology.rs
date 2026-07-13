@@ -1,5 +1,5 @@
-use bilge::arbitrary_int::{u1, u2};
-use std::iter;
+use glam::IVec3;
+use std::{array, iter, ops::Index};
 
 #[derive(Copy, Clone, Debug)]
 pub struct Corner(u8);
@@ -30,10 +30,6 @@ impl FaceKind {
             FaceKind::Z => [EdgeKind::X, EdgeKind::Y],
         }
     }
-
-    const fn as_u2(self) -> u2 {
-        u2::new(self as u8)
-    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -43,9 +39,18 @@ pub enum EdgeKind {
     Z = 2,
 }
 
-impl EdgeKind {
-    const fn as_u2(self) -> u2 {
-        u2::new(self as u8)
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+enum Side {
+    Negative = 0,
+    Positive = 1,
+}
+
+impl Side {
+    const fn opposite(self) -> Self {
+        match self {
+            Side::Negative => Side::Positive,
+            Side::Positive => Side::Negative,
+        }
     }
 }
 
@@ -85,6 +90,132 @@ where
     }
 }
 
+/// An exterior face index
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+struct FaceIndex {
+    /// The face index within the `CELL_EDGES` array
+    ///
+    /// Exterior faces are dual to interior edges during subdivision,
+    /// so we can represent exterior faces using an index into the
+    /// `CELL_EDGES` array (when flattened).
+    idx: u8,
+}
+
+impl FaceIndex {
+    const fn new(kind: FaceKind, which: u8) -> Self {
+        // There are 2 faces per normal direction.
+        assert!(which < 2);
+
+        Self {
+            idx: kind as u8 * 2 + which,
+        }
+    }
+
+    fn for_each<F>(mut f: F)
+    where
+        F: FnMut(FaceIndex),
+    {
+        for idx in 0..6u8 {
+            f(Self { idx })
+        }
+    }
+
+    const fn kind(self) -> FaceKind {
+        match self.idx / 2 {
+            0 => FaceKind::X,
+            1 => FaceKind::Y,
+            _ => FaceKind::Z,
+        }
+    }
+
+    const fn as_ivec3(self) -> IVec3 {
+        let side = (self.idx % 2) as i32 * 2 - 1;
+
+        match self.idx / 2 {
+            0 => IVec3::new(side, 0, 0),
+            1 => IVec3::new(0, side, 0),
+            _ => IVec3::new(0, 0, side),
+        }
+    }
+
+    const fn side(self) -> Side {
+        if self.idx.is_multiple_of(2) {
+            Side::Negative
+        } else {
+            Side::Positive
+        }
+    }
+}
+
+/// An exterior edge index
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+struct EdgeIndex {
+    /// The edge index within the `CELL_FACES` array
+    ///
+    /// Exterior edges are dual to interior faces during subdivision,
+    /// so we can represent exterior edges using an index into the
+    /// `CELL_FACES` array (when flattened).
+    idx: u8,
+}
+
+impl EdgeIndex {
+    fn for_each<F>(mut f: F)
+    where
+        F: FnMut(EdgeIndex),
+    {
+        for idx in 0..12u8 {
+            f(Self { idx })
+        }
+    }
+
+    const fn kind(self) -> EdgeKind {
+        match self.idx / 4 {
+            0 => EdgeKind::X,
+            1 => EdgeKind::Y,
+            _ => EdgeKind::Z,
+        }
+    }
+
+    const fn as_ivec3(self) -> IVec3 {
+        let [a, b] = self.faces();
+        let (a, b) = (a.as_ivec3(), b.as_ivec3());
+        IVec3::new(a.x + b.x, a.y + b.y, a.z + b.z)
+    }
+}
+
+const fn face_index_x(which: u8) -> FaceIndex {
+    FaceIndex::new(FaceKind::X, which)
+}
+
+const fn face_index_y(which: u8) -> FaceIndex {
+    FaceIndex::new(FaceKind::Y, which)
+}
+
+const fn face_index_z(which: u8) -> FaceIndex {
+    FaceIndex::new(FaceKind::Z, which)
+}
+
+const CELL_EDGE_FACES: [[FaceIndex; 2]; 12] = [
+    [face_index_y(0), face_index_z(0)],
+    [face_index_y(1), face_index_z(0)],
+    [face_index_y(1), face_index_z(1)],
+    [face_index_y(0), face_index_z(1)],
+    [face_index_x(0), face_index_z(0)],
+    [face_index_x(1), face_index_z(0)],
+    [face_index_x(1), face_index_z(1)],
+    [face_index_x(0), face_index_z(1)],
+    [face_index_x(0), face_index_y(0)],
+    [face_index_x(1), face_index_y(0)],
+    [face_index_x(1), face_index_y(1)],
+    [face_index_x(0), face_index_y(1)],
+];
+
+impl EdgeIndex {
+    const fn faces(self) -> [FaceIndex; 2] {
+        CELL_EDGE_FACES[self.idx as usize]
+    }
+}
+
 const SUB_FACES: [[[Corner; 2]; 4]; 3] = [
     [[c(1), c(0)], [c(3), c(2)], [c(7), c(6)], [c(5), c(4)]],
     [[c(2), c(0)], [c(3), c(1)], [c(7), c(5)], [c(6), c(4)]],
@@ -101,6 +232,7 @@ where
     }
 }
 
+#[allow(clippy::type_complexity)]
 const FACE_EDGES: [[[[(u8, Corner); 4]; 2]; 2]; 3] = [
     [
         [
@@ -195,30 +327,80 @@ where
     })
 }
 
-/// A cube face index (from 0 to 5 inclusive)
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub struct FaceIndex(u8);
-
-impl FaceIndex {
-    const fn new(kind: FaceKind, which: u1) -> Self {
-        Self(kind.as_u2().value() * 2 + which.value())
-    }
-
-    pub(crate) const fn as_u8(self) -> u8 {
-        self.0
+const fn edge_seam_slot(a: Side, b: Side) -> usize {
+    match (a, b) {
+        (Side::Negative, Side::Negative) => 0,
+        (Side::Positive, Side::Negative) => 1,
+        (Side::Positive, Side::Positive) => 2,
+        (Side::Negative, Side::Positive) => 3,
     }
 }
 
-/// A cube edge index (from 0 to 11 inclusive)
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub struct EdgeIndex(u8);
+#[derive(Debug, Default)]
+pub struct Neighbors<T> {
+    faces: [T; 6],
+    edges: [T; 12],
+}
 
-impl EdgeIndex {
-    const fn new(kind: EdgeKind, which: u1) -> Self {
-        Self(kind.as_u2().value() * 2 + which.value())
+impl<T> Neighbors<T> {
+    pub fn from_fn<F>(mut f: F) -> Self
+    where
+        F: FnMut(IVec3) -> T,
+    {
+        Self {
+            edges: array::from_fn(|i| f(EdgeIndex { idx: i as u8 }.as_ivec3())),
+            faces: array::from_fn(|i| f(FaceIndex { idx: i as u8 }.as_ivec3())),
+        }
+    }
+}
+
+impl<T: Copy> Neighbors<T> {
+    pub fn for_each_face_seam<F>(&self, this: T, mut f: F)
+    where
+        F: FnMut(FaceKind, [(IVec3, T); 2]),
+    {
+        FaceIndex::for_each(|index| {
+            f(
+                index.kind(),
+                match index.side() {
+                    Side::Negative => [(index.as_ivec3(), self[index]), (IVec3::ZERO, this)],
+                    Side::Positive => [(IVec3::ZERO, this), (index.as_ivec3(), self[index])],
+                },
+            );
+        });
     }
 
-    pub(crate) const fn as_u8(self) -> u8 {
-        self.0
+    pub fn for_each_edge_seam<F>(&self, this: T, mut f: F)
+    where
+        F: FnMut(EdgeKind, [(IVec3, T); 4]),
+    {
+        EdgeIndex::for_each(|index| {
+            let [face_a, face_b] = index.faces();
+            let (side_a, side_b) = (face_a.side(), face_b.side());
+
+            let mut seam = [(IVec3::ZERO, this); 4];
+            seam[edge_seam_slot(side_a, side_b)] = (index.as_ivec3(), self[index]);
+            seam[edge_seam_slot(side_a, side_b.opposite())] = (face_a.as_ivec3(), self[face_a]);
+            seam[edge_seam_slot(side_a.opposite(), side_b)] = (face_b.as_ivec3(), self[face_b]);
+            seam[edge_seam_slot(side_a.opposite(), side_b.opposite())] = (IVec3::ZERO, this);
+
+            f(index.kind(), seam);
+        });
+    }
+}
+
+impl<T> Index<FaceIndex> for Neighbors<T> {
+    type Output = T;
+
+    fn index(&self, index: FaceIndex) -> &Self::Output {
+        &self.faces[index.idx as usize]
+    }
+}
+
+impl<T> Index<EdgeIndex> for Neighbors<T> {
+    type Output = T;
+
+    fn index(&self, index: EdgeIndex) -> &Self::Output {
+        &self.edges[index.idx as usize]
     }
 }

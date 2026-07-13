@@ -117,19 +117,19 @@ where
     type Tag = I::Tag;
 
     fn root(&mut self) -> Self::Tag {
-        I::root(&mut self.source)
+        I::root(self.source)
     }
 
     fn is_leaf(&mut self, tag: Self::Tag) -> bool {
-        I::is_leaf(&mut self.source, tag)
+        I::is_leaf(self.source, tag)
     }
 
     fn refine(&mut self, tag: Self::Tag, which: ChildIndex) -> Option<Self::Tag> {
-        I::refine(&mut self.source, tag, which)
+        I::refine(self.source, tag, which)
     }
 
     fn place_leaf(&mut self, tag: Self::Tag) -> u31 {
-        self.leaves.push(I::place_leaf(&mut self.source, tag));
+        self.leaves.push(I::place_leaf(self.source, tag));
         u31::new(self.leaves.len() as u32 - 1)
     }
 }
@@ -181,6 +181,11 @@ impl<T> Octree<T> {
 #[repr(transparent)]
 pub struct Key(u23);
 
+impl Key {
+    /// The key of the root node
+    pub const ROOT: Self = Self(u23::new(0));
+}
+
 #[derive(Copy, Clone, Debug)]
 pub enum Node<T> {
     Branch(Branch),
@@ -190,6 +195,13 @@ pub enum Node<T> {
 impl<T> Node<T> {
     pub fn is_leaf(&self) -> bool {
         matches!(self, Node::Leaf(_))
+    }
+
+    pub fn as_leaf(&self) -> Option<&T> {
+        match self {
+            Node::Leaf(leaf) => Some(leaf),
+            _ => None,
+        }
     }
 
     pub fn unwrap_leaf(self) -> T {
@@ -365,7 +377,7 @@ struct RawBranch {
     /// are present, in order.
     mask: u8,
 
-    /// Offset (in nodes) to the first child in the next level
+    /// Offset (in nodes) of the first present child in the next level
     offset: u23,
 }
 
@@ -538,7 +550,6 @@ mod tests {
 
         for which in ChildIndex::enumerate() {
             let child = octree[root.child(which).unwrap()];
-            eprintln!("{:?} {:?}", which, child);
 
             assert_eq!(
                 child.as_leaf().unwrap().get(),

@@ -6,8 +6,8 @@ use bevy::{
 };
 use bytemuck::cast_vec;
 use isoplot_mesh::{
-    CentralDifference, ExtractError, ScalarField, SeparateNormals, TranslateMesh, Translated,
-    dual_contouring::{Chunk, DualContouring, Neighborhood},
+    CentralDifference, ExtractError, ScalarField, SeparateNormals, TranslateMesh,
+    dual_contouring::{Chunk, DualContouring},
 };
 
 #[derive(Component)]
@@ -36,14 +36,24 @@ impl Plot {
         for x in -r..=r {
             for y in -r..=r {
                 for z in -r..=r {
-                    let chunk_offset = glam::ivec3(x, y, z);
-                    let delta = chunk_offset.as_vec3();
+                    let i_offset = glam::ivec3(x, y, z);
+                    let offset = i_offset.as_vec3();
 
-                    DualContouring::new(
-                        &Translated::new(&CentralDifference::new(self.field.as_ref(), 1e-4), delta),
-                        7,
-                    )
-                    .extract_chunk(&mut TranslateMesh::new(&mut sink, delta))?;
+                    let source =
+                        CentralDifference::new(self.field.as_ref(), 1e-4).translated(offset);
+
+                    let dc = DualContouring::new(&source, 7);
+
+                    let mut chunk_sink = TranslateMesh::new(&mut sink, offset);
+                    let chunk = dc.extract_chunk(&mut chunk_sink)?;
+
+                    dc.extract_seam(
+                        &chunk,
+                        |offset| world.chunks.get(&(i_offset + offset)),
+                        &mut chunk_sink,
+                    )?;
+
+                    world.chunks.insert(i_offset, chunk);
                 }
             }
         }
@@ -93,23 +103,3 @@ fn build_bevy_mesh(data: SeparateNormals) -> Mesh {
 struct World {
     chunks: HashMap<glam::IVec3, Chunk>,
 }
-
-impl World {
-    fn get_region(&mut self, origin: glam::IVec3) -> View<'_> {
-        View {
-            world: self,
-            origin,
-        }
-    }
-}
-
-struct View<'a> {
-    world: &'a mut World,
-    origin: glam::IVec3,
-}
-
-// impl<'a> Neighborhood for View<'a> {
-//     fn get_chunk(&self, offset: glam::IVec3) -> Option<&Chunk> {
-//         self.world.chunks.get(&(self.origin + offset))
-//     }
-// }

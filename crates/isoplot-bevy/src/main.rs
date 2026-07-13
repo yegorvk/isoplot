@@ -19,6 +19,7 @@ use crate::{
 };
 use isoplot_mesh::ScalarField;
 
+#[allow(dead_code)]
 struct EllipticParaboloid {
     pub a: f32,
     pub b: f32,
@@ -37,12 +38,22 @@ impl ScalarField for EllipticParaboloid {
     }
 }
 
+#[allow(dead_code)]
 struct Waves2;
 
 impl ScalarField for Waves2 {
     fn sample(&self, point: glam::Vec3) -> f32 {
         let [x, y, z] = point.to_array();
         (x + y).sin() + (1.4 * x - 0.9 * y).sin() + (2.3 * x + 1.7 * y).sin() - z
+    }
+}
+
+#[allow(dead_code)]
+struct Sphere;
+
+impl ScalarField for Sphere {
+    fn sample(&self, point: glam::Vec3) -> f32 {
+        point.length() - 3.0
     }
 }
 
@@ -64,7 +75,6 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
         base_color: Color::LinearRgba(LinearRgba::GREEN),
         perceptual_roughness: 0.5,
         cull_mode: None,
-        double_sided: true,
         ..default()
     });
 

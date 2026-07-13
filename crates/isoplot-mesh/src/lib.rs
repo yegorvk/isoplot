@@ -12,6 +12,13 @@ use glam::{Vec3, vec3};
 pub trait ScalarField {
     /// Samples the scalar field at the specified point.
     fn sample(&self, point: Vec3) -> f32;
+
+    fn translated(self, offset: Vec3) -> TranslateField<Self>
+    where
+        Self: Sized,
+    {
+        TranslateField::new(self, offset)
+    }
 }
 
 impl<S: ?Sized + ScalarField> ScalarField for &S {
@@ -32,26 +39,26 @@ impl<S: ?Sized + NormalField> NormalField for &S {
     }
 }
 
-pub struct Translated<S> {
+pub struct TranslateField<S> {
     source: S,
-    delta: Vec3,
+    offset: Vec3,
 }
 
-impl<'a, S> Translated<&'a S> {
-    pub fn new(source: &'a S, delta: Vec3) -> Self {
-        Self { source, delta }
+impl<S> TranslateField<S> {
+    pub fn new(source: S, offset: Vec3) -> Self {
+        Self { source, offset }
     }
 }
 
-impl<S: ScalarField> ScalarField for Translated<S> {
+impl<S: ScalarField> ScalarField for TranslateField<S> {
     fn sample(&self, point: Vec3) -> f32 {
-        self.source.sample(point + self.delta)
+        self.source.sample(point + self.offset)
     }
 }
 
-impl<S: NormalField> NormalField for Translated<S> {
+impl<S: NormalField> NormalField for TranslateField<S> {
     fn sample_normal(&self, point: Vec3) -> Vec3 {
-        self.source.sample_normal(point - self.delta)
+        self.source.sample_normal(point + self.offset)
     }
 }
 

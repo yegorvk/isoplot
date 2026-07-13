@@ -43,7 +43,7 @@ fn dev() -> Result<()> {
 
     let status = Command::new(cargo)
         .current_dir(&*WORKSPACE_PATH)
-        .args(&[
+        .args([
             "run",
             "--package",
             "isoplot-bevy",
@@ -65,7 +65,8 @@ fn dev_opt() -> Result<()> {
 
     let status = Command::new(cargo)
         .current_dir(&*WORKSPACE_PATH)
-        .args(&[
+        .env("RUSTFLAGS", "-C target-cpu=native")
+        .args([
             "run",
             "--package",
             "isoplot-bevy",

@@ -1,3 +1,5 @@
+use std::array;
+
 use derive_where::derive_where;
 use glam::{IVec3, Vec3};
 
@@ -7,43 +9,18 @@ use crate::{
     quant::Quant,
     should_flip_face,
     topology::{
-        Corner, EdgeKind, FaceKind, edge_corners, for_each_cell_edge, for_each_cell_face,
-        for_each_face_edge, for_each_sub_edge, for_each_sub_face,
+        Corner, EdgeKind, FaceKind, Neighbors, edge_corners, for_each_cell_edge,
+        for_each_cell_face, for_each_face_edge, for_each_sub_edge, for_each_sub_face,
     },
     utils::{array_transpose, traverse_ping_pong},
 };
 
-// Public exports
-pub use crate::topology::{EdgeIndex, FaceIndex};
+pub trait World {
+    fn get_neighbor(&self, this: &Chunk, offset: IVec3) -> Option<&Chunk>;
+}
 
 #[derive(Debug)]
-pub struct Chunk {
-    grid: AdaptiveGrid,
-}
-
-#[derive(Debug, Default)]
-pub struct Neighborhood<'a> {
-    edges: [Option<&'a Chunk>; 12],
-    faces: [Option<&'a Chunk>; 6],
-}
-
-impl<'a> Neighborhood<'a> {
-    pub fn insert_face(&mut self, index: FaceIndex, chunk: &'a Chunk) {
-        self.faces[index.as_u8() as usize] = Some(chunk);
-    }
-
-    pub fn insert_edge(&mut self, index: EdgeIndex, chunk: &'a Chunk) {
-        self.edges[index.as_u8() as usize] = Some(chunk);
-    }
-
-    fn get_face(&self, index: FaceIndex) -> Option<&'a Chunk> {
-        self.faces[index.as_u8() as usize]
-    }
-
-    fn get_edge(&self, index: EdgeIndex) -> Option<&'a Chunk> {
-        self.edges[index.as_u8() as usize]
-    }
-}
+pub struct Chunk(AdaptiveGrid);
 
 /// Dual contouring algorithm
 pub struct DualContouring<S> {
@@ -72,30 +49,51 @@ where
             feature.center_point()
         });
 
-        grid.for_each_quad(|mut vertices| {
-            if vertices[0] == vertices[1] {
-                vertices[1] = vertices[3];
-                vertices[3] = vertices[2];
-            }
+        grid.for_each_interior_quad(|vertices| self.add_quad(vertices, sink));
+        Ok(Chunk(grid))
+    }
 
-            if vertices[1] == vertices[2] {
-                vertices[2] = vertices[3];
-            }
+    pub fn extract_seam<'a, N, P>(
+        &self,
+        this: &Chunk,
+        mut peek: N,
+        sink: &mut P,
+    ) -> Result<(), ExtractError>
+    where
+        N: FnMut(IVec3) -> Option<&'a Chunk>,
+        P: PopulateMesh,
+    {
+        this.0.for_each_seam_quad(
+            |offset| peek(offset).map(|chunk| &chunk.0),
+            |vertices| self.add_quad(vertices, sink),
+        );
 
-            let n = self.scalar_field.sample_normal(vertices[0]);
+        Ok(())
+    }
 
-            if should_flip_face(vertices[0], vertices[1], vertices[2], n) {
-                vertices.reverse();
-            }
+    fn add_quad<P>(&self, mut vertices: [Vec3; 4], sink: &mut P)
+    where
+        P: PopulateMesh,
+    {
+        if vertices[0] == vertices[1] {
+            vertices[1] = vertices[3];
+            vertices[3] = vertices[2];
+        }
 
-            sink.add_quad(
-                vertices.map(|position| {
-                    Vertex::new(position, self.scalar_field.sample_normal(position))
-                }),
-            );
-        });
+        if vertices[1] == vertices[2] {
+            vertices[2] = vertices[3];
+        }
 
-        Ok(Chunk { grid })
+        let n = self.scalar_field.sample_normal(vertices[0]);
+
+        if should_flip_face(vertices[0], vertices[1], vertices[2], n) {
+            vertices.reverse();
+        }
+
+        sink.add_quad(
+            vertices
+                .map(|position| Vertex::new(position, self.scalar_field.sample_normal(position))),
+        );
     }
 }
 
@@ -161,12 +159,13 @@ struct Feature {
 }
 
 impl Feature {
-    fn is_feature_edge(&self, a: u8, b: u8) -> bool {
+    fn contains_sign_change(&self, edge: (Corner, Corner)) -> bool {
+        let (a, b) = edge;
         self.is_corner_sign_positive(a) != self.is_corner_sign_positive(b)
     }
 
-    fn is_corner_sign_positive(&self, corner: u8) -> bool {
-        self.p_mask & (1u8 << corner) != 0
+    fn is_corner_sign_positive(&self, corner: Corner) -> bool {
+        self.p_mask & (1u8 << corner.as_u8()) != 0
     }
 }
 
@@ -176,7 +175,7 @@ struct AdaptiveGrid {
 }
 
 impl AdaptiveGrid {
-    pub fn build<S, P>(field: S, max_level: u8, place_feature: P) -> Self
+    fn build<S, P>(field: S, max_level: u8, place_feature: P) -> Self
     where
         S: ScalarField,
         P: Fn(Quant) -> Vec3,
@@ -192,28 +191,9 @@ impl AdaptiveGrid {
         }
     }
 
-    pub fn for_each_quad<F>(&self, mut f: F)
+    fn for_each_interior_quad<F>(&self, mut f: F)
     where
         F: FnMut([Vec3; 4]),
-    {
-        self.for_each_minimal_edge(|kind, keys| {
-            let (feature, [a, b]) = edge_corners(keys, kind, |_, corner| corner)
-                .map(|(key, [a, b])| {
-                    let feature = self.octree.get(key).unwrap().unwrap_leaf();
-                    (feature, [a, b])
-                })
-                .max_by_key(|(feature, _)| feature.quant.level())
-                .unwrap();
-
-            if feature.is_feature_edge(a.as_u8(), b.as_u8()) {
-                f(keys.map(|key| self.octree.get(key).unwrap().unwrap_leaf().vertex));
-            }
-        });
-    }
-
-    fn for_each_minimal_edge<F>(&self, f: F)
-    where
-        F: FnMut(EdgeKind, [Key; 4]),
     {
         let refine_branch =
             |branch: &Branch, which: Corner| branch.child(ChildIndex::new(which.as_u8()));
@@ -247,8 +227,128 @@ impl AdaptiveGrid {
             }
         };
 
-        MinimalEdges::new(faces, edges).traverse(|key| self.octree.is_leaf(*key), refine_node, f)
+        MinimalEdges::new(faces, edges).traverse(
+            |key| self.octree.is_leaf(*key),
+            refine_node,
+            |kind, keys| {
+                let features = keys.map(|key| self.get_feature(key).unwrap());
+
+                if contains_sign_change(kind, features) {
+                    f(features.map(|feature| feature.vertex));
+                }
+            },
+        );
     }
+
+    fn for_each_seam_quad<'a, N, F>(&self, peek: N, mut f: F)
+    where
+        N: FnMut(IVec3) -> Option<&'a Self>,
+        F: FnMut([Vec3; 4]),
+    {
+        let neighbors = Neighbors::from_fn(peek);
+
+        neighbors.for_each_face_seam(Some(self), |kind, tagged| {
+            if tagged.iter().any(|(_, cell)| cell.is_none()) {
+                return;
+            }
+
+            let mut faces = Faces::default();
+            faces.insert(kind, array::from_fn(|i| SeamCell::new(i as u8, Key::ROOT)));
+
+            let slots = tagged.map(|(offset, grid)| SeamSlot::new(grid.unwrap(), offset));
+            traverse_seam(&slots, faces, Edges::default(), &mut f);
+        });
+
+        neighbors.for_each_edge_seam(Some(self), |kind, tagged| {
+            if tagged.iter().any(|(_, cell)| cell.is_none()) {
+                return;
+            }
+
+            let mut edges = Edges::default();
+            edges.insert(kind, array::from_fn(|i| SeamCell::new(i as u8, Key::ROOT)));
+
+            let slots = tagged.map(|(offset, grid)| SeamSlot::new(grid.unwrap(), offset));
+            traverse_seam(&slots, Faces::default(), edges, &mut f);
+        });
+    }
+
+    fn get_feature(&self, key: Key) -> Option<&Feature> {
+        self.octree.get(key).and_then(|key| key.as_leaf().copied())
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+struct SeamSlot<'a> {
+    grid: &'a AdaptiveGrid,
+    offset: IVec3,
+}
+
+impl<'a> SeamSlot<'a> {
+    fn new(grid: &'a AdaptiveGrid, offset: IVec3) -> Self {
+        Self { grid, offset }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+struct SeamCell {
+    which: u8,
+    key: Key,
+}
+
+impl SeamCell {
+    const fn new(which: u8, key: Key) -> Self {
+        Self { which, key }
+    }
+}
+
+fn traverse_seam<F>(
+    slots: &[SeamSlot<'_>],
+    faces: Faces<SeamCell>,
+    edges: Edges<SeamCell>,
+    mut f: F,
+) where
+    F: FnMut([Vec3; 4]),
+{
+    let is_leaf = |cell: &SeamCell| {
+        let slot = slots[cell.which as usize];
+        slot.grid.octree.is_leaf(cell.key)
+    };
+
+    let refine = |cell: &SeamCell, which: Corner| {
+        let slot = slots[cell.which as usize];
+
+        if let Node::Branch(branch) = slot.grid.octree.get(cell.key).unwrap() {
+            let child = branch.child(ChildIndex::new(which.as_u8()));
+            child.map(|key| SeamCell::new(cell.which, key))
+        } else {
+            Some(*cell)
+        }
+    };
+
+    MinimalEdges::new(faces, edges).traverse(is_leaf, refine, |kind, cells| {
+        let features = cells.map(|cell| {
+            let slot = slots[cell.which as usize];
+            slot.grid.get_feature(cell.key).unwrap()
+        });
+
+        if contains_sign_change(kind, features) {
+            let vertices = cells.map(|cell| {
+                let slot = slots[cell.which as usize];
+                let node = slot.grid.octree.get(cell.key).unwrap();
+                node.unwrap_leaf().quant.center_point() + slot.offset.as_vec3()
+            });
+
+            f(vertices);
+        }
+    });
+}
+
+fn contains_sign_change(kind: EdgeKind, features: [&Feature; 4]) -> bool {
+    let (max_feature, [a, b]) = edge_corners(features, kind, |_, corner| corner)
+        .max_by_key(|(feature, _)| feature.quant.level())
+        .unwrap();
+
+    max_feature.contains_sign_change((a, b))
 }
 
 struct MinimalEdges<T> {
@@ -270,7 +370,7 @@ impl<T: Copy> MinimalEdges<T> {
         for (kind, faces) in self.faces.into_axes() {
             traverse_ping_pong(faces, |current, next| {
                 for keys in current.iter().copied() {
-                    if keys.iter().all(|key| is_leaf(key)) {
+                    if keys.iter().all(&is_leaf) {
                         continue;
                     }
 
@@ -294,7 +394,7 @@ impl<T: Copy> MinimalEdges<T> {
         for (kind, edges) in self.edges.into_axes() {
             traverse_ping_pong(edges, |current, next| {
                 for keys in current.iter().copied() {
-                    if keys.iter().all(|key| is_leaf(key)) {
+                    if keys.iter().all(&is_leaf) {
                         f(kind, keys);
                         continue;
                     }
@@ -334,6 +434,16 @@ impl<T> Faces<T> {
             (FaceKind::Y, self.y),
             (FaceKind::Z, self.z),
         ]
+    }
+
+    fn insert(&mut self, kind: FaceKind, face: [T; 2]) {
+        let faces = match kind {
+            FaceKind::X => &mut self.x,
+            FaceKind::Y => &mut self.y,
+            FaceKind::Z => &mut self.z,
+        };
+
+        faces.push(face);
     }
 }
 

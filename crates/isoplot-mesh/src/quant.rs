@@ -24,7 +24,7 @@ impl Quant {
     }
 
     pub fn child(self, which: ChildIndex) -> Option<Quant> {
-        self.0.child(which.0).map(|child| Quant(child))
+        self.0.child(which.0).map(Quant)
     }
 
     pub fn min_point_size(self) -> (Vec3, f32) {
@@ -151,7 +151,7 @@ const fn f32_exp2_small(exp: i8) -> f32 {
 #[inline]
 const fn fract_u32_to_f32(num: u32, len: u32) -> f32 {
     debug_assert!((num == 1 && len == 0) || (len <= 23 && num < (1u32 << len)));
-    let fract = (num as u32) << (23u32 - len);
+    let fract = num << (23u32 - len);
     f32::from_bits((127u32 << 23u32) + fract) - 1f32
 }
 
