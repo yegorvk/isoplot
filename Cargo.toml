@@ -16,6 +16,7 @@ isoplot-mesh = { path = "crates/isoplot-mesh", version = "0.1.0" }
 anyhow = "1.0"
 arrayvec = "0.7.6"
 bilge = "0.3.0"
+dashmap = "6.2.1"
 derive-where = "1.6.1"
 glam = "0.32.1"
 
@@ -30,3 +31,7 @@ opt-level = 3
 
 [profile.release]
 lto = "thin"
+
+[profile.dev-opt]
+inherits = "release"
+lto = "off"

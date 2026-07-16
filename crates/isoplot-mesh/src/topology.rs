@@ -352,6 +352,23 @@ impl<T> Neighbors<T> {
             faces: array::from_fn(|i| f(FaceIndex { idx: i as u8 }.as_ivec3())),
         }
     }
+
+    pub fn as_ref(&self) -> Neighbors<&T> {
+        Neighbors {
+            faces: self.faces.each_ref(),
+            edges: self.edges.each_ref(),
+        }
+    }
+
+    pub fn map<U, F>(self, mut f: F) -> Neighbors<U>
+    where
+        F: FnMut(T) -> U,
+    {
+        Neighbors {
+            faces: self.faces.map(&mut f),
+            edges: self.edges.map(&mut f),
+        }
+    }
 }
 
 impl<T: Copy> Neighbors<T> {

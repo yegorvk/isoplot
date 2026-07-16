@@ -154,13 +154,10 @@ impl AdaptiveGrid {
         );
     }
 
-    pub fn for_each_seam_quad<'a, N, F>(&self, peek: N, mut f: F)
+    pub fn for_each_seam_quad<F>(&self, neighbors: Neighbors<Option<&Self>>, mut f: F)
     where
-        N: FnMut(IVec3) -> Option<&'a Self>,
         F: FnMut([Vec3; 4]),
     {
-        let neighbors = Neighbors::from_fn(peek);
-
         neighbors.for_each_face_seam(Some(self), |kind, tagged| {
             if tagged.iter().any(|(_, cell)| cell.is_none()) {
                 return;

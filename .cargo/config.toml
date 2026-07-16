@@ -1,3 +1,6 @@
 [alias]
 dev = "run --package xtask -- dev"
 dev-opt = "run --package xtask -- dev-opt"
+
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"

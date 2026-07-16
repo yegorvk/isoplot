@@ -70,7 +70,8 @@ fn dev_opt() -> Result<()> {
             "run",
             "--package",
             "isoplot-bevy",
-            "--release",
+            "--profile",
+            "dev-opt",
             "-F",
             "bevy/dynamic_linking",
         ])

@@ -5,10 +5,7 @@ use std::f32::consts::PI;
 
 use bevy::{
     anti_alias::taa::TemporalAntiAliasing,
-    pbr::{
-        ScreenSpaceAmbientOcclusion,
-        wireframe::{Wireframe, WireframePlugin},
-    },
+    pbr::{ScreenSpaceAmbientOcclusion, wireframe::WireframePlugin},
     prelude::*,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
@@ -79,16 +76,14 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
     });
 
     commands.spawn((
-        Plot::new(EllipticParaboloid::new(0.4, 0.4), 1),
+        Plot::new(EllipticParaboloid::new(0.4, 0.4), 1, 5, 1e-4),
         MeshMaterial3d(simple_material.clone()),
-        Wireframe,
         Transform::from_scale(Vec3::splat(3.0)),
     ));
 
     commands.spawn((
-        Plot::new(Waves2, 1),
+        Plot::new(Waves2, 1, 5, 1e-4),
         MeshMaterial3d(simple_material.clone()),
-        Wireframe,
         Transform::from_xyz(8.0, 0.0, 0.0).with_scale(Vec3::splat(3.0)),
     ));
 

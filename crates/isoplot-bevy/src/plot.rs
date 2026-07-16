@@ -1,64 +1,50 @@
 use bevy::{
     asset::RenderAssetUsages,
     mesh::{Indices, PrimitiveTopology},
-    platform::collections::HashMap,
+    pbr::wireframe::Wireframe,
     prelude::*,
 };
 use bytemuck::cast_vec;
+use dashmap::{DashMap, mapref::one::Ref};
+use glam::IVec3;
 use isoplot_mesh::{
-    CentralDifference, ExtractError, ScalarField, SeparateNormals, TranslateMesh,
-    dual_contouring::{Chunk, DualContouring},
+    CentralDifference, ScalarField, SeparateNormals,
+    dual_contouring::{BorrowChunk, Chunk, DualContouring},
 };
+
+type ExtractChunkFn = Box<dyn (FnMut(IVec3) -> Option<Mesh>) + Send + Sync>;
 
 #[derive(Component)]
 pub struct Plot {
-    field: Box<dyn ScalarField + Send + Sync>,
-    render_distance: u8,
+    extract: ExtractChunkFn,
+    render_distance: u32,
 }
 
 impl Plot {
-    pub fn new<S>(field: S, render_distance: u8) -> Self
+    pub fn new<S>(source: S, render_distance: u32, max_level: u8, epsilon: f32) -> Self
     where
         S: ScalarField + Send + Sync + 'static,
     {
-        Plot {
-            field: Box::new(field),
+        let world = World::default();
+
+        let extract = move |coords: IVec3| -> Option<Mesh> {
+            let source = CentralDifference::new((&source).translated(coords.as_vec3()), epsilon);
+            let mut sink = SeparateNormals::default();
+
+            let dc = DualContouring::new(source, max_level);
+            let chunk = dc.extract_chunk(&mut sink).ok()?;
+
+            let peek = |offset: IVec3| world.get(coords + offset);
+            dc.extract_seam(&chunk, peek, &mut sink).ok()?;
+
+            world.insert(coords, chunk);
+            (!sink.positions.is_empty()).then(|| build_bevy_mesh(sink))
+        };
+
+        Self {
+            extract: Box::new(extract),
             render_distance,
         }
-    }
-
-    fn build_mesh_data(&self) -> Result<SeparateNormals, ExtractError> {
-        let mut world = World::default();
-        let r = self.render_distance as i32;
-
-        let mut sink = SeparateNormals::default();
-
-        for x in -r..=r {
-            for y in -r..=r {
-                for z in -r..=r {
-                    let i_offset = glam::ivec3(x, y, z);
-                    let offset = i_offset.as_vec3();
-
-                    let source =
-                        CentralDifference::new(self.field.as_ref(), 1e-4).translated(offset);
-
-                    let dc = DualContouring::new(&source, 7);
-
-                    let mut chunk_sink = TranslateMesh::new(&mut sink, offset);
-                    let chunk = dc.extract_chunk(&mut chunk_sink)?;
-
-                    dc.extract_seam(
-                        &chunk,
-                        |offset| world.chunks.get(&(i_offset + offset)),
-                        &mut chunk_sink,
-                    )?;
-
-                    world.chunks.insert(i_offset, chunk);
-                }
-            }
-        }
-
-        Ok(sink)
     }
 }
 
@@ -66,23 +52,40 @@ pub struct PlotPlugin;
 
 impl Plugin for PlotPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, create_mesh);
+        app.add_systems(Update, create_chunk_meshes);
     }
 }
 
-fn create_mesh(
+#[derive(Component, Debug)]
+struct PlotChunk;
+
+fn create_chunk_meshes(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    query: Query<(Entity, &Plot), Added<Plot>>,
+    mut query: Query<(Entity, &mut Plot, &MeshMaterial3d<StandardMaterial>), Added<Plot>>,
 ) {
-    for (entity, plot) in query {
-        let Ok(data) = plot.build_mesh_data() else {
-            error!("Failed to extract mesh.");
-            continue;
-        };
+    for (entity, mut plot, material) in &mut query {
+        let r = plot.render_distance as i32;
 
-        let mesh = build_bevy_mesh(data);
-        commands.entity(entity).insert(Mesh3d(meshes.add(mesh)));
+        for x in -r..=r {
+            for y in -r..=r {
+                for z in -r..=r {
+                    let coords = IVec3::new(x, y, z);
+
+                    let Some(mesh) = (plot.extract)(coords) else {
+                        continue;
+                    };
+
+                    commands.entity(entity).with_child((
+                        PlotChunk,
+                        Mesh3d(meshes.add(mesh)),
+                        MeshMaterial3d(material.0.clone()),
+                        Wireframe,
+                        Transform::from_xyz(x as f32, y as f32, z as f32),
+                    ));
+                }
+            }
+        }
     }
 }
 
@@ -99,7 +102,25 @@ fn build_bevy_mesh(data: SeparateNormals) -> Mesh {
     mesh
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct World {
-    chunks: HashMap<glam::IVec3, Chunk>,
+    chunks: DashMap<IVec3, Chunk>,
+}
+
+impl World {
+    fn get(&self, coords: IVec3) -> Option<ChunkGuard<'_>> {
+        self.chunks.get(&coords).map(ChunkGuard)
+    }
+
+    fn insert(&self, coords: IVec3, chunk: Chunk) -> Option<Chunk> {
+        self.chunks.insert(coords, chunk)
+    }
+}
+
+struct ChunkGuard<'a>(Ref<'a, IVec3, Chunk>);
+
+impl BorrowChunk for ChunkGuard<'_> {
+    fn borrow_chunk(&self) -> &Chunk {
+        self.0.value()
+    }
 }

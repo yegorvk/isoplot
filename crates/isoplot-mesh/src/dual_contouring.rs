@@ -1,13 +1,31 @@
-mod grid;
 mod connectivity;
+mod grid;
 
 use glam::{IVec3, Vec3};
 
-use crate::{ExtractError, NormalField, PopulateMesh, Vertex, should_flip_face};
+use crate::{
+    ExtractError, NormalField, PopulateMesh, Vertex, should_flip_face, topology::Neighbors,
+};
 use grid::AdaptiveGrid;
 
 #[derive(Debug)]
 pub struct Chunk(AdaptiveGrid);
+
+pub trait BorrowChunk {
+    fn borrow_chunk(&self) -> &Chunk;
+}
+
+impl BorrowChunk for Chunk {
+    fn borrow_chunk(&self) -> &Chunk {
+        self
+    }
+}
+
+impl<T: BorrowChunk + ?Sized> BorrowChunk for &T {
+    fn borrow_chunk(&self) -> &Chunk {
+        T::borrow_chunk(self)
+    }
+}
 
 /// Dual contouring algorithm
 pub struct DualContouring<S> {
@@ -40,20 +58,26 @@ where
         Ok(Chunk(grid))
     }
 
-    pub fn extract_seam<'a, N, P>(
+    pub fn extract_seam<B, N, P>(
         &self,
         this: &Chunk,
-        mut peek: N,
+        peek: N,
         sink: &mut P,
     ) -> Result<(), ExtractError>
     where
-        N: FnMut(IVec3) -> Option<&'a Chunk>,
+        B: BorrowChunk,
+        N: FnMut(IVec3) -> Option<B>,
         P: PopulateMesh,
     {
-        this.0.for_each_seam_quad(
-            |offset| peek(offset).map(|chunk| &chunk.0),
-            |vertices| self.add_quad(vertices, sink),
-        );
+        let neighbors = Neighbors::from_fn(peek);
+
+        let grids = neighbors
+            .as_ref()
+            .map(|neighbor| neighbor.as_ref().map(|chunk| &chunk.borrow_chunk().0));
+
+        this.0.for_each_seam_quad(grids, |vertices| {
+            self.add_quad(vertices, sink);
+        });
 
         Ok(())
     }
