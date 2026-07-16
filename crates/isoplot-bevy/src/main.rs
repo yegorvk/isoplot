@@ -54,10 +54,20 @@ impl ScalarField for Sphere {
     }
 }
 
+type PlotFactory = Box<dyn (Fn() -> Plot) + Send + Sync>;
+
+#[derive(Resource)]
+struct PlotCycler {
+    plots: Vec<PlotFactory>,
+    material: Handle<StandardMaterial>,
+    active: usize,
+    current: Entity,
+}
+
 fn main() {
     App::new()
         .add_systems(Startup, setup)
-        .add_systems(Update, toggle_focus)
+        .add_systems(Update, (toggle_focus, cycle_plots))
         .add_plugins((
             DefaultPlugins,
             WireframePlugin::default(),
@@ -75,17 +85,20 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
         ..default()
     });
 
-    commands.spawn((
-        Plot::new(EllipticParaboloid::new(0.4, 0.4), 1, 5, 1e-4),
-        MeshMaterial3d(simple_material.clone()),
-        Transform::from_scale(Vec3::splat(3.0)),
-    ));
+    let plots: Vec<PlotFactory> = vec![
+        Box::new(|| Plot::new(EllipticParaboloid::new(0.4, 0.4), 1, 5, 1e-4)),
+        Box::new(|| Plot::new(Waves2, 1, 5, 1e-4)),
+        Box::new(|| Plot::new(Sphere, 3, 5, 1e-4)),
+    ];
 
-    commands.spawn((
-        Plot::new(Waves2, 1, 5, 1e-4),
-        MeshMaterial3d(simple_material.clone()),
-        Transform::from_xyz(8.0, 0.0, 0.0).with_scale(Vec3::splat(3.0)),
-    ));
+    let current = spawn_plot(&mut commands, plots[0](), simple_material.clone());
+
+    commands.insert_resource(PlotCycler {
+        plots,
+        material: simple_material,
+        active: 0,
+        current,
+    });
 
     commands.spawn((
         DirectionalLight {
@@ -115,6 +128,32 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
             ..default()
         },
     ));
+}
+
+fn spawn_plot(commands: &mut Commands, plot: Plot, material: Handle<StandardMaterial>) -> Entity {
+    commands
+        .spawn((
+            plot,
+            MeshMaterial3d(material),
+            Transform::from_scale(Vec3::splat(3.0)),
+        ))
+        .id()
+}
+
+fn cycle_plots(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut cycler: ResMut<PlotCycler>,
+) {
+    if !keys.just_pressed(KeyCode::Tab) {
+        return;
+    }
+
+    commands.entity(cycler.current).despawn();
+
+    cycler.active = (cycler.active + 1) % cycler.plots.len();
+    let plot = (cycler.plots[cycler.active])();
+    cycler.current = spawn_plot(&mut commands, plot, cycler.material.clone());
 }
 
 fn toggle_focus(

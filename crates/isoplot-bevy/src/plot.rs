@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use bevy::{
     asset::RenderAssetUsages,
     mesh::{Indices, PrimitiveTopology},
     pbr::wireframe::Wireframe,
     prelude::*,
+    tasks::{AsyncComputeTaskPool, Task, block_on, futures_lite::future},
 };
 use bytemuck::cast_vec;
 use dashmap::{DashMap, mapref::one::Ref};
@@ -12,7 +15,7 @@ use isoplot_mesh::{
     dual_contouring::{BorrowChunk, Chunk, DualContouring},
 };
 
-type ExtractChunkFn = Box<dyn (FnMut(IVec3) -> Option<Mesh>) + Send + Sync>;
+type ExtractChunkFn = Arc<dyn (Fn(IVec3) -> Option<Mesh>) + Send + Sync>;
 
 #[derive(Component)]
 pub struct Plot {
@@ -42,7 +45,7 @@ impl Plot {
         };
 
         Self {
-            extract: Box::new(extract),
+            extract: Arc::new(extract),
             render_distance,
         }
     }
@@ -52,40 +55,66 @@ pub struct PlotPlugin;
 
 impl Plugin for PlotPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, create_chunk_meshes);
+        app.add_systems(Update, (queue_chunk_meshes, spawn_chunk_meshes));
     }
 }
 
 #[derive(Component, Debug)]
 struct PlotChunk;
 
-fn create_chunk_meshes(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut query: Query<(Entity, &mut Plot, &MeshMaterial3d<StandardMaterial>), Added<Plot>>,
-) {
-    for (entity, mut plot, material) in &mut query {
+#[derive(Component)]
+struct ExtractTask(Task<Vec<(IVec3, Mesh)>>);
+
+fn queue_chunk_meshes(mut commands: Commands, query: Query<(Entity, &Plot), Added<Plot>>) {
+    let pool = AsyncComputeTaskPool::get();
+
+    for (entity, plot) in &query {
+        let extract = plot.extract.clone();
         let r = plot.render_distance as i32;
 
-        for x in -r..=r {
-            for y in -r..=r {
-                for z in -r..=r {
-                    let coords = IVec3::new(x, y, z);
+        let task = pool.spawn(async move {
+            let mut chunks = Vec::new();
 
-                    let Some(mesh) = (plot.extract)(coords) else {
-                        continue;
-                    };
+            for x in -r..=r {
+                for y in -r..=r {
+                    for z in -r..=r {
+                        let coords = IVec3::new(x, y, z);
 
-                    commands.entity(entity).with_child((
-                        PlotChunk,
-                        Mesh3d(meshes.add(mesh)),
-                        MeshMaterial3d(material.0.clone()),
-                        Wireframe,
-                        Transform::from_xyz(x as f32, y as f32, z as f32),
-                    ));
+                        if let Some(mesh) = extract(coords) {
+                            chunks.push((coords, mesh));
+                        }
+                    }
                 }
             }
+
+            chunks
+        });
+
+        commands.entity(entity).insert(ExtractTask(task));
+    }
+}
+
+fn spawn_chunk_meshes(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut query: Query<(Entity, &mut ExtractTask, &MeshMaterial3d<StandardMaterial>)>,
+) {
+    for (entity, mut task, material) in &mut query {
+        let Some(chunks) = block_on(future::poll_once(&mut task.0)) else {
+            continue;
+        };
+
+        for (coords, mesh) in chunks {
+            commands.entity(entity).with_child((
+                PlotChunk,
+                Mesh3d(meshes.add(mesh)),
+                MeshMaterial3d(material.0.clone()),
+                Wireframe,
+                Transform::from_xyz(coords.x as f32, coords.y as f32, coords.z as f32),
+            ));
         }
+
+        commands.entity(entity).remove::<ExtractTask>();
     }
 }
 
