@@ -1,12 +1,13 @@
+mod adaptive_grid;
 mod connectivity;
-mod grid;
 
-use glam::{IVec3, Vec3};
+use glam::Vec3;
 
 use crate::{
-    ExtractError, NormalField, PopulateMesh, Vertex, should_flip_face, topology::Neighbors,
+    AxisKind, ExtractError, NormalField, Offset, PopulateMesh, Vertex, should_flip_face,
+    topology::{Edge, EdgeKey, EdgeKind, Face, FaceKey, FaceKind},
 };
-use grid::AdaptiveGrid;
+use adaptive_grid::{AdaptiveGrid, EdgeSeam, FaceSeam};
 
 #[derive(Debug)]
 pub struct Chunk(AdaptiveGrid);
@@ -54,30 +55,40 @@ where
             feature.center_point()
         });
 
-        grid.for_each_interior_quad(|vertices| self.add_quad(vertices, sink));
+        grid.for_each_quad(|vertices| self.add_quad(vertices, sink));
         Ok(Chunk(grid))
     }
 
-    pub fn extract_seam<B, N, P>(
+    pub fn extract_face_seam<B, P>(
         &self,
-        this: &Chunk,
-        peek: N,
+        face: ChunkFace<B>,
         sink: &mut P,
     ) -> Result<(), ExtractError>
     where
         B: BorrowChunk,
-        N: FnMut(IVec3) -> Option<B>,
         P: PopulateMesh,
     {
-        let neighbors = Neighbors::from_fn(peek);
+        let ChunkFace { kind, face } = face;
+        let grids = Face(face.0.each_ref().map(|chunk| &chunk.borrow_chunk().0));
 
-        let grids = neighbors
-            .as_ref()
-            .map(|neighbor| neighbor.as_ref().map(|chunk| &chunk.borrow_chunk().0));
+        FaceSeam::new(kind, grids).for_each_quad(|vertices| self.add_quad(vertices, sink));
 
-        this.0.for_each_seam_quad(grids, |vertices| {
-            self.add_quad(vertices, sink);
-        });
+        Ok(())
+    }
+
+    pub fn extract_edge_seam<B, P>(
+        &self,
+        edge: ChunkEdge<B>,
+        sink: &mut P,
+    ) -> Result<(), ExtractError>
+    where
+        B: BorrowChunk,
+        P: PopulateMesh,
+    {
+        let ChunkEdge { kind, edge } = edge;
+        let grids = Edge(edge.0.each_ref().map(|chunk| &chunk.borrow_chunk().0));
+
+        EdgeSeam::new(kind, grids).for_each_quad(|vertices| self.add_quad(vertices, sink));
 
         Ok(())
     }
@@ -105,5 +116,43 @@ where
             vertices
                 .map(|position| Vertex::new(position, self.scalar_field.sample_normal(position))),
         );
+    }
+}
+
+pub struct ChunkFace<T> {
+    kind: FaceKind,
+    face: Face<T>,
+}
+
+impl<T> ChunkFace<T> {
+    pub fn from_fn<F>(axis: AxisKind, min_chunk: T, mut f: F) -> Option<Self>
+    where
+        F: FnMut(&mut T, Offset) -> Option<T>,
+    {
+        let kind = FaceKind::from_axis(axis);
+        let key = FaceKey::new(kind, min_chunk);
+
+        Face::try_from_fn(key, |min_cell, offset| f(min_cell, offset).ok_or(()))
+            .ok()
+            .map(|face| Self { kind, face })
+    }
+}
+
+pub struct ChunkEdge<T> {
+    kind: EdgeKind,
+    edge: Edge<T>,
+}
+
+impl<T> ChunkEdge<T> {
+    pub fn from_fn<F>(axis: AxisKind, min_chunk: T, mut f: F) -> Option<Self>
+    where
+        F: FnMut(&mut T, Offset) -> Option<T>,
+    {
+        let kind = EdgeKind::from_axis(axis);
+        let key = EdgeKey::new(kind, min_chunk);
+
+        Edge::try_from_fn(key, |min_chunk, offset| f(min_chunk, offset).ok_or(()))
+            .ok()
+            .map(|edge| Self { kind, edge })
     }
 }

@@ -11,8 +11,8 @@ use bytemuck::cast_vec;
 use dashmap::{DashMap, mapref::one::Ref};
 use glam::IVec3;
 use isoplot_mesh::{
-    CentralDifference, ScalarField, SeparateNormals,
-    dual_contouring::{BorrowChunk, Chunk, DualContouring},
+    AxisKind, CentralDifference, Offset, ScalarField, SeparateNormals,
+    dual_contouring::{BorrowChunk, Chunk, ChunkEdge, ChunkFace, DualContouring},
 };
 
 type ExtractChunkFn = Arc<dyn (Fn(IVec3) -> Option<Mesh>) + Send + Sync>;
@@ -37,10 +37,22 @@ impl Plot {
             let dc = DualContouring::new(source, max_level);
             let chunk = dc.extract_chunk(&mut sink).ok()?;
 
-            let peek = |offset: IVec3| world.get(coords + offset);
-            dc.extract_seam(&chunk, peek, &mut sink).ok()?;
-
             world.insert(coords, chunk);
+
+            let lookup = |_: &mut ChunkGuard, offset: Offset| {
+                world.get(coords + offset.as_uvec3().as_ivec3())
+            };
+
+            for axis in AxisKind::ALL {
+                if let Some(face) = ChunkFace::from_fn(axis, world.get(coords)?, lookup) {
+                    dc.extract_face_seam(face, &mut sink).ok()?;
+                }
+
+                if let Some(edge) = ChunkEdge::from_fn(axis, world.get(coords)?, lookup) {
+                    dc.extract_edge_seam(edge, &mut sink).ok()?;
+                }
+            }
+
             (!sink.positions.is_empty()).then(|| build_bevy_mesh(sink))
         };
 
@@ -75,9 +87,9 @@ fn queue_chunk_meshes(mut commands: Commands, query: Query<(Entity, &Plot), Adde
         let task = pool.spawn(async move {
             let mut chunks = Vec::new();
 
-            for x in -r..=r {
-                for y in -r..=r {
-                    for z in -r..=r {
+            for x in (-r..=r).rev() {
+                for y in (-r..=r).rev() {
+                    for z in (-r..=r).rev() {
                         let coords = IVec3::new(x, y, z);
 
                         if let Some(mesh) = extract(coords) {

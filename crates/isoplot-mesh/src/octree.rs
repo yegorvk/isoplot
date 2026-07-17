@@ -204,13 +204,6 @@ impl<T> Node<T> {
         }
     }
 
-    pub fn unwrap_leaf(self) -> T {
-        match self {
-            Node::Leaf(leaf) => leaf,
-            _ => panic!(),
-        }
-    }
-
     fn map_leaf<B, F>(self, f: F) -> Node<B>
     where
         F: FnOnce(T) -> B,
