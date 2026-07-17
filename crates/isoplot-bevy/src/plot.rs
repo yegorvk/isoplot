@@ -68,6 +68,15 @@ pub struct PlotPlugin;
 impl Plugin for PlotPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Update, (queue_chunk_meshes, spawn_chunk_meshes));
+
+        app.world_mut()
+            .register_component_hooks::<Plot>()
+            .on_add(|mut world, ctx| {
+                world
+                    .commands()
+                    .entity(ctx.entity)
+                    .insert_if_new(Visibility::default());
+            });
     }
 }
 
