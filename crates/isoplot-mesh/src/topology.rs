@@ -25,10 +25,6 @@ impl FaceKind {
 
     pub(crate) const ALL: [Self; 3] = [Self::X, Self::Y, Self::Z];
 
-    pub(crate) const fn from_axis(axis: AxisKind) -> Self {
-        Self(axis)
-    }
-
     pub(crate) const fn axis(self) -> AxisKind {
         self.0
     }
@@ -62,10 +58,6 @@ impl EdgeKind {
     const Z: Self = Self(AxisKind::Z);
 
     pub(crate) const ALL: [Self; 3] = [Self::X, Self::Y, Self::Z];
-
-    pub(crate) const fn from_axis(axis: AxisKind) -> Self {
-        Self(axis)
-    }
 
     pub(crate) const fn axis(self) -> AxisKind {
         self.0

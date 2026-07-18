@@ -5,6 +5,7 @@ use std::f32::consts::PI;
 
 use bevy::{
     anti_alias::taa::TemporalAntiAliasing,
+    app::TaskPoolThreadAssignmentPolicy,
     pbr::{ScreenSpaceAmbientOcclusion, wireframe::WireframePlugin},
     prelude::*,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
@@ -69,7 +70,18 @@ fn main() {
         .add_systems(Startup, setup)
         .add_systems(Update, (toggle_focus, cycle_plots))
         .add_plugins((
-            DefaultPlugins,
+            DefaultPlugins.set(TaskPoolPlugin {
+                task_pool_options: TaskPoolOptions {
+                    async_compute: TaskPoolThreadAssignmentPolicy {
+                        min_threads: 1,
+                        max_threads: usize::MAX,
+                        percent: 1.0,
+                        on_thread_spawn: None,
+                        on_thread_destroy: None,
+                    },
+                    ..default()
+                },
+            }),
             WireframePlugin::default(),
             PlotPlugin,
             CameraControlsPlugin,
@@ -86,7 +98,7 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
     });
 
     let plots: Vec<PlotFactory> = vec![
-        Box::new(|| Plot::new(EllipticParaboloid::new(0.4, 0.4), 1, 5, 1e-4)),
+        Box::new(|| Plot::new(EllipticParaboloid::new(0.4, 0.4), 5, 5, 1e-4)),
         Box::new(|| Plot::new(Waves2, 1, 5, 1e-4)),
         Box::new(|| Plot::new(Sphere, 3, 5, 1e-4)),
     ];

@@ -24,11 +24,11 @@ impl AxisKind {
 pub struct Offset(u8);
 
 impl Offset {
-    const ZERO: Self = Offset(0);
+    const ZERO: Self = Self(0);
 
-    const X: Self = Offset(1);
-    const Y: Self = Offset(2);
-    const Z: Self = Offset(4);
+    const X: Self = Self(1);
+    const Y: Self = Self(2);
+    const Z: Self = Self(4);
 
     pub const fn new(axis: AxisKind) -> Self {
         match axis {

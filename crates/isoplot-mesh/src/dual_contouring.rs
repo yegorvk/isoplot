@@ -4,8 +4,9 @@ mod connectivity;
 use glam::Vec3;
 
 use crate::{
-    AxisKind, ExtractError, NormalField, Offset, PopulateMesh, Vertex, should_flip_face,
-    topology::{Edge, EdgeKey, EdgeKind, Face, FaceKey, FaceKind},
+    ExtractError, NormalField, Offset, PopulateMesh, ScalarField, TranslateField, Vertex,
+    should_flip_face,
+    topology::{Edge, EdgeKey, EdgeKind, EdgeSlot, Face, FaceKey, FaceKind, FaceSlot},
 };
 use adaptive_grid::{AdaptiveGrid, EdgeSeam, FaceSeam};
 
@@ -40,6 +41,12 @@ impl<S> DualContouring<S> {
             scalar_field,
             max_level,
         }
+    }
+}
+
+impl<S: ScalarField> DualContouring<TranslateField<S>> {
+    pub fn with_offset(scalar_field: S, offset: Vec3, max_level: u8) -> Self {
+        Self::new(scalar_field.translated(offset), max_level)
     }
 }
 
@@ -119,22 +126,49 @@ where
     }
 }
 
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+pub struct ChunkFaceKind(FaceKind);
+
+impl ChunkFaceKind {
+    pub const ALL: [Self; 3] = {
+        let [x, y, z] = FaceKind::ALL;
+        [Self(x), Self(y), Self(z)]
+    };
+
+    pub fn slot_offsets(self) -> [Offset; 2] {
+        FaceSlot::ALL.map(|slot| self.0.slot_offset(slot))
+    }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+pub struct ChunkEdgeKind(EdgeKind);
+
+impl ChunkEdgeKind {
+    pub const ALL: [Self; 3] = {
+        let [x, y, z] = EdgeKind::ALL;
+        [Self(x), Self(y), Self(z)]
+    };
+
+    pub fn slot_offsets(self) -> [Offset; 4] {
+        EdgeSlot::ALL.map(|slot| self.0.slot_offset(slot))
+    }
+}
+
 pub struct ChunkFace<T> {
     kind: FaceKind,
     face: Face<T>,
 }
 
 impl<T> ChunkFace<T> {
-    pub fn from_fn<F>(axis: AxisKind, min_chunk: T, mut f: F) -> Option<Self>
+    pub fn from_fn<F>(kind: ChunkFaceKind, min_chunk: T, mut f: F) -> Option<Self>
     where
         F: FnMut(&mut T, Offset) -> Option<T>,
     {
-        let kind = FaceKind::from_axis(axis);
-        let key = FaceKey::new(kind, min_chunk);
+        let key = FaceKey::new(kind.0, min_chunk);
 
         Face::try_from_fn(key, |min_cell, offset| f(min_cell, offset).ok_or(()))
             .ok()
-            .map(|face| Self { kind, face })
+            .map(|face| Self { kind: kind.0, face })
     }
 }
 
@@ -144,15 +178,14 @@ pub struct ChunkEdge<T> {
 }
 
 impl<T> ChunkEdge<T> {
-    pub fn from_fn<F>(axis: AxisKind, min_chunk: T, mut f: F) -> Option<Self>
+    pub fn from_fn<F>(kind: ChunkEdgeKind, min_chunk: T, mut f: F) -> Option<Self>
     where
         F: FnMut(&mut T, Offset) -> Option<T>,
     {
-        let kind = EdgeKind::from_axis(axis);
-        let key = EdgeKey::new(kind, min_chunk);
+        let key = EdgeKey::new(kind.0, min_chunk);
 
         Edge::try_from_fn(key, |min_chunk, offset| f(min_chunk, offset).ok_or(()))
             .ok()
-            .map(|edge| Self { kind, edge })
+            .map(|edge| Self { kind: kind.0, edge })
     }
 }
