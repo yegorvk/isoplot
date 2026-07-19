@@ -11,10 +11,8 @@ use bytemuck::cast_vec;
 use dashmap::{DashMap, DashSet};
 use glam::IVec3;
 use isoplot_mesh::{
-    CentralDifference, NormalField, Offset, ScalarField, SeparateNormals,
-    dual_contouring::{
-        BorrowChunk, Chunk, ChunkEdge, ChunkEdgeKind, ChunkFace, ChunkFaceKind, DualContouring,
-    },
+    BorrowChunk, CentralDifference, Chunk, ChunkEdge, ChunkEdgeKind, ChunkFace, ChunkFaceKind,
+    Extractor, NormalField, Offset, ScalarField, SeparateNormals,
 };
 
 pub struct PlotPlugin;
@@ -46,7 +44,7 @@ impl Plot {
         S: ScalarField + Send + Sync + 'static,
     {
         Self {
-            extract: Arc::new(Extractor {
+            extract: Arc::new(ChunkExtractor {
                 source: CentralDifference::new(source, epsilon),
                 world: World::default(),
                 max_level,
@@ -60,13 +58,13 @@ trait ExtractChunk: Send + Sync {
     fn extract_chunk(&self, coords: IVec3) -> Vec<(IVec3, SeparateNormals)>;
 }
 
-struct Extractor<S> {
+struct ChunkExtractor<S> {
     source: S,
     world: World,
     max_level: u8,
 }
 
-impl<S> ExtractChunk for Extractor<S>
+impl<S> ExtractChunk for ChunkExtractor<S>
 where
     S: NormalField + Send + Sync + 'static,
 {
@@ -74,7 +72,7 @@ where
         let mut out = Vec::new();
         let mut sink = SeparateNormals::default();
 
-        let dc = DualContouring::with_offset(&self.source, coords.as_vec3(), self.max_level);
+        let dc = Extractor::with_offset(&self.source, coords.as_vec3(), self.max_level);
 
         let Ok(chunk) = dc.extract_chunk(&mut sink) else {
             return out;
@@ -101,7 +99,7 @@ where
     }
 }
 
-impl<S> Extractor<S>
+impl<S> ChunkExtractor<S>
 where
     S: NormalField + Send + Sync + 'static,
 {
@@ -112,8 +110,6 @@ where
         move |_, offset| self.world.get(anchor + offset.as_uvec3().as_ivec3())
     }
 
-    /// Extracts the face seam of `kind` anchored at `anchor`, unless some of
-    /// its participating chunks are missing or it was already extracted.
     fn try_extract_face_seam(
         &self,
         kind: ChunkFaceKind,
@@ -132,7 +128,7 @@ where
             return;
         }
 
-        let dc = DualContouring::with_offset(&self.source, anchor.as_vec3(), self.max_level);
+        let dc = Extractor::with_offset(&self.source, anchor.as_vec3(), self.max_level);
         let mut sink = SeparateNormals::default();
 
         if dc.extract_face_seam(face, &mut sink).is_ok() {
@@ -158,7 +154,7 @@ where
             return;
         }
 
-        let dc = DualContouring::with_offset(&self.source, anchor.as_vec3(), self.max_level);
+        let dc = Extractor::with_offset(&self.source, anchor.as_vec3(), self.max_level);
         let mut sink = SeparateNormals::default();
 
         if dc.extract_edge_seam(edge, &mut sink).is_ok() {

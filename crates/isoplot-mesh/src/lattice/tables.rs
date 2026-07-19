@@ -1,16 +1,15 @@
-use crate::{AxisKind, Offset};
+use super::{AxisKind, Offset};
 use std::array;
 
 #[derive(Copy, Clone, Debug)]
-pub(crate) struct Corner(u8);
+pub(crate) struct Corner(Offset);
 
 impl Corner {
-    pub(crate) const fn new(corner: u8) -> Self {
-        assert!(corner < 8);
-        Self(corner)
+    pub(crate) const fn new(offset: Offset) -> Self {
+        Self(offset)
     }
 
-    pub(crate) const fn as_u8(self) -> u8 {
+    pub(crate) const fn offset(self) -> Offset {
         self.0
     }
 }
@@ -89,7 +88,11 @@ impl EdgeKind {
 }
 
 const fn c(corner: u8) -> Corner {
-    Corner::new(corner)
+    Corner::new(Offset::from_components(
+        corner & 1 != 0,
+        corner & 2 != 0,
+        corner & 4 != 0,
+    ))
 }
 
 const CELL_FACES: [[[Corner; 2]; 4]; 3] = [
@@ -289,7 +292,7 @@ impl<T> Edge<T> {
     }
 }
 
-pub struct FaceKey<T> {
+pub(crate) struct FaceKey<T> {
     pub kind: FaceKind,
     pub min_cell: T,
 }
@@ -300,7 +303,7 @@ impl<T> FaceKey<T> {
     }
 }
 
-pub struct EdgeKey<T> {
+pub(crate) struct EdgeKey<T> {
     pub kind: EdgeKind,
     pub min_cell: T,
 }

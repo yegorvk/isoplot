@@ -1,14 +1,13 @@
-mod adaptive_grid;
-mod connectivity;
+mod grid;
 
 use glam::Vec3;
 
 use crate::{
-    ExtractError, NormalField, Offset, PopulateMesh, ScalarField, TranslateField, Vertex,
-    should_flip_face,
-    topology::{Edge, EdgeKey, EdgeKind, EdgeSlot, Face, FaceKey, FaceKind, FaceSlot},
+    mesh::{PopulateMesh, Vertex},
+    source::{NormalField, ScalarField, Translate},
+    lattice::{Edge, EdgeKey, EdgeKind, EdgeSlot, Face, FaceKey, FaceKind, FaceSlot, Offset},
 };
-use adaptive_grid::{AdaptiveGrid, EdgeSeam, FaceSeam};
+use grid::{AdaptiveGrid, EdgeSeam, FaceSeam};
 
 #[derive(Debug)]
 pub struct Chunk(AdaptiveGrid);
@@ -29,13 +28,12 @@ impl<T: BorrowChunk + ?Sized> BorrowChunk for &T {
     }
 }
 
-/// Dual contouring algorithm
-pub struct DualContouring<S> {
+pub struct Extractor<S> {
     scalar_field: S,
     max_level: u8,
 }
 
-impl<S> DualContouring<S> {
+impl<S> Extractor<S> {
     pub fn new(scalar_field: S, max_level: u8) -> Self {
         Self {
             scalar_field,
@@ -44,13 +42,13 @@ impl<S> DualContouring<S> {
     }
 }
 
-impl<S: ScalarField> DualContouring<TranslateField<S>> {
+impl<S: ScalarField> Extractor<Translate<S>> {
     pub fn with_offset(scalar_field: S, offset: Vec3, max_level: u8) -> Self {
         Self::new(scalar_field.translated(offset), max_level)
     }
 }
 
-impl<S> DualContouring<S>
+impl<S> Extractor<S>
 where
     S: NormalField,
 {
@@ -188,4 +186,11 @@ impl<T> ChunkEdge<T> {
             .ok()
             .map(|edge| Self { kind: kind.0, edge })
     }
+}
+
+#[derive(Debug)]
+pub struct ExtractError;
+
+fn should_flip_face(a: Vec3, b: Vec3, c: Vec3, n: Vec3) -> bool {
+    (b - a).cross(c - a).dot(n) < 0.0
 }

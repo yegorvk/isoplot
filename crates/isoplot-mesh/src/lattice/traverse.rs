@@ -1,13 +1,11 @@
 use derive_where::derive_where;
 use std::{iter, marker::PhantomData};
 
-use crate::{
-    topology::{
-        Corner, Edge, EdgeKind, EdgeSlot, FaceKind, FaceSlot, for_each_face_edge,
-        for_each_sub_edge, for_each_sub_face,
-    },
-    utils::{array_transpose, traverse_ping_pong},
+use super::tables::{
+    Corner, Edge, EdgeKind, EdgeSlot, FaceKind, FaceSlot, for_each_face_edge, for_each_sub_edge,
+    for_each_sub_face,
 };
+use crate::utils::{array_transpose, traverse_ping_pong};
 
 pub(crate) trait TraverseOctree {
     /// Octree node type

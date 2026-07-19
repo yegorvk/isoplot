@@ -2,17 +2,16 @@ use glam::Vec3;
 use std::array;
 
 use crate::{
-    Offset, ScalarField,
+    lattice::{
+        Corner, Edge, EdgeKind, EdgeSlot, Edges, Face, FaceKind, FaceSlot, Faces, MinimalEdges,
+        Offset, TraverseOctree, edge_corners, face_edge_slot, for_each_cell_edge,
+        for_each_cell_face,
+    },
     octree::{BuildOctree, ChildIndex, Key, Node, Octree},
     quant::Quant,
-    topology::{
-        Corner, Edge, EdgeKind, EdgeSlot, Face, FaceKind, FaceSlot, edge_corners, face_edge_slot,
-        for_each_cell_edge, for_each_cell_face,
-    },
+    source::ScalarField,
     utils::array_transpose,
 };
-
-use super::connectivity::{Edges, Faces, MinimalEdges, TraverseOctree};
 
 struct OctreeSource<S, P> {
     scalar_field: S,
@@ -47,17 +46,17 @@ where
 
     fn place_leaf(&mut self, tag: Self::Tag) -> Feature {
         let p_mask = {
-            let mut mask = 0u8;
+            let (min_corner, size) = tag.min_point_size();
 
-            tag.for_each_corner(|corner, position| {
-                let value = self.scalar_field.sample(position);
+            Offset::enumerate().fold(0, |mask, offset| {
+                let position = min_corner + offset.as_uvec3().as_vec3() * size;
 
-                if value.is_sign_positive() {
-                    mask |= 1u8 << corner.as_u8();
+                if self.scalar_field.sample(position).is_sign_positive() {
+                    mask | (1u8 << offset.as_u8())
+                } else {
+                    mask
                 }
-            });
-
-            mask
+            })
         };
 
         Feature {
@@ -82,7 +81,7 @@ impl Feature {
     }
 
     fn is_corner_sign_positive(&self, corner: Corner) -> bool {
-        self.p_mask & (1u8 << corner.as_u8()) != 0
+        self.p_mask & (1u8 << corner.offset().as_u8()) != 0
     }
 }
 
@@ -117,7 +116,7 @@ impl AdaptiveGrid {
 
         self.octree.for_each_branch(|branch| {
             let refine = |which: Corner| {
-                let child = ChildIndex::new(which.as_u8());
+                let child = ChildIndex::new(which.offset().as_u8());
                 branch.child(child)
             };
 
@@ -140,7 +139,7 @@ impl AdaptiveGrid {
 
         let refine_node = |key: &Key, which: Corner| {
             if let Node::Branch(branch) = self.octree.get(*key).unwrap() {
-                branch.child(ChildIndex::new(which.as_u8()))
+                branch.child(ChildIndex::new(which.offset().as_u8()))
             } else {
                 Some(*key)
             }
@@ -302,7 +301,7 @@ impl TraverseOctree for TraverseEdgeSeam<'_> {
 
 fn refine_key(grid: &AdaptiveGrid, key: &Key, which: Corner) -> Option<Key> {
     if let Node::Branch(branch) = grid.octree.get(*key).unwrap() {
-        branch.child(ChildIndex::new(which.as_u8()))
+        branch.child(ChildIndex::new(which.offset().as_u8()))
     } else {
         Some(*key)
     }
