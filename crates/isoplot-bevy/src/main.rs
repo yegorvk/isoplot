@@ -10,6 +10,7 @@ use bevy::{
     prelude::*,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
+use noise::{NoiseFn, Simplex};
 
 use crate::{
     controls::{CameraControls, CameraControlsPlugin},
@@ -55,6 +56,17 @@ impl ScalarField for Sphere {
     }
 }
 
+#[derive(Default)]
+struct SimplexNoise {
+    noise: Simplex,
+}
+
+impl ScalarField for SimplexNoise {
+    fn sample(&self, point: glam::Vec3) -> f32 {
+        self.noise.get((point * 0.6).as_dvec3().to_array()) as f32
+    }
+}
+
 type PlotFactory = Box<dyn (Fn() -> Plot) + Send + Sync>;
 
 #[derive(Resource)]
@@ -92,15 +104,16 @@ fn main() {
 fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
     let simple_material = materials.add(StandardMaterial {
         base_color: Color::LinearRgba(LinearRgba::GREEN),
-        perceptual_roughness: 0.5,
+        metallic: 1.0,
         cull_mode: None,
         ..default()
     });
 
     let plots: Vec<PlotFactory> = vec![
-        Box::new(|| Plot::new(EllipticParaboloid::new(0.4, 0.4), 5, 5, 1e-4)),
+        Box::new(|| Plot::new(EllipticParaboloid::new(0.4, 0.4), 1, 5, 1e-4)),
         Box::new(|| Plot::new(Waves2, 1, 5, 1e-4)),
         Box::new(|| Plot::new(Sphere, 3, 5, 1e-4)),
+        Box::new(|| Plot::new(SimplexNoise::default(), 5, 5, 1e-4)),
     ];
 
     let current = spawn_plot(&mut commands, plots[0](), simple_material.clone());

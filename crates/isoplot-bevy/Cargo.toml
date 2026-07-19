@@ -10,6 +10,7 @@ isoplot-mesh.workspace = true
 glam.workspace = true
 bytemuck = "1.25.0"
 dashmap.workspace = true
+noise = "0.9"
 
 [dependencies.bevy]
 version = "0.18.1"
