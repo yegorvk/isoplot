@@ -13,6 +13,37 @@ use crate::{
     utils::array_transpose,
 };
 
+#[derive(Copy, Clone, Debug)]
+pub(super) struct Corners {
+    p_mask: u8,
+}
+
+impl Corners {
+    fn from_fn<F>(mut f: F) -> Self
+    where
+        F: FnMut(Corner) -> f32,
+    {
+        let p_mask = Offset::enumerate().fold(0, |mask, offset| {
+            if f(Corner::new(offset)).is_sign_positive() {
+                mask | (1u8 << offset.as_u8())
+            } else {
+                mask
+            }
+        });
+
+        Self { p_mask }
+    }
+
+    pub(crate) fn contains_sign_change(&self, edge: (Corner, Corner)) -> bool {
+        let (a, b) = edge;
+        self.is_sign_positive(a) != self.is_sign_positive(b)
+    }
+
+    pub(super) fn is_sign_positive(&self, corner: Corner) -> bool {
+        self.p_mask & (1u8 << corner.offset().as_u8()) != 0
+    }
+}
+
 struct OctreeSource<S, P> {
     scalar_field: S,
     max_level: u8,
@@ -22,7 +53,7 @@ struct OctreeSource<S, P> {
 impl<S, P> BuildOctree<Feature> for OctreeSource<S, P>
 where
     S: ScalarField,
-    P: Fn(Quant) -> Vec3,
+    P: Fn(Quant, Corners) -> Vec3,
 {
     type Tag = Quant;
 
@@ -31,13 +62,7 @@ where
     }
 
     fn is_leaf(&mut self, tag: Self::Tag) -> bool {
-        let (min_point, _) = tag.min_point_size();
-
-        if (min_point.z.to_bits() + min_point.x.to_bits() + 56) % 3 == 1 {
-            tag.level() >= self.max_level - 1
-        } else {
-            tag.level() >= self.max_level
-        }
+        tag.level() >= self.max_level
     }
 
     fn refine(&mut self, tag: Self::Tag, which: ChildIndex) -> Option<Self::Tag> {
@@ -45,24 +70,17 @@ where
     }
 
     fn place_leaf(&mut self, tag: Self::Tag) -> Feature {
-        let p_mask = {
-            let (min_corner, size) = tag.min_point_size();
+        let (min_corner, size) = tag.min_point_size();
 
-            Offset::enumerate().fold(0, |mask, offset| {
-                let position = min_corner + offset.as_uvec3().as_vec3() * size;
-
-                if self.scalar_field.sample(position).is_sign_positive() {
-                    mask | (1u8 << offset.as_u8())
-                } else {
-                    mask
-                }
-            })
-        };
+        let corners = Corners::from_fn(|corner| {
+            let position = min_corner + size * corner.offset().as_vec3();
+            self.scalar_field.sample(position)
+        });
 
         Feature {
-            vertex: (self.place_feature)(tag),
+            vertex: (self.place_feature)(tag, corners),
             quant: tag,
-            p_mask,
+            corners,
         }
     }
 }
@@ -71,18 +89,7 @@ where
 struct Feature {
     vertex: Vec3,
     quant: Quant,
-    p_mask: u8,
-}
-
-impl Feature {
-    fn contains_sign_change(&self, edge: (Corner, Corner)) -> bool {
-        let (a, b) = edge;
-        self.is_corner_sign_positive(a) != self.is_corner_sign_positive(b)
-    }
-
-    fn is_corner_sign_positive(&self, corner: Corner) -> bool {
-        self.p_mask & (1u8 << corner.offset().as_u8()) != 0
-    }
+    corners: Corners,
 }
 
 #[derive(Debug)]
@@ -94,7 +101,7 @@ impl AdaptiveGrid {
     pub(crate) fn build<S, P>(field: S, max_level: u8, place_feature: P) -> Self
     where
         S: ScalarField,
-        P: Fn(Quant) -> Vec3,
+        P: Fn(Quant, Corners) -> Vec3,
     {
         let mut source = OctreeSource {
             scalar_field: field,
@@ -325,5 +332,7 @@ fn contains_sign_change(kind: EdgeKind, features: [&Feature; 4]) -> bool {
         .max_by_key(|(slot, _)| features[slot.as_usize()].quant.level())
         .unwrap();
 
-    features[max_feature.as_usize()].contains_sign_change((a, b))
+    features[max_feature.as_usize()]
+        .corners
+        .contains_sign_change((a, b))
 }

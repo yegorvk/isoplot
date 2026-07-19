@@ -3,11 +3,14 @@ mod grid;
 use glam::Vec3;
 
 use crate::{
+    lattice::{
+        Corner, Edge, EdgeKey, EdgeKind, EdgeSlot, Face, FaceKey, FaceKind, FaceSlot, Offset,
+    },
     mesh::{PopulateMesh, Vertex},
+    quant::Quant,
     source::{NormalField, ScalarField, Translate},
-    lattice::{Edge, EdgeKey, EdgeKind, EdgeSlot, Face, FaceKey, FaceKind, FaceSlot, Offset},
 };
-use grid::{AdaptiveGrid, EdgeSeam, FaceSeam};
+use grid::{AdaptiveGrid, Corners, EdgeSeam, FaceSeam};
 
 #[derive(Debug)]
 pub struct Chunk(AdaptiveGrid);
@@ -56,8 +59,8 @@ where
     where
         P: PopulateMesh,
     {
-        let grid = AdaptiveGrid::build(&self.scalar_field, self.max_level, |feature| {
-            feature.center_point()
+        let grid = AdaptiveGrid::build(&self.scalar_field, self.max_level, |cell, corners| {
+            place_feature(&self.scalar_field, cell, corners)
         });
 
         grid.for_each_quad(|vertices| self.add_quad(vertices, sink));
@@ -190,6 +193,80 @@ impl<T> ChunkEdge<T> {
 
 #[derive(Debug)]
 pub struct ExtractError;
+
+fn place_feature<S: NormalField>(field: &S, cell: Quant, corners: Corners) -> Vec3 {
+    const ITERS: usize = 25;
+
+    let (min_corner, size) = cell.min_point_size();
+
+    let mut positions = [Vec3::ZERO; 8];
+    let mut values = [0f32; 8];
+
+    for i in 0..8 {
+        let corner = Corner::new(Offset::ALL[i]);
+        positions[i] = min_corner + size * corner.offset().as_vec3();
+        values[i] = field.sample(positions[i]);
+    }
+
+    let mut points = [Vec3::ZERO; 12];
+    let mut normals = [Vec3::ZERO; 12];
+    let mut count = 0;
+
+    for i in 0..8u8 {
+        for axis in [1u8, 2, 4] {
+            let j = i ^ axis;
+
+            if i >= j {
+                continue;
+            }
+
+            let (a, b) = (i as usize, j as usize);
+
+            if !corners
+                .contains_sign_change((Corner::new(Offset::ALL[a]), Corner::new(Offset::ALL[b])))
+            {
+                continue;
+            }
+
+            let (va, vb) = (values[a], values[b]);
+            let t = if (va - vb).abs() > f32::EPSILON {
+                (va / (va - vb)).clamp(0.0, 1.0)
+            } else {
+                0.5
+            };
+
+            let point = positions[a].lerp(positions[b], t);
+            points[count] = point;
+            normals[count] = field.sample_normal(point);
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        return cell.center_point();
+    }
+
+    let mut x = Vec3::ZERO;
+    for point in &points[..count] {
+        x += *point;
+    }
+    x /= count as f32;
+
+    let max_corner = min_corner + Vec3::splat(size);
+
+    for _ in 0..ITERS {
+        let mut force = Vec3::ZERO;
+
+        for k in 0..count {
+            let n = normals[k];
+            force += n * n.dot(points[k] - x);
+        }
+
+        x = (x + force / count as f32).clamp(min_corner, max_corner);
+    }
+
+    x
+}
 
 fn should_flip_face(a: Vec3, b: Vec3, c: Vec3, n: Vec3) -> bool {
     (b - a).cross(c - a).dot(n) < 0.0

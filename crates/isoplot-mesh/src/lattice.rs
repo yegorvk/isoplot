@@ -1,6 +1,6 @@
 use std::ops::BitOr;
 
-use glam::{UVec3, uvec3};
+use glam::{UVec3, Vec3, uvec3};
 
 mod tables;
 mod traverse;
@@ -32,6 +32,16 @@ impl Offset {
     const Y: Self = Self(2);
     const Z: Self = Self(4);
 
+    pub(crate) const ALL: [Offset; 8] = {
+        let mut a = [Self::ZERO; 8];
+        let mut i = 0u8;
+        while i < 8 {
+            a[i as usize] = Self(i);
+            i += 1;
+        }
+        a
+    };
+
     pub const fn new(axis: AxisKind) -> Self {
         match axis {
             AxisKind::X => Self::X,
@@ -53,6 +63,10 @@ impl Offset {
         let y = (self.0 & Self::Y.0 != 0) as u32;
         let z = (self.0 & Self::Z.0 != 0) as u32;
         uvec3(x, y, z)
+    }
+
+    pub(crate) fn as_vec3(self) -> Vec3 {
+        self.as_uvec3().as_vec3()
     }
 
     pub(crate) const fn as_u8(self) -> u8 {
