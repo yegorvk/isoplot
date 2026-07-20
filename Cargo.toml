@@ -19,6 +19,7 @@ bilge = "0.3.0"
 dashmap = "6.2.1"
 derive-where = "1.6.1"
 glam = "0.32.1"
+thiserror = "2.0.19"
 
 [profile.dev.package.isoplot-bevy]
 opt-level = 1

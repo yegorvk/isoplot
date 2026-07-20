@@ -1,0 +1,11 @@
+[package]
+name = "isoplot-expr"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+chumsky = { version = "0.13", features = ["pratt"] }
+codespan-reporting = "0.13.1"
+logos = "0.16.1"
