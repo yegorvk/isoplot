@@ -3093,6 +3093,7 @@ dependencies = [
  "bytemuck",
  "dashmap",
  "glam 0.32.1",
+ "isoplot-expr",
  "isoplot-mesh",
  "log",
  "noise",
@@ -3102,7 +3103,6 @@ dependencies = [
 name = "isoplot-expr"
 version = "0.1.0"
 dependencies = [
- "bumpalo",
  "codespan-reporting 0.13.1",
  "logos",
 ]

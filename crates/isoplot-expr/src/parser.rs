@@ -151,7 +151,7 @@ fn unop_bp(op: UnOp) -> u8 {
 mod tests {
     use super::*;
     use crate::{
-        ast::{ExprId, Folder},
+        ast::{ExprId, Transformer},
         symbol::{Interner, Symbol},
         token::tokenize,
     };
@@ -161,10 +161,11 @@ mod tests {
         interner: Interner,
     }
 
-    impl Folder for SExpr {
-        type Acc = String;
+    impl Transformer for SExpr {
+        type In<'a> = String;
+        type Out = String;
 
-        fn fold_un_op(&mut self, _id: ExprId, op: UnOp, operand: String) -> String {
+        fn un_op(&mut self, _id: ExprId, op: UnOp, operand: String) -> String {
             let op = match op {
                 UnOp::Plus => "+",
                 UnOp::Minus => "-",
@@ -172,7 +173,7 @@ mod tests {
             format!("({op} {operand})")
         }
 
-        fn fold_bin_op(&mut self, _id: ExprId, op: BinOp, lhs: String, rhs: String) -> String {
+        fn bin_op(&mut self, _id: ExprId, op: BinOp, lhs: String, rhs: String) -> String {
             let op = match op {
                 BinOp::Add => "+",
                 BinOp::Sub => "-",
@@ -183,18 +184,18 @@ mod tests {
             format!("({op} {lhs} {rhs})")
         }
 
-        fn fold_var(&mut self, _id: ExprId, name: Symbol) -> Self::Acc {
+        fn var(&mut self, _id: ExprId, name: Symbol) -> String {
             self.interner.resolve(name).unwrap().to_owned()
         }
 
-        fn fold_lit(&mut self, _id: ExprId, value: Value) -> String {
+        fn lit(&mut self, _id: ExprId, value: Value) -> String {
             match value {
                 Value::F32(x) => format!("{x}"),
                 Value::Unit => unreachable!(),
             }
         }
 
-        fn fold_error(&mut self, _id: ExprId, _inner: Option<String>) -> String {
+        fn map_error(&mut self, _id: ExprId, _inner: Option<String>) -> String {
             panic!("AST contains an error node")
         }
     }

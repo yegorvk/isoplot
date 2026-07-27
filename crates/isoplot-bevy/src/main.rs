@@ -16,6 +16,7 @@ use crate::{
     controls::{CameraControls, CameraControlsPlugin},
     plot::{Plot, PlotPlugin},
 };
+use isoplot_expr::{Environment, Program, Value};
 use isoplot_mesh::ScalarField;
 
 #[allow(dead_code)]
@@ -53,6 +54,34 @@ struct Sphere;
 impl ScalarField for Sphere {
     fn sample(&self, point: glam::Vec3) -> f32 {
         point.length() - 3.0
+    }
+}
+
+struct ExprField {
+    program: Program,
+}
+
+impl ExprField {
+    fn new(source: &str) -> Self {
+        Self {
+            program: Program::create(source),
+        }
+    }
+}
+
+impl ScalarField for ExprField {
+    fn sample(&self, point: glam::Vec3) -> f32 {
+        let [x, y, z] = point.to_array();
+
+        let mut env = Environment::default();
+        env.insert_var("x".to_owned(), Value::F32(x));
+        env.insert_var("y".to_owned(), Value::F32(y));
+        env.insert_var("z".to_owned(), Value::F32(z));
+
+        match self.program.evaluate(&env) {
+            Value::F32(value) => value,
+            value => panic!("expected an `f32`, got `{value:?}`"),
+        }
     }
 }
 
@@ -110,6 +139,7 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
     });
 
     let plots: Vec<PlotFactory> = vec![
+        Box::new(|| Plot::new(ExprField::new("x^2 + 2 * z^2 - y"), 2, 5, 1e-4)),
         Box::new(|| Plot::new(EllipticParaboloid::new(0.4, 0.4), 1, 5, 1e-4)),
         Box::new(|| Plot::new(Waves2, 1, 5, 1e-4)),
         Box::new(|| Plot::new(Sphere, 3, 5, 1e-4)),

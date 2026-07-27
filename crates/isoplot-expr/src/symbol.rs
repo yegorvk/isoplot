@@ -1,4 +1,3 @@
-use bumpalo::Bump;
 use std::collections::HashMap;
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
@@ -6,9 +5,8 @@ pub(crate) struct Symbol(u32);
 
 #[derive(Debug, Default)]
 pub(crate) struct Interner {
-    bump: Bump,
-    map: HashMap<&'static str, Symbol>,
-    strings: Vec<&'static str>,
+    map: HashMap<String, Symbol>,
+    strings: Vec<String>,
 }
 
 impl Interner {
@@ -20,20 +18,14 @@ impl Interner {
         let len = self.strings.len();
         assert!(len < u32::MAX as usize);
 
-        // SAFETY: the string is owned by `self.bump` and cannot outlast it.
-        // Although it is stored with a `'static` lifetimes, `resolve`
-        // constrains the returned reference lifetime to `&self`.
-        let value = unsafe { &*(self.bump.alloc_str(value) as *const str) };
-
         let symbol = Symbol(len as u32);
-        self.strings.push(value);
-        self.map.insert(value, symbol);
+        self.strings.push(value.to_owned());
+        self.map.insert(value.to_owned(), symbol);
         symbol
     }
 
     pub(crate) fn resolve(&self, symbol: Symbol) -> Option<&str> {
-        // Invariant: constrains the lifetime to `&self`.
-        self.strings.get(symbol.0 as usize).copied()
+        self.strings.get(symbol.0 as usize).map(String::as_str)
     }
 }
 

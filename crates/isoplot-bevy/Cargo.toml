@@ -6,6 +6,7 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
+isoplot-expr.workspace = true
 isoplot-mesh.workspace = true
 glam.workspace = true
 bytemuck = "1.25.0"

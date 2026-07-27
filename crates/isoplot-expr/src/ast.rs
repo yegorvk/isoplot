@@ -1,5 +1,5 @@
 use crate::{Value, span::Span, symbol::Symbol};
-use std::{marker::PhantomData, ops::Index};
+use std::{collections::HashMap, marker::PhantomData, ops::Index};
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub(crate) struct ExprId(u32);
@@ -115,11 +115,11 @@ impl Ast {
         }
     }
 
-    pub(crate) fn fold<F>(&self, mut folder: F) -> F::Acc
+    pub(crate) fn fold<F, Acc>(&self, mut folder: F) -> Acc
     where
-        F: Folder,
+        F: for<'a> Transformer<In<'a> = Acc, Out = Acc>,
     {
-        let mut accs: Vec<Option<F::Acc>> = Vec::with_capacity(self.arena.nodes.len());
+        let mut accs: Vec<Option<Acc>> = Vec::with_capacity(self.arena.nodes.len());
 
         for (index, node) in self.arena.nodes.iter().enumerate() {
             let id = ExprId(index as u32);
@@ -127,18 +127,18 @@ impl Ast {
             let acc = match node.kind {
                 ExprKind::UnOp(op, operand) => {
                     let operand = accs[operand.0 as usize].take().unwrap();
-                    folder.fold_un_op(id, op, operand)
+                    folder.un_op(id, op, operand)
                 }
                 ExprKind::BinOp(op, lhs, rhs) => {
                     let lhs = accs[lhs.0 as usize].take().unwrap();
                     let rhs = accs[rhs.0 as usize].take().unwrap();
-                    folder.fold_bin_op(id, op, lhs, rhs)
+                    folder.bin_op(id, op, lhs, rhs)
                 }
-                ExprKind::Var(name) => folder.fold_var(id, name),
-                ExprKind::Lit(value) => folder.fold_lit(id, value),
+                ExprKind::Var(name) => folder.var(id, name),
+                ExprKind::Lit(value) => folder.lit(id, value),
                 ExprKind::Error(inner) => {
                     let inner = inner.map(|inner| accs[inner.0 as usize].take().unwrap());
-                    folder.fold_error(id, inner)
+                    folder.map_error(id, inner)
                 }
             };
 
@@ -154,6 +154,88 @@ impl Index<ExprId> for Ast {
 
     fn index(&self, index: ExprId) -> &Self::Output {
         self.arena.get(index)
+    }
+}
+
+pub(crate) struct DenseMap<T> {
+    map: Vec<T>,
+}
+
+impl<T> DenseMap<T> {
+    pub(crate) fn build<B>(ast: &Ast, mut builder: B) -> Self
+    where
+        B: for<'a> Transformer<In<'a> = &'a T, Out = T>,
+    {
+        let mut map: Vec<T> = Vec::with_capacity(ast.arena.nodes.len());
+
+        for (index, node) in ast.arena.nodes.iter().enumerate() {
+            let id = ExprId(index as u32);
+
+            let out = match node.kind {
+                ExprKind::UnOp(op, operand) => builder.un_op(id, op, &map[operand.0 as usize]),
+                ExprKind::BinOp(op, lhs, rhs) => {
+                    builder.bin_op(id, op, &map[lhs.0 as usize], &map[rhs.0 as usize])
+                }
+                ExprKind::Var(name) => builder.var(id, name),
+                ExprKind::Lit(value) => builder.lit(id, value),
+                ExprKind::Error(inner) => {
+                    let inner = inner.map(|inner| &map[inner.0 as usize]);
+                    builder.map_error(id, inner)
+                }
+            };
+
+            map.push(out);
+        }
+
+        Self { map }
+    }
+}
+
+impl<T> Index<ExprId> for DenseMap<T> {
+    type Output = T;
+
+    fn index(&self, index: ExprId) -> &Self::Output {
+        &self.map[index.0 as usize]
+    }
+}
+
+pub(crate) struct SparseMap<T> {
+    map: HashMap<ExprId, T>,
+}
+
+impl<T> SparseMap<T> {
+    pub(crate) fn build<B>(ast: &Ast, mut builder: B) -> Self
+    where
+        B: for<'a> Transformer<In<'a> = Option<&'a T>, Out = Option<T>>,
+    {
+        let mut map: HashMap<ExprId, T> = HashMap::new();
+
+        for (index, node) in ast.arena.nodes.iter().enumerate() {
+            let id = ExprId(index as u32);
+
+            let out = match node.kind {
+                ExprKind::UnOp(op, operand) => builder.un_op(id, op, map.get(&operand)),
+                ExprKind::BinOp(op, lhs, rhs) => {
+                    builder.bin_op(id, op, map.get(&lhs), map.get(&rhs))
+                }
+                ExprKind::Var(name) => builder.var(id, name),
+                ExprKind::Lit(value) => builder.lit(id, value),
+                ExprKind::Error(inner) => {
+                    let inner = inner.map(|inner| map.get(&inner));
+                    builder.map_error(id, inner)
+                }
+            };
+
+            if let Some(out) = out {
+                map.insert(id, out);
+            }
+        }
+
+        Self { map }
+    }
+
+    pub(crate) fn get(&self, id: ExprId) -> Option<&T> {
+        self.map.get(&id)
     }
 }
 
@@ -187,24 +269,27 @@ pub(crate) enum BinOp {
     Pow,
 }
 
-pub(crate) trait Folder {
-    /// The accumulator type
-    type Acc;
+pub(crate) trait Transformer {
+    /// The input type
+    type In<'a>;
 
-    /// Folds a unary operator expression (e.g., `-A`).
-    fn fold_un_op(&mut self, id: ExprId, op: UnOp, operand: Self::Acc) -> Self::Acc;
+    /// The output type
+    type Out;
 
-    /// Folds a binary operator expression (e.g., `A + B`).
-    fn fold_bin_op(&mut self, id: ExprId, op: BinOp, lhs: Self::Acc, rhs: Self::Acc) -> Self::Acc;
+    /// Transforms a unary operator expression (e.g., `-A`).
+    fn un_op(&mut self, id: ExprId, op: UnOp, operand: Self::In<'_>) -> Self::Out;
 
-    /// Folds a variable expression (e.g., `x`).
-    fn fold_var(&mut self, id: ExprId, name: Symbol) -> Self::Acc;
+    /// Transforms a binary operator expression (e.g., `A + B`).
+    fn bin_op(&mut self, id: ExprId, op: BinOp, lhs: Self::In<'_>, rhs: Self::In<'_>) -> Self::Out;
 
-    /// Folds a literal expression (e.g., `123.56`).
-    fn fold_lit(&mut self, id: ExprId, value: Value) -> Self::Acc;
+    /// Transforms a variable expression (e.g., `x`).
+    fn var(&mut self, id: ExprId, name: Symbol) -> Self::Out;
 
-    /// Folds an error node.
-    fn fold_error(&mut self, id: ExprId, inner: Option<Self::Acc>) -> Self::Acc;
+    /// Transforms a literal expression (e.g., `123.56`).
+    fn lit(&mut self, id: ExprId, value: Value) -> Self::Out;
+
+    /// Transforms an error node.
+    fn map_error(&mut self, id: ExprId, inner: Option<Self::In<'_>>) -> Self::Out;
 }
 
 #[cfg(test)]
@@ -218,17 +303,18 @@ mod tests {
         env: HashMap<Symbol, f32>,
     }
 
-    impl Folder for Eval {
-        type Acc = f32;
+    impl Transformer for Eval {
+        type In<'a> = f32;
+        type Out = f32;
 
-        fn fold_un_op(&mut self, _id: ExprId, op: UnOp, operand: f32) -> f32 {
+        fn un_op(&mut self, _id: ExprId, op: UnOp, operand: f32) -> f32 {
             match op {
                 UnOp::Plus => operand,
                 UnOp::Minus => -operand,
             }
         }
 
-        fn fold_bin_op(&mut self, _id: ExprId, op: BinOp, lhs: f32, rhs: f32) -> f32 {
+        fn bin_op(&mut self, _id: ExprId, op: BinOp, lhs: f32, rhs: f32) -> f32 {
             match op {
                 BinOp::Add => lhs + rhs,
                 BinOp::Sub => lhs - rhs,
@@ -238,18 +324,18 @@ mod tests {
             }
         }
 
-        fn fold_var(&mut self, _id: ExprId, name: Symbol) -> Self::Acc {
+        fn var(&mut self, _id: ExprId, name: Symbol) -> f32 {
             self.env[&name]
         }
 
-        fn fold_lit(&mut self, _id: ExprId, value: Value) -> f32 {
+        fn lit(&mut self, _id: ExprId, value: Value) -> f32 {
             match value {
                 Value::F32(x) => x,
                 Value::Unit => unreachable!(),
             }
         }
 
-        fn fold_error(&mut self, _id: ExprId, _inner: Option<f32>) -> Self::Acc {
+        fn map_error(&mut self, _id: ExprId, _inner: Option<f32>) -> f32 {
             unreachable!()
         }
     }
@@ -292,6 +378,123 @@ mod tests {
 
         let env = HashMap::from([(x, 3.0), (y, 4.0)]);
         assert_eq!(ast.fold(Eval { env }), 25.0);
+    }
+
+    struct Depth;
+
+    impl Transformer for Depth {
+        type In<'a> = &'a u32;
+        type Out = u32;
+
+        fn un_op(&mut self, _id: ExprId, _op: UnOp, operand: &u32) -> u32 {
+            operand + 1
+        }
+
+        fn bin_op(&mut self, _id: ExprId, _op: BinOp, lhs: &u32, rhs: &u32) -> u32 {
+            lhs.max(rhs) + 1
+        }
+
+        fn var(&mut self, _id: ExprId, _name: Symbol) -> u32 {
+            1
+        }
+
+        fn lit(&mut self, _id: ExprId, _value: Value) -> u32 {
+            1
+        }
+
+        fn map_error(&mut self, _id: ExprId, inner: Option<&u32>) -> u32 {
+            inner.map_or(1, |inner| inner + 1)
+        }
+    }
+
+    #[test]
+    fn transform_depth() {
+        let span = Span::new(BytePos(0), BytePos(1));
+
+        // -(1 + 2 * 3)
+        let ast = Ast::build(|b| {
+            let one = b.lit(span, Value::F32(1.0));
+            let two = b.lit(span, Value::F32(2.0));
+            let three = b.lit(span, Value::F32(3.0));
+            let mul = b.bin_op(BinOp::Mul, two, three);
+            let sum = b.bin_op(BinOp::Add, one, mul);
+            b.un_op(span, UnOp::Minus, sum)
+        });
+
+        let depths = DenseMap::build(&ast, Depth);
+        assert_eq!(depths[ast.root], 4);
+    }
+
+    struct Consts;
+
+    impl Transformer for Consts {
+        type In<'a> = Option<&'a f32>;
+        type Out = Option<f32>;
+
+        fn un_op(&mut self, _id: ExprId, op: UnOp, operand: Option<&f32>) -> Option<f32> {
+            let operand = *operand?;
+            Some(match op {
+                UnOp::Plus => operand,
+                UnOp::Minus => -operand,
+            })
+        }
+
+        fn bin_op(
+            &mut self,
+            _id: ExprId,
+            op: BinOp,
+            lhs: Option<&f32>,
+            rhs: Option<&f32>,
+        ) -> Option<f32> {
+            let (&lhs, &rhs) = lhs.zip(rhs)?;
+            Some(match op {
+                BinOp::Add => lhs + rhs,
+                BinOp::Sub => lhs - rhs,
+                BinOp::Mul => lhs * rhs,
+                BinOp::Div => lhs / rhs,
+                BinOp::Pow => lhs.powf(rhs),
+            })
+        }
+
+        fn var(&mut self, _id: ExprId, _name: Symbol) -> Option<f32> {
+            None
+        }
+
+        fn lit(&mut self, _id: ExprId, value: Value) -> Option<f32> {
+            match value {
+                Value::F32(x) => Some(x),
+                Value::Unit => unreachable!(),
+            }
+        }
+
+        fn map_error(&mut self, _id: ExprId, _inner: Option<Option<&f32>>) -> Option<f32> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn sparse_consts() {
+        let span = Span::new(BytePos(0), BytePos(1));
+
+        let mut interner = Interner::default();
+        let x = interner.get_or_insert("x");
+
+        // x + 2 * 3
+        let ast = Ast::build(|b| {
+            let x = b.var(span, x);
+            let two = b.lit(span, Value::F32(2.0));
+            let three = b.lit(span, Value::F32(3.0));
+            let mul = b.bin_op(BinOp::Mul, two, three);
+            b.bin_op(BinOp::Add, x, mul)
+        });
+
+        let consts = SparseMap::build(&ast, Consts);
+
+        // Post-order: 0 = x, 1 = 2, 2 = 3, 3 = 2 * 3, 4 = root.
+        assert_eq!(consts.get(ExprId(0)), None);
+        assert_eq!(consts.get(ExprId(1)), Some(&2.0));
+        assert_eq!(consts.get(ExprId(3)), Some(&6.0));
+        assert_eq!(consts.get(ast.root), None);
     }
 
     #[test]

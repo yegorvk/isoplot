@@ -6,6 +6,5 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
-bumpalo.workspace = true
 codespan-reporting = "0.13.1"
 logos = "0.16.1"

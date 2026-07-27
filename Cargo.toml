@@ -10,6 +10,7 @@ license = "MPL-2.0"
 
 [workspace.dependencies]
 # Workspace
+isoplot-expr = { path = "crates/isoplot-expr", version = "0.1.0" }
 isoplot-mesh = { path = "crates/isoplot-mesh", version = "0.1.0" }
 
 # External
