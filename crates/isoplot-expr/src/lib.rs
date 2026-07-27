@@ -1,6 +1,7 @@
 mod ast;
 mod parser;
 mod span;
+mod symbol;
 mod token;
 
 #[derive(Copy, Clone, Debug)]

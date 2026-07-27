@@ -4,10 +4,11 @@ use crate::{
     Value,
     ast::{Ast, AstBuilder, BinOp, NewId, UnOp},
     span::{BytePos, Span},
+    symbol::Interner,
     token::{Token, TokenKind},
 };
 
-pub(crate) fn parse<'src, I>(mut input: I) -> Ast
+pub(crate) fn parse<'src, I>(mut input: I, interner: &mut Interner) -> Ast
 where
     I: Iterator<Item = Token<'src>>,
 {
@@ -21,6 +22,7 @@ where
             input,
             next,
             builder,
+            interner,
         };
 
         let root = parser.parse_expr(0);
@@ -32,6 +34,7 @@ struct Parser<'src, 'a, 'b, I> {
     input: I,
     next: Token<'src>,
     builder: &'a mut AstBuilder<'b>,
+    interner: &'a mut Interner,
 }
 
 impl<'src, 'a, 'b, I> Parser<'src, 'a, 'b, I>
@@ -71,6 +74,10 @@ where
                 Ok(value) => self.builder.lit(token.span, Value::F32(value)),
                 Err(_) => self.builder.error(token.span, None),
             },
+            TokenKind::Ident(name) => {
+                let name = self.interner.get_or_insert(name);
+                self.builder.var(token.span, name)
+            }
             TokenKind::LParen => {
                 let inner = self.parse_expr(0);
                 self.expect(TokenKind::RParen, inner)
@@ -145,10 +152,14 @@ mod tests {
     use super::*;
     use crate::{
         ast::{ExprId, Folder},
+        symbol::{Interner, Symbol},
         token::tokenize,
     };
 
-    struct SExpr;
+    #[derive(Default)]
+    struct SExpr {
+        interner: Interner,
+    }
 
     impl Folder for SExpr {
         type Acc = String;
@@ -172,6 +183,10 @@ mod tests {
             format!("({op} {lhs} {rhs})")
         }
 
+        fn fold_var(&mut self, _id: ExprId, name: Symbol) -> Self::Acc {
+            self.interner.resolve(name).unwrap().to_owned()
+        }
+
         fn fold_lit(&mut self, _id: ExprId, value: Value) -> String {
             match value {
                 Value::F32(x) => format!("{x}"),
@@ -185,7 +200,9 @@ mod tests {
     }
 
     fn sexpr(src: &str) -> String {
-        parse(tokenize(src)).fold(SExpr)
+        let mut folder = SExpr::default();
+        let ast = parse(tokenize(src), &mut folder.interner);
+        ast.fold(folder)
     }
 
     #[test]
@@ -198,6 +215,10 @@ mod tests {
         assert_eq!(sexpr("2 ^ -3"), "(^ 2 (- 3))");
         assert_eq!(sexpr("6 / 2 / 3"), "(/ (/ 6 2) 3)");
         assert_eq!(sexpr("2.5"), "2.5");
+
+        assert_eq!(sexpr("x + y * z"), "(+ x (* y z))");
+        assert_eq!(sexpr("x ^ 2 + y ^ 2"), "(+ (^ x 2) (^ y 2))");
+        assert_eq!(sexpr("-радиус ^ 2"), "(- (^ радиус 2))");
     }
 
     #[test]

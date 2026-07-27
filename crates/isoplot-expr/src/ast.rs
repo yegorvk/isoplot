@@ -1,7 +1,7 @@
-use crate::{Value, span::Span};
+use crate::{Value, span::Span, symbol::Symbol};
 use std::{marker::PhantomData, ops::Index};
 
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub(crate) struct ExprId(u32);
 
 #[derive(Debug, Default)]
@@ -45,6 +45,10 @@ impl<'b> AstBuilder<'b> {
 
     pub(crate) fn lit(&mut self, span: Span, value: Value) -> NewId<'b> {
         self.insert(span, ExprKind::Lit(value))
+    }
+
+    pub(crate) fn var(&mut self, span: Span, name: Symbol) -> NewId<'b> {
+        self.insert(span, ExprKind::Var(name))
     }
 
     pub(crate) fn error(&mut self, span: Span, inner: Option<NewId<'b>>) -> NewId<'b> {
@@ -130,6 +134,7 @@ impl Ast {
                     let rhs = accs[rhs.0 as usize].take().unwrap();
                     folder.fold_bin_op(id, op, lhs, rhs)
                 }
+                ExprKind::Var(name) => folder.fold_var(id, name),
                 ExprKind::Lit(value) => folder.fold_lit(id, value),
                 ExprKind::Error(inner) => {
                     let inner = inner.map(|inner| accs[inner.0 as usize].take().unwrap());
@@ -162,6 +167,7 @@ pub(crate) struct Expr {
 pub(crate) enum ExprKind {
     UnOp(UnOp, ExprId),
     BinOp(BinOp, ExprId, ExprId),
+    Var(Symbol),
     Lit(Value),
     Error(Option<ExprId>),
 }
@@ -191,6 +197,9 @@ pub(crate) trait Folder {
     /// Folds a binary operator expression (e.g., `A + B`).
     fn fold_bin_op(&mut self, id: ExprId, op: BinOp, lhs: Self::Acc, rhs: Self::Acc) -> Self::Acc;
 
+    /// Folds a variable expression (e.g., `x`).
+    fn fold_var(&mut self, id: ExprId, name: Symbol) -> Self::Acc;
+
     /// Folds a literal expression (e.g., `123.56`).
     fn fold_lit(&mut self, id: ExprId, value: Value) -> Self::Acc;
 
@@ -201,9 +210,13 @@ pub(crate) trait Folder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::span::BytePos;
+    use crate::{span::BytePos, symbol::Interner};
+    use std::collections::HashMap;
 
-    struct Eval;
+    #[derive(Default)]
+    struct Eval {
+        env: HashMap<Symbol, f32>,
+    }
 
     impl Folder for Eval {
         type Acc = f32;
@@ -223,6 +236,10 @@ mod tests {
                 BinOp::Div => lhs / rhs,
                 BinOp::Pow => lhs.powf(rhs),
             }
+        }
+
+        fn fold_var(&mut self, _id: ExprId, name: Symbol) -> Self::Acc {
+            self.env[&name]
         }
 
         fn fold_lit(&mut self, _id: ExprId, value: Value) -> f32 {
@@ -251,7 +268,30 @@ mod tests {
             b.un_op(span, UnOp::Minus, sum)
         });
 
-        assert_eq!(ast.fold(Eval), -7.0);
+        assert_eq!(ast.fold(Eval::default()), -7.0);
+    }
+
+    #[test]
+    fn fold_eval_vars() {
+        let span = Span::new(BytePos(0), BytePos(1));
+
+        let mut interner = Interner::default();
+        let x = interner.get_or_insert("x");
+        let y = interner.get_or_insert("y");
+
+        // x ^ 2 + y ^ 2
+        let ast = Ast::build(|b| {
+            let x = b.var(span, x);
+            let two = b.lit(span, Value::F32(2.0));
+            let x2 = b.bin_op(BinOp::Pow, x, two);
+            let y = b.var(span, y);
+            let two = b.lit(span, Value::F32(2.0));
+            let y2 = b.bin_op(BinOp::Pow, y, two);
+            b.bin_op(BinOp::Add, x2, y2)
+        });
+
+        let env = HashMap::from([(x, 3.0), (y, 4.0)]);
+        assert_eq!(ast.fold(Eval { env }), 25.0);
     }
 
     #[test]

@@ -15,6 +15,9 @@ pub(crate) enum TokenKind<'src> {
     #[regex(r"[0-9]+", |lex| LitInt(lex.slice()))]
     Int(LitInt<'src>),
 
+    #[regex(r"[\p{XID_Start}_][\p{XID_Continue}]*")]
+    Ident(&'src str),
+
     #[token("+")]
     Plus,
 
@@ -136,6 +139,21 @@ mod tests {
         assert_eq!(tokens(".5"), [Unknown, Int(LitInt("5")), Eof]);
 
         assert_eq!(tokens("-1"), [Minus, Int(LitInt("1")), Eof]);
+
+        assert_eq!(
+            tokens("x + радиус_2"),
+            [Ident("x"), Plus, Ident("радиус_2"), Eof]
+        );
+        assert_eq!(tokens("1x"), [Int(LitInt("1")), Ident("x"), Eof]);
+    }
+
+    #[test]
+    fn test_ident_spans() {
+        let tokens: Vec<_> = tokenize("р + ф2").collect();
+
+        assert_eq!(tokens[0].span, Span::new(BytePos(0), BytePos(2)));
+        assert_eq!(tokens[1].span, Span::new(BytePos(3), BytePos(4)));
+        assert_eq!(tokens[2].span, Span::new(BytePos(5), BytePos(8)));
     }
 
     #[test]
