@@ -51,6 +51,44 @@ impl Program {
             env,
         })
     }
+
+    pub fn validate(&self, env: &Environment) -> bool {
+        self.ast.fold(Validator {
+            interner: &self.interner,
+            env,
+        })
+    }
+}
+
+struct Validator<'a> {
+    interner: &'a Interner,
+    env: &'a Environment,
+}
+
+impl Transformer for Validator<'_> {
+    type In<'a> = bool;
+    type Out = bool;
+
+    fn un_op(&mut self, _id: ExprId, _op: UnOp, operand: bool) -> bool {
+        operand
+    }
+
+    fn bin_op(&mut self, _id: ExprId, _op: BinOp, lhs: bool, rhs: bool) -> bool {
+        lhs && rhs
+    }
+
+    fn var(&mut self, _id: ExprId, name: Symbol) -> bool {
+        let name = self.interner.resolve(name).unwrap();
+        self.env.vars.contains_key(name)
+    }
+
+    fn lit(&mut self, _id: ExprId, _value: Value) -> bool {
+        true
+    }
+
+    fn map_error(&mut self, _id: ExprId, _inner: Option<bool>) -> bool {
+        false
+    }
 }
 
 struct Evaluator<'a> {
@@ -123,6 +161,17 @@ mod tests {
         env.insert_var("y".to_owned(), Value::F32(4.0));
 
         assert_eq!(program.evaluate(&env), Value::F32(25.0));
+    }
+
+    #[test]
+    fn test_validate() {
+        let mut env = Environment::default();
+        env.insert_var("x".to_owned(), Value::F32(0.0));
+
+        assert!(Program::create("x + 1").validate(&env));
+        assert!(!Program::create("x + y").validate(&env));
+        assert!(!Program::create("x + *").validate(&env));
+        assert!(!Program::create("").validate(&env));
     }
 
     #[test]

@@ -6,8 +6,10 @@ use std::f32::consts::PI;
 use bevy::{
     anti_alias::taa::TemporalAntiAliasing,
     app::TaskPoolThreadAssignmentPolicy,
+    input_focus::{AutoFocus, FocusCause, InputFocus},
     pbr::{ScreenSpaceAmbientOcclusion, wireframe::WireframePlugin},
     prelude::*,
+    text::{EditableText, TextCursorStyle},
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
 use noise::{NoiseFn, Simplex};
@@ -96,6 +98,8 @@ impl ScalarField for SimplexNoise {
     }
 }
 
+const DEFAULT_EXPR: &str = "x^2 + 2 * z^2 - y";
+
 type PlotFactory = Box<dyn (Fn() -> Plot) + Send + Sync>;
 
 #[derive(Resource)]
@@ -109,7 +113,7 @@ struct PlotCycler {
 fn main() {
     App::new()
         .add_systems(Startup, setup)
-        .add_systems(Update, (toggle_focus, cycle_plots))
+        .add_systems(Update, (toggle_focus, cycle_plots, submit_expr))
         .add_plugins((
             DefaultPlugins.set(TaskPoolPlugin {
                 task_pool_options: TaskPoolOptions {
@@ -139,7 +143,7 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
     });
 
     let plots: Vec<PlotFactory> = vec![
-        Box::new(|| Plot::new(ExprField::new("x^2 + 2 * z^2 - y"), 2, 5, 1e-4)),
+        Box::new(|| Plot::new(ExprField::new(DEFAULT_EXPR), 2, 5, 1e-4)),
         Box::new(|| Plot::new(EllipticParaboloid::new(0.4, 0.4), 1, 5, 1e-4)),
         Box::new(|| Plot::new(Waves2, 1, 5, 1e-4)),
         Box::new(|| Plot::new(Sphere, 3, 5, 1e-4)),
@@ -158,7 +162,7 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
     commands.spawn((
         DirectionalLight {
             illuminance: light_consts::lux::OVERCAST_DAY,
-            shadows_enabled: false,
+            shadow_maps_enabled: false,
             ..default()
         },
         Transform {
@@ -166,6 +170,24 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
             rotation: Quat::from_rotation_x(-0.4 * PI),
             ..default()
         },
+    ));
+
+    commands.spawn((
+        ExprText,
+        EditableText {
+            visible_width: Some(40.0),
+            ..EditableText::new(DEFAULT_EXPR)
+        },
+        TextCursorStyle::default(),
+        AutoFocus,
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(8.0),
+            left: Val::Px(8.0),
+            padding: UiRect::all(Val::Px(4.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
     ));
 
     commands.spawn((
@@ -211,14 +233,49 @@ fn cycle_plots(
     cycler.current = spawn_plot(&mut commands, plot, cycler.material.clone());
 }
 
+#[derive(Component)]
+struct ExprText;
+
+fn submit_expr(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut cycler: ResMut<PlotCycler>,
+    field: Single<(&EditableText, &mut TextColor), With<ExprText>>,
+) {
+    if !keys.just_pressed(KeyCode::Enter) {
+        return;
+    }
+
+    let (field, mut color) = field.into_inner();
+    let program = Program::create(&field.value().to_string());
+
+    let mut env = Environment::default();
+    for name in ["x", "y", "z"] {
+        env.insert_var(name.to_owned(), Value::F32(0.0));
+    }
+
+    if !program.validate(&env) {
+        color.0 = Color::srgb(1.0, 0.3, 0.3);
+        return;
+    }
+
+    color.0 = Color::WHITE;
+    commands.entity(cycler.current).despawn();
+    let plot = Plot::new(ExprField { program }, 2, 5, 1e-4);
+    cycler.current = spawn_plot(&mut commands, plot, cycler.material.clone());
+}
+
 fn toggle_focus(
     mouse: Res<ButtonInput<MouseButton>>,
     mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
     mut controls: Query<&mut CameraControls>,
+    mut input_focus: ResMut<InputFocus>,
+    expr_field: Single<Entity, With<ExprText>>,
 ) {
     if mouse.just_pressed(MouseButton::Left) {
         cursor.grab_mode = CursorGrabMode::Locked;
         cursor.visible = false;
+        input_focus.clear();
 
         for mut controls in &mut controls {
             controls.is_active = true;
@@ -228,6 +285,7 @@ fn toggle_focus(
     if mouse.just_released(MouseButton::Left) {
         cursor.grab_mode = CursorGrabMode::None;
         cursor.visible = true;
+        input_focus.set(*expr_field, FocusCause::Navigated);
 
         for mut controls in &mut controls {
             controls.is_active = false;

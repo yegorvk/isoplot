@@ -14,9 +14,18 @@ dashmap.workspace = true
 noise = "0.9"
 
 [dependencies.bevy]
-version = "0.18.1"
+version = "0.19.0"
 default-features = false
-features = ["default_platform", "3d_bevy_render", "bevy_log"]
+features = [
+    "default_app",
+    "default_platform",
+    "3d_bevy_render",
+    "bevy_log",
+    "ui_bevy_render",
+    "bevy_ui_widgets",
+    "ui_picking",
+    "default_font",
+]
 
 [dependencies.log]
 version = "*"

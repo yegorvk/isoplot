@@ -49,6 +49,8 @@ fn dev() -> Result<()> {
             "isoplot-bevy",
             "-F",
             "bevy/dynamic_linking",
+            "-F",
+            "bevy/debug",
         ])
         .status()
         .expect("Failed to execute cargo run");
@@ -74,6 +76,8 @@ fn dev_opt() -> Result<()> {
             "dev-opt",
             "-F",
             "bevy/dynamic_linking",
+            "-F",
+            "bevy/debug",
         ])
         .status()
         .expect("Failed to execute cargo run");
