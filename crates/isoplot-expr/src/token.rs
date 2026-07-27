@@ -1,34 +1,19 @@
-use std::ops::Range;
-
 use crate::span::{BytePos, Span};
 use logos::Logos;
 
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct Token {
-    pub(crate) kind: TokenKind,
+pub(crate) struct Token<'src> {
+    pub(crate) kind: TokenKind<'src>,
     pub(crate) span: Span,
 }
 
-impl Token {
-    pub(crate) fn unwrap_int(&self) -> LitInt {
-        assert_eq!(self.kind, TokenKind::Int);
-        LitInt(*self)
-    }
-
-    pub(crate) fn unwrap_float(&self) -> LitFloat {
-        assert_eq!(self.kind, TokenKind::Float);
-        LitFloat(*self)
-    }
-}
-
-#[derive(Copy, Clone, PartialEq, Debug, Logos)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Logos)]
 #[logos(skip r"[ \t\r\n\f]+")]
-pub(crate) enum TokenKind {
-    #[regex(r"[0-9]+\.[0-9]+")]
-    Float,
+pub(crate) enum TokenKind<'src> {
+    #[regex(r"[0-9]+\.[0-9]+", |lex| LitFloat(lex.slice()))]
+    Float(LitFloat<'src>),
 
-    #[regex(r"[0-9]+")]
-    Int,
+    #[regex(r"[0-9]+", |lex| LitInt(lex.slice()))]
+    Int(LitInt<'src>),
 
     #[token("+")]
     Plus,
@@ -41,6 +26,9 @@ pub(crate) enum TokenKind {
 
     #[token("/")]
     Slash,
+
+    #[token("^")]
+    Caret,
 
     #[token("(")]
     LParen,
@@ -55,50 +43,41 @@ pub(crate) enum TokenKind {
     Eof,
 }
 
-pub(crate) fn tokenize(src: &str) -> Vec<Token> {
-    let eof = Token {
+pub(crate) fn tokenize<'src>(src: &'src str) -> impl Iterator<Item = Token<'src>> {
+    assert!(src.len() < u32::MAX as usize, "`src` is too large");
+
+    let eof_token = Token {
         kind: TokenKind::Eof,
-        span: Span::new(BytePos(src.len() as u32), BytePos(src.len() as u32)),
+        span: Span::empty(BytePos(src.len() as u32)),
     };
 
     TokenKind::lexer(src)
         .spanned()
         .map(|(kind, range)| Token {
             kind: kind.unwrap(),
-            span: token_span(range),
+            span: Span::new(BytePos(range.start as u32), BytePos(range.end as u32)),
         })
-        .chain([eof])
-        .collect()
+        .chain([eof_token])
 }
 
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct OverflowError;
 
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct LitInt(Token);
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub(crate) struct LitInt<'src>(&'src str);
 
-impl LitInt {
-    pub(crate) fn span(&self) -> Span {
-        self.0.span
-    }
-
-    pub(crate) fn parse_i32(&self, src: &str) -> Result<i32, OverflowError> {
-        src[span_range(self.0.span)]
-            .parse()
-            .map_err(|_| OverflowError)
+impl LitInt<'_> {
+    pub(crate) fn parse_i32(self) -> Result<i32, OverflowError> {
+        self.0.parse().map_err(|_| OverflowError)
     }
 }
 
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct LitFloat(Token);
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub(crate) struct LitFloat<'src>(&'src str);
 
-impl LitFloat {
-    pub(crate) fn span(&self) -> Span {
-        self.0.span
-    }
-
-    pub(crate) fn parse_f32(&self, src: &str) -> Result<f32, OverflowError> {
-        let value: f32 = src[span_range(self.0.span)].parse().unwrap();
+impl LitFloat<'_> {
+    pub(crate) fn parse_f32(self) -> Result<f32, OverflowError> {
+        let value: f32 = self.0.parse().unwrap();
         if value.is_finite() {
             Ok(value)
         } else {
@@ -107,20 +86,26 @@ impl LitFloat {
     }
 }
 
-const fn token_span(range: Range<usize>) -> Span {
-    Span::new(BytePos(range.start as u32), BytePos(range.end as u32))
-}
-
-fn span_range(span: Span) -> Range<usize> {
-    span.start().as_usize()..span.end().as_usize()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn kinds(src: &str) -> Vec<TokenKind> {
-        tokenize(src).iter().map(|token| token.kind).collect()
+    fn tokens(src: &str) -> Vec<TokenKind<'_>> {
+        tokenize(src).map(|token| token.kind).collect()
+    }
+
+    fn tokenize_int(src: &str) -> LitInt<'_> {
+        match tokenize(src).next().unwrap().kind {
+            TokenKind::Int(lit) => lit,
+            kind => panic!("expected an int token, got {kind:?}"),
+        }
+    }
+
+    fn tokenize_float(src: &str) -> LitFloat<'_> {
+        match tokenize(src).next().unwrap().kind {
+            TokenKind::Float(lit) => lit,
+            kind => panic!("expected a float token, got {kind:?}"),
+        }
     }
 
     #[test]
@@ -128,23 +113,34 @@ mod tests {
         use TokenKind::*;
 
         assert_eq!(
-            kinds("1 + 2.5 * (30 - 4) / 5"),
+            tokens("1 + 2.5 * (30 - 4) / 5"),
             [
-                Int, Plus, Float, Star, LParen, Int, Minus, Int, RParen, Slash, Int, Eof
+                Int(LitInt("1")),
+                Plus,
+                Float(LitFloat("2.5")),
+                Star,
+                LParen,
+                Int(LitInt("30")),
+                Minus,
+                Int(LitInt("4")),
+                RParen,
+                Slash,
+                Int(LitInt("5")),
+                Eof
             ]
         );
 
-        assert_eq!(kinds(" \t\r\n"), [Eof]);
+        assert_eq!(tokens(" \t\r\n"), [Eof]);
 
-        assert_eq!(kinds("1."), [Int, Unknown, Eof]);
-        assert_eq!(kinds(".5"), [Unknown, Int, Eof]);
+        assert_eq!(tokens("1."), [Int(LitInt("1")), Unknown, Eof]);
+        assert_eq!(tokens(".5"), [Unknown, Int(LitInt("5")), Eof]);
 
-        assert_eq!(kinds("-1"), [Minus, Int, Eof]);
+        assert_eq!(tokens("-1"), [Minus, Int(LitInt("1")), Eof]);
     }
 
     #[test]
     fn test_token_spans() {
-        let tokens = tokenize(" 12 + 3.5");
+        let tokens: Vec<_> = tokenize(" 12 + 3.5").collect();
 
         assert_eq!(tokens[0].span, Span::new(BytePos(1), BytePos(3)));
         assert_eq!(tokens[1].span, Span::new(BytePos(4), BytePos(5)));
@@ -154,24 +150,18 @@ mod tests {
 
     #[test]
     fn test_parse_i32() {
-        let src = "2147483647";
-        assert_eq!(
-            tokenize(src)[0].unwrap_int().parse_i32(src).unwrap(),
-            i32::MAX
-        );
+        assert_eq!(tokenize_int("2147483647").parse_i32().unwrap(), i32::MAX);
 
         // i32::MAX + 1
-        let src = "2147483648";
-        assert!(tokenize(src)[0].unwrap_int().parse_i32(src).is_err());
+        assert!(tokenize_int("2147483648").parse_i32().is_err());
     }
 
     #[test]
     fn test_parse_f32() {
-        let src = "2.5";
-        assert_eq!(tokenize(src)[0].unwrap_float().parse_f32(src).unwrap(), 2.5);
+        assert_eq!(tokenize_float("2.5").parse_f32().unwrap(), 2.5);
 
         // 1e39 > f32::MAX
         let src = format!("1{}.0", "0".repeat(39));
-        assert!(tokenize(&src)[0].unwrap_float().parse_f32(&src).is_err());
+        assert!(tokenize_float(&src).parse_f32().is_err());
     }
 }

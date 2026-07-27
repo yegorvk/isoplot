@@ -14,9 +14,13 @@ pub(crate) struct Span {
 }
 
 impl Span {
-    pub(crate) const fn new(start: BytePos, end: BytePos) -> Self {
+    pub(crate) fn new(start: BytePos, end: BytePos) -> Self {
         assert!(start.0 <= end.0);
         Self { start, end }
+    }
+
+    pub(crate) fn empty(position: BytePos) -> Self {
+        Self::new(position, position)
     }
 
     pub(crate) fn start(self) -> BytePos {
@@ -25,5 +29,9 @@ impl Span {
 
     pub(crate) fn end(self) -> BytePos {
         self.end
+    }
+
+    pub(crate) fn chain(self, other: Span) -> Self {
+        Self::new(self.start, other.end)
     }
 }

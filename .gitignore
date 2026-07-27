@@ -1,5 +1,2 @@
 # Cargo
 /target
-
-# AI tools
-/.claude/settings.local.json
