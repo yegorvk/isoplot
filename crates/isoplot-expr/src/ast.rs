@@ -1,8 +1,28 @@
 use crate::{Value, span::Span, symbol::Symbol};
-use std::{collections::HashMap, marker::PhantomData, ops::Index};
+use std::{
+    collections::HashMap,
+    marker::PhantomData,
+    ops::{Index, Range},
+};
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub(crate) struct ExprId(u32);
+
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct ExprSetId {
+    start: u32,
+    end: u32,
+}
+
+impl ExprSetId {
+    fn raw_range(self) -> Range<u32> {
+        self.start..self.end
+    }
+
+    fn usize_range(self) -> Range<usize> {
+        (self.start as usize)..(self.end as usize)
+    }
+}
 
 #[derive(Debug, Default)]
 struct Arena {
@@ -22,60 +42,75 @@ impl Arena {
     }
 }
 
-type Invariant<'b> = PhantomData<fn(&'b ()) -> &'b ()>;
+type Brand<'b> = PhantomData<fn(&'b ()) -> &'b ()>;
 
 pub(crate) struct AstBuilder<'b> {
     arena: Arena,
     isolated: u32,
-    _brand: Invariant<'b>,
+    _brand: Brand<'b>,
 }
 
 impl<'b> AstBuilder<'b> {
     pub(crate) fn un_op(&mut self, op_span: Span, op: UnOp, operand: NewId<'b>) -> NewId<'b> {
+        let span = op_span.chain(operand.node.span);
         let operand = self.consume(operand);
-        let span = op_span.chain(self.span_of(operand));
-        self.insert(span, ExprKind::UnOp(op, operand))
+        self.create(span, ExprKind::UnOp(op, operand))
     }
 
     pub(crate) fn bin_op(&mut self, op: BinOp, lhs: NewId<'b>, rhs: NewId<'b>) -> NewId<'b> {
+        let span = lhs.node.span.chain(rhs.node.span);
         let (lhs, rhs) = (self.consume(lhs), self.consume(rhs));
-        let span = self.span_of(lhs).chain(self.span_of(rhs));
-        self.insert(span, ExprKind::BinOp(op, lhs, rhs))
+        self.create(span, ExprKind::BinOp(op, lhs, rhs))
+    }
+
+    pub(crate) fn intrinsic(
+        &mut self,
+        mut span: Span,
+        intrinsic: Intrinsic,
+        args: impl IntoIterator<Item = NewId<'b>>,
+    ) -> NewId<'b> {
+        let start = self.arena.nodes.len() as u32;
+
+        for arg in args {
+            span = span.chain(arg.node.span);
+            self.consume(arg);
+        }
+
+        let end = self.arena.nodes.len() as u32;
+        self.create(
+            span,
+            ExprKind::Intrinsic(intrinsic, ExprSetId { start, end }),
+        )
     }
 
     pub(crate) fn lit(&mut self, span: Span, value: Value) -> NewId<'b> {
-        self.insert(span, ExprKind::Lit(value))
+        self.create(span, ExprKind::Lit(value))
     }
 
     pub(crate) fn var(&mut self, span: Span, name: Symbol) -> NewId<'b> {
-        self.insert(span, ExprKind::Var(name))
+        self.create(span, ExprKind::Var(name))
     }
 
     pub(crate) fn error(&mut self, span: Span, inner: Option<NewId<'b>>) -> NewId<'b> {
         match inner {
             Some(inner) => {
+                let span = inner.node.span.chain(span);
                 let inner = self.consume(inner);
-                let span = self.span_of(inner).chain(span);
-                self.insert(span, ExprKind::Error(Some(inner)))
+                self.create(span, ExprKind::Error(Some(inner)))
             }
-            None => self.insert(span, ExprKind::Error(None)),
+            None => self.create(span, ExprKind::Error(None)),
         }
-    }
-
-    fn span_of(&self, id: ExprId) -> Span {
-        self.arena.get(id).span
     }
 
     fn consume(&mut self, id: NewId<'b>) -> ExprId {
         self.isolated -= 1;
-        id.id
+        self.arena.insert(id.node)
     }
 
-    fn insert(&mut self, span: Span, kind: ExprKind) -> NewId<'b> {
-        let id = self.arena.insert(Expr { kind, span });
+    fn create(&mut self, span: Span, kind: ExprKind) -> NewId<'b> {
         self.isolated += 1;
         NewId {
-            id,
+            node: Expr { kind, span },
             _brand: PhantomData,
         }
     }
@@ -83,13 +118,12 @@ impl<'b> AstBuilder<'b> {
 
 #[must_use]
 pub(crate) struct NewId<'b> {
-    id: ExprId,
-    _brand: Invariant<'b>,
+    node: Expr,
+    _brand: Brand<'b>,
 }
 
 pub(crate) struct Ast {
     arena: Arena,
-    root: ExprId,
 }
 
 impl Ast {
@@ -103,14 +137,15 @@ impl Ast {
             _brand: PhantomData,
         };
 
-        let root = f(&mut builder).id;
+        let root = f(&mut builder);
 
         if builder.isolated != 1 {
             panic!("`AstBuilder` contains orphaned nodes")
         }
 
+        builder.consume(root);
+
         Ast {
-            root,
             arena: builder.arena,
         }
     }
@@ -134,6 +169,13 @@ impl Ast {
                     let rhs = accs[rhs.0 as usize].take().unwrap();
                     folder.bin_op(id, op, lhs, rhs)
                 }
+                ExprKind::Intrinsic(intrinsic, args) => {
+                    let args = (&mut accs[args.usize_range()])
+                        .iter_mut()
+                        .map(|arg| arg.take().unwrap());
+
+                    folder.intrinsic(id, intrinsic, args)
+                }
                 ExprKind::Var(name) => folder.var(id, name),
                 ExprKind::Lit(value) => folder.lit(id, value),
                 ExprKind::Error(inner) => {
@@ -145,7 +187,12 @@ impl Ast {
             accs.push(Some(acc));
         }
 
-        accs[self.root.0 as usize].take().unwrap()
+        accs.pop().unwrap().unwrap()
+    }
+
+    #[cfg(test)]
+    fn root(&self) -> ExprId {
+        ExprId(self.arena.nodes.len() as u32 - 1)
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -179,6 +226,10 @@ impl<T> DenseMap<T> {
                 ExprKind::UnOp(op, operand) => builder.un_op(id, op, &map[operand.0 as usize]),
                 ExprKind::BinOp(op, lhs, rhs) => {
                     builder.bin_op(id, op, &map[lhs.0 as usize], &map[rhs.0 as usize])
+                }
+                ExprKind::Intrinsic(intrinsic, args) => {
+                    let args = map[args.usize_range()].iter();
+                    builder.intrinsic(id, intrinsic, args)
                 }
                 ExprKind::Var(name) => builder.var(id, name),
                 ExprKind::Lit(value) => builder.lit(id, value),
@@ -222,6 +273,10 @@ impl<T> SparseMap<T> {
                 ExprKind::BinOp(op, lhs, rhs) => {
                     builder.bin_op(id, op, map.get(&lhs), map.get(&rhs))
                 }
+                ExprKind::Intrinsic(intrinsic, args) => {
+                    let args = args.raw_range().map(|raw_id| map.get(&ExprId(raw_id)));
+                    builder.intrinsic(id, intrinsic, args)
+                }
                 ExprKind::Var(name) => builder.var(id, name),
                 ExprKind::Lit(value) => builder.lit(id, value),
                 ExprKind::Error(inner) => {
@@ -253,9 +308,35 @@ pub(crate) struct Expr {
 pub(crate) enum ExprKind {
     UnOp(UnOp, ExprId),
     BinOp(BinOp, ExprId, ExprId),
+    Intrinsic(Intrinsic, ExprSetId),
     Var(Symbol),
     Lit(Value),
     Error(Option<ExprId>),
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub(crate) enum Intrinsic {
+    Exp,
+    Log,
+    Ln,
+    Sin,
+    Cos,
+    Tan,
+    Cot,
+}
+
+impl Intrinsic {
+    pub(crate) fn num_args(self) -> usize {
+        match self {
+            Intrinsic::Exp
+            | Intrinsic::Log
+            | Intrinsic::Ln
+            | Intrinsic::Sin
+            | Intrinsic::Cos
+            | Intrinsic::Tan
+            | Intrinsic::Cot => 1,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -285,6 +366,10 @@ pub(crate) trait Transformer {
 
     /// Transforms a binary operator expression (e.g., `A + B`).
     fn bin_op(&mut self, id: ExprId, op: BinOp, lhs: Self::In<'_>, rhs: Self::In<'_>) -> Self::Out;
+
+    fn intrinsic<'a, I>(&mut self, id: ExprId, kind: Intrinsic, args: I) -> Self::Out
+    where
+        I: ExactSizeIterator<Item = Self::In<'a>>;
 
     /// Transforms a variable expression (e.g., `x`).
     fn var(&mut self, id: ExprId, name: Symbol) -> Self::Out;
@@ -328,6 +413,24 @@ mod tests {
             }
         }
 
+        fn intrinsic<'a, I>(&mut self, _id: ExprId, intrinsic: Intrinsic, mut args: I) -> f32
+        where
+            I: ExactSizeIterator<Item = Self::In<'a>>,
+        {
+            let arg = args.next().unwrap();
+            assert!(args.next().is_none());
+
+            match intrinsic {
+                Intrinsic::Exp => arg.exp(),
+                Intrinsic::Log => arg.log10(),
+                Intrinsic::Ln => arg.ln(),
+                Intrinsic::Sin => arg.sin(),
+                Intrinsic::Cos => arg.cos(),
+                Intrinsic::Tan => arg.tan(),
+                Intrinsic::Cot => arg.tan().recip(),
+            }
+        }
+
         fn var(&mut self, _id: ExprId, name: Symbol) -> f32 {
             self.env[&name]
         }
@@ -335,7 +438,6 @@ mod tests {
         fn lit(&mut self, _id: ExprId, value: Value) -> f32 {
             match value {
                 Value::F32(x) => x,
-                Value::Unit => unreachable!(),
             }
         }
 
@@ -398,6 +500,13 @@ mod tests {
             lhs.max(rhs) + 1
         }
 
+        fn intrinsic<'a, I>(&mut self, _id: ExprId, _intrinsic: Intrinsic, args: I) -> u32
+        where
+            I: ExactSizeIterator<Item = &'a u32>,
+        {
+            args.copied().max().unwrap_or(0) + 1
+        }
+
         fn var(&mut self, _id: ExprId, _name: Symbol) -> u32 {
             1
         }
@@ -426,7 +535,24 @@ mod tests {
         });
 
         let depths = DenseMap::build(&ast, Depth);
-        assert_eq!(depths[ast.root], 4);
+        assert_eq!(depths[ast.root()], 4);
+    }
+
+    #[test]
+    fn intrinsic_arg_set() {
+        let span = Span::new(BytePos(0), BytePos(1));
+
+        // sin(1, 2 * 3) — arity is not enforced at the arena level
+        let ast = Ast::build(|b| {
+            let one = b.lit(span, Value::F32(1.0));
+            let two = b.lit(span, Value::F32(2.0));
+            let three = b.lit(span, Value::F32(3.0));
+            let mul = b.bin_op(BinOp::Mul, two, three);
+            b.intrinsic(span, Intrinsic::Sin, [one, mul])
+        });
+
+        let depths = DenseMap::build(&ast, Depth);
+        assert_eq!(depths[ast.root()], 3);
     }
 
     struct Consts;
@@ -460,6 +586,13 @@ mod tests {
             })
         }
 
+        fn intrinsic<'a, I>(&mut self, _id: ExprId, _intrinsic: Intrinsic, _args: I) -> Option<f32>
+        where
+            I: ExactSizeIterator<Item = Option<&'a f32>>,
+        {
+            None
+        }
+
         fn var(&mut self, _id: ExprId, _name: Symbol) -> Option<f32> {
             None
         }
@@ -467,7 +600,6 @@ mod tests {
         fn lit(&mut self, _id: ExprId, value: Value) -> Option<f32> {
             match value {
                 Value::F32(x) => Some(x),
-                Value::Unit => unreachable!(),
             }
         }
 
@@ -494,11 +626,11 @@ mod tests {
 
         let consts = SparseMap::build(&ast, Consts);
 
-        // Post-order: 0 = x, 1 = 2, 2 = 3, 3 = 2 * 3, 4 = root.
-        assert_eq!(consts.get(ExprId(0)), None);
-        assert_eq!(consts.get(ExprId(1)), Some(&2.0));
+        // Insertion order: 0 = 2, 1 = 3, 2 = x, 3 = 2 * 3, 4 = root.
+        assert_eq!(consts.get(ExprId(0)), Some(&2.0));
+        assert_eq!(consts.get(ExprId(2)), None);
         assert_eq!(consts.get(ExprId(3)), Some(&6.0));
-        assert_eq!(consts.get(ast.root), None);
+        assert_eq!(consts.get(ast.root()), None);
     }
 
     #[test]

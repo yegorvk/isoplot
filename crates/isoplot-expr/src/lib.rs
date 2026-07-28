@@ -1,7 +1,7 @@
 use std::num::NonZeroU32;
 
 use crate::{
-    ast::{Ast, BinOp, DenseMap, ExprId, Transformer, UnOp},
+    ast::{Ast, BinOp, DenseMap, ExprId, Intrinsic, Transformer, UnOp},
     parser::parse,
     symbol::{Interner, Symbol},
     token::tokenize,
@@ -17,7 +17,6 @@ mod token;
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub(crate) enum Value {
     F32(f32),
-    Unit,
 }
 
 #[derive(Debug)]
@@ -204,6 +203,17 @@ impl Transformer for Resolver<'_> {
         None
     }
 
+    fn intrinsic<'a, I>(&mut self, _id: ExprId, intrinsic: Intrinsic, args: I) -> Option<VarSlot>
+    where
+        I: ExactSizeIterator<Item = &'a Option<VarSlot>>,
+    {
+        if args.len() != intrinsic.num_args() {
+            *self.valid = false;
+        }
+
+        None
+    }
+
     fn var(&mut self, _id: ExprId, name: Symbol) -> Option<VarSlot> {
         let name = self.interner.resolve(name).unwrap();
 
@@ -251,6 +261,9 @@ mod tests {
         assert!(Program::create(xy_shape(), "x + w").is_err());
         assert!(Program::create(xy_shape(), "x + *").is_err());
         assert!(Program::create(xy_shape(), "").is_err());
+        assert!(Program::create(xy_shape(), "sin(x)").is_ok());
+        assert!(Program::create(xy_shape(), "sin(x, y)").is_err());
+        assert!(Program::create(xy_shape(), "sin x").is_err());
     }
 
     #[test]
@@ -278,6 +291,17 @@ mod tests {
         instance.call(&[&[3.0]], &mut out);
 
         assert_eq!(out, [25.0]);
+    }
+
+    #[test]
+    fn test_eval_intrinsic() {
+        let program = Program::create(xy_shape(), "cos(x) * y").unwrap();
+        let instance = program.instantiate(&[("y", 2.0)]).unwrap();
+
+        let mut out = [0.0];
+        instance.call(&[&[0.0]], &mut out);
+
+        assert_eq!(out, [2.0]);
     }
 
     #[test]

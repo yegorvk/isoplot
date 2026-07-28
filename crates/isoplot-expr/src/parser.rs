@@ -1,8 +1,8 @@
-use std::mem;
+use std::{f32::consts::PI, mem};
 
 use crate::{
     Value,
-    ast::{Ast, AstBuilder, BinOp, NewId, UnOp},
+    ast::{Ast, AstBuilder, BinOp, Intrinsic, NewId, UnOp},
     span::{BytePos, Span},
     symbol::Interner,
     token::{Token, TokenKind},
@@ -44,11 +44,7 @@ where
     fn parse_expr(&mut self, min_bp: u8) -> NewId<'b> {
         let mut lhs = self.parse_prefix();
 
-        loop {
-            let Some(op) = infix_op(self.next.kind) else {
-                break;
-            };
-
+        while let Some(op) = infix_op(self.next.kind) {
             let (lbp, rbp) = binop_bp(op);
             if lbp < min_bp {
                 break;
@@ -74,6 +70,7 @@ where
                 Ok(value) => self.builder.lit(token.span, Value::F32(value)),
                 Err(_) => self.builder.error(token.span, None),
             },
+            TokenKind::Pi => self.builder.lit(token.span, Value::F32(PI)),
             TokenKind::Ident(name) => {
                 let name = self.interner.get_or_insert(name);
                 self.builder.var(token.span, name)
@@ -82,14 +79,34 @@ where
                 let inner = self.parse_expr(0);
                 self.expect(TokenKind::RParen, inner)
             }
-            kind => match prefix_op(kind) {
-                Some(op) => {
+            kind => {
+                if let Some(intrinsic) = intrinsic_op(kind) {
+                    self.parse_call(token.span, intrinsic)
+                } else if let Some(op) = prefix_op(kind) {
                     let operand = self.parse_expr(unop_bp(op));
                     self.builder.un_op(token.span, op, operand)
+                } else {
+                    self.builder.error(token.span, None)
                 }
-                None => self.builder.error(token.span, None),
-            },
+            }
         }
+    }
+
+    fn parse_call(&mut self, span: Span, intrinsic: Intrinsic) -> NewId<'b> {
+        if self.next.kind != TokenKind::LParen {
+            return self.builder.error(self.next.span, None);
+        }
+        self.advance();
+
+        let mut args = vec![self.parse_expr(0)];
+
+        while self.next.kind == TokenKind::Comma {
+            self.advance();
+            args.push(self.parse_expr(0));
+        }
+
+        let call = self.builder.intrinsic(span, intrinsic, args);
+        self.expect(TokenKind::RParen, call)
     }
 
     fn expect(&mut self, kind: TokenKind<'src>, expr: NewId<'b>) -> NewId<'b> {
@@ -118,6 +135,19 @@ fn infix_op(kind: TokenKind<'_>) -> Option<BinOp> {
         TokenKind::Star => Some(BinOp::Mul),
         TokenKind::Slash => Some(BinOp::Div),
         TokenKind::Caret => Some(BinOp::Pow),
+        _ => None,
+    }
+}
+
+fn intrinsic_op(kind: TokenKind<'_>) -> Option<Intrinsic> {
+    match kind {
+        TokenKind::Exp => Some(Intrinsic::Exp),
+        TokenKind::Log => Some(Intrinsic::Log),
+        TokenKind::Ln => Some(Intrinsic::Ln),
+        TokenKind::Sin => Some(Intrinsic::Sin),
+        TokenKind::Cos => Some(Intrinsic::Cos),
+        TokenKind::Tan => Some(Intrinsic::Tan),
+        TokenKind::Cot => Some(Intrinsic::Cot),
         _ => None,
     }
 }
@@ -184,6 +214,24 @@ mod tests {
             format!("({op} {lhs} {rhs})")
         }
 
+        fn intrinsic<'a, I>(&mut self, _id: ExprId, intrinsic: Intrinsic, args: I) -> String
+        where
+            I: ExactSizeIterator<Item = Self::In<'a>>,
+        {
+            let name = match intrinsic {
+                Intrinsic::Exp => "exp",
+                Intrinsic::Log => "log",
+                Intrinsic::Ln => "ln",
+                Intrinsic::Sin => "sin",
+                Intrinsic::Cos => "cos",
+                Intrinsic::Tan => "tan",
+                Intrinsic::Cot => "cot",
+            };
+
+            let parts: Vec<_> = args.collect();
+            format!("({name} {})", parts.join(" "))
+        }
+
         fn var(&mut self, _id: ExprId, name: Symbol) -> String {
             self.interner.resolve(name).unwrap().to_owned()
         }
@@ -191,7 +239,6 @@ mod tests {
         fn lit(&mut self, _id: ExprId, value: Value) -> String {
             match value {
                 Value::F32(x) => format!("{x}"),
-                Value::Unit => unreachable!(),
             }
         }
 
@@ -220,6 +267,15 @@ mod tests {
         assert_eq!(sexpr("x + y * z"), "(+ x (* y z))");
         assert_eq!(sexpr("x ^ 2 + y ^ 2"), "(+ (^ x 2) (^ y 2))");
         assert_eq!(sexpr("-радиус ^ 2"), "(- (^ радиус 2))");
+        assert_eq!(sexpr("2 * pi"), format!("(* 2 {PI})"));
+        assert_eq!(sexpr("π ^ 2"), format!("(^ {PI} 2)"));
+
+        assert_eq!(sexpr("sin(x)"), "(sin x)");
+        assert_eq!(sexpr("log(x)"), "(log x)");
+        assert_eq!(sexpr("ln(x)"), "(ln x)");
+        assert_eq!(sexpr("-sin(x) ^ 2"), "(- (^ (sin x) 2))");
+        assert_eq!(sexpr("cos(x + 1) * 2"), "(* (cos (+ x 1)) 2)");
+        assert_eq!(sexpr("exp(sin(x), y)"), "(exp (sin x) y)");
     }
 
     #[test]
@@ -256,5 +312,23 @@ mod tests {
     #[should_panic]
     fn missing_rparen() {
         sexpr("(1 + 2");
+    }
+
+    #[test]
+    #[should_panic]
+    fn call_missing_lparen() {
+        sexpr("sin x");
+    }
+
+    #[test]
+    #[should_panic]
+    fn call_missing_rparen() {
+        sexpr("sin(x");
+    }
+
+    #[test]
+    #[should_panic]
+    fn call_empty_args() {
+        sexpr("sin()");
     }
 }

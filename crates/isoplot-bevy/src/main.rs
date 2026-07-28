@@ -102,7 +102,7 @@ impl ScalarField for SimplexNoise {
     }
 }
 
-const DEFAULT_EXPR: &str = "y - (x^2 + y^2)";
+const DEFAULT_EXPR: &str = "y - (x^2 + z^2)";
 
 type PlotFactory = Box<dyn (Fn() -> Plot) + Send + Sync>;
 

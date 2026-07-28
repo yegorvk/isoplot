@@ -25,6 +25,7 @@ features = [
     "bevy_ui_widgets",
     "ui_picking",
     "default_font",
+    "system_clipboard",
 ]
 
 [dependencies.log]

@@ -1,6 +1,6 @@
 use crate::{
     Program, Value, VarSlotKind,
-    ast::{BinOp, ExprId, Transformer, UnOp},
+    ast::{BinOp, ExprId, Intrinsic, Transformer, UnOp},
     symbol::Symbol,
 };
 
@@ -83,6 +83,32 @@ impl Transformer for Evaluator<'_> {
         off
     }
 
+    fn intrinsic<'a, I>(&mut self, _id: ExprId, intrinsic: Intrinsic, mut args: I) -> usize
+    where
+        I: ExactSizeIterator<Item = Self::In<'a>>,
+    {
+        assert_eq!(args.len(), 1);
+        let arg = args.next().unwrap();
+
+        let off = self.buf.len();
+
+        for i in 0..self.batch_size {
+            let x = self.buf[arg + i];
+
+            self.buf.push(match intrinsic {
+                Intrinsic::Exp => x.exp(),
+                Intrinsic::Log => x.log10(),
+                Intrinsic::Ln => x.ln(),
+                Intrinsic::Sin => x.sin(),
+                Intrinsic::Cos => x.cos(),
+                Intrinsic::Tan => x.tan(),
+                Intrinsic::Cot => x.tan().recip(),
+            });
+        }
+
+        off
+    }
+
     fn var(&mut self, id: ExprId, _name: Symbol) -> usize {
         let off = self.buf.len();
 
@@ -98,10 +124,7 @@ impl Transformer for Evaluator<'_> {
     }
 
     fn lit(&mut self, _id: ExprId, value: Value) -> usize {
-        let Value::F32(value) = value else {
-            panic!("cannot evaluate `{value:?}`")
-        };
-
+        let Value::F32(value): Value = value;
         let off = self.buf.len();
         self.buf.resize(off + self.batch_size, value);
         off

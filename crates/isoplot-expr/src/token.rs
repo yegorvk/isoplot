@@ -15,6 +15,30 @@ pub(crate) enum TokenKind<'src> {
     #[regex(r"[0-9]+", |lex| LitInt(lex.slice()))]
     Int(LitInt<'src>),
 
+    #[regex(r"(?i)exp")]
+    Exp,
+
+    #[regex(r"(?i)log")]
+    Log,
+
+    #[regex(r"(?i)ln")]
+    Ln,
+
+    #[regex(r"(?i)s[ei]n")]
+    Sin,
+
+    #[regex(r"(?i)cos")]
+    Cos,
+
+    #[regex(r"(?i)tan")]
+    Tan,
+
+    #[regex(r"(?i)cotan|cot|ctg")]
+    Cot,
+
+    #[regex(r"(?i)pi|π", priority = 10)]
+    Pi,
+
     #[regex(r"[\p{XID_Start}_][\p{XID_Continue}]*")]
     Ident(&'src str),
 
@@ -32,6 +56,9 @@ pub(crate) enum TokenKind<'src> {
 
     #[token("^")]
     Caret,
+
+    #[token(",")]
+    Comma,
 
     #[token("(")]
     LParen,
@@ -141,10 +168,39 @@ mod tests {
         assert_eq!(tokens("-1"), [Minus, Int(LitInt("1")), Eof]);
 
         assert_eq!(
-            tokens("x + радиус_2"),
-            [Ident("x"), Plus, Ident("радиус_2"), Eof]
+            tokens("x + раДиус_2"),
+            [Ident("x"), Plus, Ident("раДиус_2"), Eof]
         );
         assert_eq!(tokens("1x"), [Int(LitInt("1")), Ident("x"), Eof]);
+
+        assert_eq!(tokens("pi π"), [Pi, Pi, Eof]);
+        assert_eq!(tokens("pix"), [Ident("pix"), Eof]);
+    }
+
+    #[test]
+    fn test_intrinsic_case() {
+        use TokenKind::*;
+
+        assert_eq!(tokens("sin Sin sen Sen"), [Sin, Sin, Sin, Sin, Eof]);
+        assert_eq!(tokens("cos Cos"), [Cos, Cos, Eof]);
+        assert_eq!(tokens("tan Tan"), [Tan, Tan, Eof]);
+        assert_eq!(
+            tokens("cot Cot cotan Cotan ctg Ctg"),
+            [Cot, Cot, Cot, Cot, Cot, Cot, Eof]
+        );
+        assert_eq!(tokens("exp Exp"), [Exp, Exp, Eof]);
+        assert_eq!(
+            tokens("log Log LOG ln Ln LN"),
+            [Log, Log, Log, Ln, Ln, Ln, Eof]
+        );
+        assert_eq!(tokens("pi Pi"), [Pi, Pi, Eof]);
+
+        assert_eq!(
+            tokens("SIN SEN COS TAN COT COTAN CTG EXP PI"),
+            [Sin, Sin, Cos, Tan, Cot, Cot, Cot, Exp, Pi, Eof]
+        );
+        assert_eq!(tokens("sIn cOs"), [Sin, Cos, Eof]);
+        assert_eq!(tokens("cosine"), [Ident("cosine"), Eof]);
     }
 
     #[test]
