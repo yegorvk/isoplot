@@ -1,12 +1,6 @@
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
 pub(crate) struct BytePos(pub(crate) u32);
 
-impl BytePos {
-    pub(crate) fn as_usize(self) -> usize {
-        self.0 as usize
-    }
-}
-
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub(crate) struct Span {
     start: BytePos,

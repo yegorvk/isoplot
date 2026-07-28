@@ -147,6 +147,10 @@ impl Ast {
 
         accs[self.root.0 as usize].take().unwrap()
     }
+
+    pub(crate) fn len(&self) -> usize {
+        self.arena.nodes.len()
+    }
 }
 
 impl Index<ExprId> for Ast {

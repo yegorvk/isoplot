@@ -1,144 +1,231 @@
-use std::collections::HashMap;
+use std::num::NonZeroU32;
 
 use crate::{
-    ast::{Ast, BinOp, ExprId, Transformer, UnOp},
+    ast::{Ast, BinOp, DenseMap, ExprId, Transformer, UnOp},
     parser::parse,
     symbol::{Interner, Symbol},
     token::tokenize,
 };
 
 mod ast;
+mod backend;
 mod parser;
 mod span;
 mod symbol;
 mod token;
 
 #[derive(Copy, Clone, PartialEq, Debug)]
-pub enum Value {
+pub(crate) enum Value {
     F32(f32),
     Unit,
 }
 
-#[derive(Debug, Default)]
-pub struct Environment {
-    vars: HashMap<String, Value>,
+#[derive(Debug)]
+pub struct ValidateError;
+
+#[derive(Debug)]
+pub struct InstantiateError;
+
+#[derive(Debug)]
+pub struct Shape {
+    inputs: Vec<String>,
+    consts: Vec<String>,
 }
 
-impl Environment {
-    pub fn insert_var(&mut self, name: String, value: Value) {
-        self.vars.insert(name, value);
+impl Shape {
+    pub fn builder() -> ShapeBuilder {
+        ShapeBuilder {
+            inputs: Vec::new(),
+            consts: Vec::new(),
+        }
+    }
+}
+
+pub struct ShapeBuilder {
+    inputs: Vec<String>,
+    consts: Vec<String>,
+}
+
+impl ShapeBuilder {
+    pub fn with_input(mut self, name: impl Into<String>) -> Self {
+        self.inputs.push(name.into());
+        self
+    }
+
+    pub fn with_const(mut self, name: impl Into<String>) -> Self {
+        self.consts.push(name.into());
+        self
+    }
+
+    pub fn build(self) -> Shape {
+        let vars = || self.inputs.iter().chain(&self.consts);
+
+        for (i, name) in vars().enumerate() {
+            if vars().take(i).any(|prev| prev == name) {
+                panic!("duplicate variable `{name}`");
+            }
+        }
+
+        Shape {
+            inputs: self.inputs,
+            consts: self.consts,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+struct VarSlot(NonZeroU32);
+
+const _: () = assert!(size_of::<Option<VarSlot>>() == 4);
+
+#[derive(Copy, Clone, Debug)]
+enum VarSlotKind {
+    Input(u32),
+    Const(u32),
+}
+
+impl VarSlot {
+    fn new(kind: VarSlotKind) -> Self {
+        let (tag, index) = match kind {
+            VarSlotKind::Input(index) => (0, index),
+            VarSlotKind::Const(index) => (1, index),
+        };
+
+        assert!(index < u32::MAX >> 1);
+        Self(NonZeroU32::new((index << 1 | tag) + 1).unwrap())
+    }
+
+    fn kind(self) -> VarSlotKind {
+        let raw = self.0.get() - 1;
+        let index = raw >> 1;
+
+        match raw & 1 {
+            0 => VarSlotKind::Input(index),
+            _ => VarSlotKind::Const(index),
+        }
     }
 }
 
 pub struct Program {
-    interner: Interner,
+    shape: Shape,
     ast: Ast,
+    var_slots: DenseMap<Option<VarSlot>>,
 }
 
 impl Program {
-    pub fn create(source: &str) -> Self {
+    pub fn create(shape: Shape, source: &str) -> Result<Self, ValidateError> {
         let mut interner = Interner::default();
+        let ast = parse(tokenize(source), &mut interner);
 
-        Program {
-            ast: parse(tokenize(source), &mut interner),
-            interner,
+        let mut valid = true;
+
+        let var_slots = DenseMap::build(
+            &ast,
+            Resolver {
+                interner: &interner,
+                shape: &shape,
+                valid: &mut valid,
+            },
+        );
+
+        if !valid {
+            return Err(ValidateError);
         }
-    }
 
-    pub fn evaluate(&self, env: &Environment) -> Value {
-        self.ast.fold(Evaluator {
-            interner: &self.interner,
-            env,
+        Ok(Program {
+            shape,
+            ast,
+            var_slots,
         })
     }
 
-    pub fn validate(&self, env: &Environment) -> bool {
-        self.ast.fold(Validator {
-            interner: &self.interner,
-            env,
-        })
-    }
-}
+    pub fn instantiate(self, consts: &[(&str, f32)]) -> Result<Instance, InstantiateError> {
+        let consts = self.resolve_consts(consts)?;
 
-struct Validator<'a> {
-    interner: &'a Interner,
-    env: &'a Environment,
-}
-
-impl Transformer for Validator<'_> {
-    type In<'a> = bool;
-    type Out = bool;
-
-    fn un_op(&mut self, _id: ExprId, _op: UnOp, operand: bool) -> bool {
-        operand
-    }
-
-    fn bin_op(&mut self, _id: ExprId, _op: BinOp, lhs: bool, rhs: bool) -> bool {
-        lhs && rhs
-    }
-
-    fn var(&mut self, _id: ExprId, name: Symbol) -> bool {
-        let name = self.interner.resolve(name).unwrap();
-        self.env.vars.contains_key(name)
-    }
-
-    fn lit(&mut self, _id: ExprId, _value: Value) -> bool {
-        true
-    }
-
-    fn map_error(&mut self, _id: ExprId, _inner: Option<bool>) -> bool {
-        false
-    }
-}
-
-struct Evaluator<'a> {
-    interner: &'a Interner,
-    env: &'a Environment,
-}
-
-impl Transformer for Evaluator<'_> {
-    type In<'a> = Value;
-    type Out = Value;
-
-    fn un_op(&mut self, _id: ExprId, op: UnOp, operand: Value) -> Value {
-        let Value::F32(operand) = operand else {
-            panic!("cannot apply `{op:?}` to `{operand:?}`")
-        };
-
-        Value::F32(match op {
-            UnOp::Plus => operand,
-            UnOp::Minus => -operand,
+        Ok(Instance {
+            backend: backend::Instance::new(self, consts),
         })
     }
 
-    fn bin_op(&mut self, _id: ExprId, op: BinOp, lhs: Value, rhs: Value) -> Value {
-        let (Value::F32(lhs), Value::F32(rhs)) = (lhs, rhs) else {
-            panic!("cannot apply `{op:?}` to `{lhs:?}` and `{rhs:?}`")
-        };
+    fn resolve_consts(&self, consts: &[(&str, f32)]) -> Result<Vec<f32>, InstantiateError> {
+        let mut values = vec![None; self.shape.consts.len()];
 
-        Value::F32(match op {
-            BinOp::Add => lhs + rhs,
-            BinOp::Sub => lhs - rhs,
-            BinOp::Mul => lhs * rhs,
-            BinOp::Div => lhs / rhs,
-            BinOp::Pow => lhs.powf(rhs),
-        })
-    }
+        for &(name, value) in consts {
+            let index = self
+                .shape
+                .consts
+                .iter()
+                .position(|cst| cst == name)
+                .ok_or(InstantiateError)?;
 
-    fn var(&mut self, _id: ExprId, name: Symbol) -> Value {
-        let name = self.interner.resolve(name).unwrap();
-        match self.env.vars.get(name) {
-            Some(&value) => value,
-            None => panic!("unbound variable `{name}`"),
+            if values[index].replace(value).is_some() {
+                return Err(InstantiateError);
+            }
         }
+
+        values
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or(InstantiateError)
+    }
+}
+
+pub struct Instance {
+    backend: backend::Instance,
+}
+
+impl Instance {
+    pub fn call(&self, inputs: &[&[f32]], out: &mut [f32]) {
+        self.backend.call(inputs, out)
+    }
+}
+
+struct Resolver<'a> {
+    interner: &'a Interner,
+    shape: &'a Shape,
+    valid: &'a mut bool,
+}
+
+impl Transformer for Resolver<'_> {
+    type In<'a> = &'a Option<VarSlot>;
+    type Out = Option<VarSlot>;
+
+    fn un_op(&mut self, _id: ExprId, _op: UnOp, _operand: &Option<VarSlot>) -> Option<VarSlot> {
+        None
     }
 
-    fn lit(&mut self, _id: ExprId, value: Value) -> Value {
-        value
+    fn bin_op(
+        &mut self,
+        _id: ExprId,
+        _op: BinOp,
+        _lhs: &Option<VarSlot>,
+        _rhs: &Option<VarSlot>,
+    ) -> Option<VarSlot> {
+        None
     }
 
-    fn map_error(&mut self, _id: ExprId, _inner: Option<Value>) -> Value {
-        panic!("AST contains an error node")
+    fn var(&mut self, _id: ExprId, name: Symbol) -> Option<VarSlot> {
+        let name = self.interner.resolve(name).unwrap();
+
+        if let Some(index) = self.shape.inputs.iter().position(|input| input == name) {
+            return Some(VarSlot::new(VarSlotKind::Input(index as u32)));
+        }
+
+        if let Some(index) = self.shape.consts.iter().position(|cst| cst == name) {
+            return Some(VarSlot::new(VarSlotKind::Const(index as u32)));
+        }
+
+        *self.valid = false;
+        None
+    }
+
+    fn lit(&mut self, _id: ExprId, _value: Value) -> Option<VarSlot> {
+        None
+    }
+
+    fn map_error(&mut self, _id: ExprId, _inner: Option<&Option<VarSlot>>) -> Option<VarSlot> {
+        *self.valid = false;
+        None
     }
 }
 
@@ -146,45 +233,69 @@ impl Transformer for Evaluator<'_> {
 mod tests {
     use super::*;
 
+    fn xy_shape() -> Shape {
+        Shape::builder().with_input("x").with_const("y").build()
+    }
+
     #[test]
-    fn program_is_send_sync() {
+    fn instance_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Program>();
+        assert_send_sync::<Instance>();
+    }
+
+    #[test]
+    fn test_create() {
+        assert!(Program::create(xy_shape(), "x + 1").is_ok());
+        assert!(Program::create(xy_shape(), "x + y").is_ok());
+        assert!(Program::create(xy_shape(), "x + w").is_err());
+        assert!(Program::create(xy_shape(), "x + *").is_err());
+        assert!(Program::create(xy_shape(), "").is_err());
+    }
+
+    #[test]
+    #[should_panic]
+    fn duplicate_var() {
+        Shape::builder().with_input("x").with_const("x").build();
+    }
+
+    #[test]
+    fn test_instantiate() {
+        let program = || Program::create(xy_shape(), "x").unwrap();
+
+        assert!(program().instantiate(&[("y", 1.0)]).is_ok());
+        assert!(program().instantiate(&[]).is_err());
+        assert!(program().instantiate(&[("w", 1.0)]).is_err());
+        assert!(program().instantiate(&[("y", 1.0), ("y", 2.0)]).is_err());
     }
 
     #[test]
     fn test_eval() {
-        let program = Program::create("x ^ 2 + y ^ 2");
+        let program = Program::create(xy_shape(), "x ^ 2 + y ^ 2").unwrap();
+        let instance = program.instantiate(&[("y", 4.0)]).unwrap();
 
-        let mut env = Environment::default();
-        env.insert_var("x".to_owned(), Value::F32(3.0));
-        env.insert_var("y".to_owned(), Value::F32(4.0));
+        let mut out = [0.0];
+        instance.call(&[&[3.0]], &mut out);
 
-        assert_eq!(program.evaluate(&env), Value::F32(25.0));
+        assert_eq!(out, [25.0]);
     }
 
     #[test]
-    fn test_validate() {
-        let mut env = Environment::default();
-        env.insert_var("x".to_owned(), Value::F32(0.0));
+    fn test_eval_batch() {
+        let program = Program::create(xy_shape(), "y * x + 1").unwrap();
+        let instance = program.instantiate(&[("y", 2.0)]).unwrap();
 
-        assert!(Program::create("x + 1").validate(&env));
-        assert!(!Program::create("x + y").validate(&env));
-        assert!(!Program::create("x + *").validate(&env));
-        assert!(!Program::create("").validate(&env));
-    }
+        let mut out = [0.0; 4];
+        instance.call(&[&[1.0, 2.0, 3.0, 4.0]], &mut out);
 
-    #[test]
-    #[should_panic]
-    fn test_eval_unbound_var() {
-        let program = Program::create("x + 1");
-        program.evaluate(&Environment::default());
+        assert_eq!(out, [3.0, 5.0, 7.0, 9.0]);
     }
 
     #[test]
     #[should_panic]
-    fn test_eval_parse_error() {
-        let program = Program::create("1 + *");
-        program.evaluate(&Environment::default());
+    fn test_wrong_lane_count() {
+        let program = Program::create(xy_shape(), "x").unwrap();
+        let instance = program.instantiate(&[("y", 0.0)]).unwrap();
+        instance.call(&[], &mut [0.0]);
     }
 }

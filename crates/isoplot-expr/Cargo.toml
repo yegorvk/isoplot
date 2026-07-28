@@ -8,3 +8,13 @@ license.workspace = true
 [dependencies]
 codespan-reporting = "0.13.1"
 logos = "0.16.1"
+
+[dependencies.cranelift]
+version = "0.134.2"
+optional = true
+features = ["jit", "module", "native"]
+
+[features]
+default = ["interpreter"]
+interpreter = []
+cranelift = ["dep:cranelift"]
