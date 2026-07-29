@@ -55,7 +55,7 @@ impl<S> Extractor<S>
 where
     S: NormalField,
 {
-    pub fn extract_chunk<P>(&self, sink: &mut P) -> Result<Chunk, ExtractError>
+    pub fn extract_chunk<P>(&self, mut sink: P) -> Result<Chunk, ExtractError>
     where
         P: PopulateMesh,
     {
@@ -63,14 +63,14 @@ where
             place_feature(&self.scalar_field, cell, corners)
         });
 
-        grid.for_each_quad(|vertices| self.add_quad(vertices, sink));
+        grid.for_each_quad(|vertices| self.add_quad(vertices, &mut sink));
         Ok(Chunk(grid))
     }
 
     pub fn extract_face_seam<B, P>(
         &self,
         face: ChunkFace<B>,
-        sink: &mut P,
+        mut sink: P,
     ) -> Result<(), ExtractError>
     where
         B: BorrowChunk,
@@ -79,7 +79,7 @@ where
         let ChunkFace { kind, face } = face;
         let grids = Face(face.0.each_ref().map(|chunk| &chunk.borrow_chunk().0));
 
-        FaceSeam::new(kind, grids).for_each_quad(|vertices| self.add_quad(vertices, sink));
+        FaceSeam::new(kind, grids).for_each_quad(|vertices| self.add_quad(vertices, &mut sink));
 
         Ok(())
     }
@@ -87,7 +87,7 @@ where
     pub fn extract_edge_seam<B, P>(
         &self,
         edge: ChunkEdge<B>,
-        sink: &mut P,
+        mut sink: P,
     ) -> Result<(), ExtractError>
     where
         B: BorrowChunk,
@@ -96,7 +96,7 @@ where
         let ChunkEdge { kind, edge } = edge;
         let grids = Edge(edge.0.each_ref().map(|chunk| &chunk.borrow_chunk().0));
 
-        EdgeSeam::new(kind, grids).for_each_quad(|vertices| self.add_quad(vertices, sink));
+        EdgeSeam::new(kind, grids).for_each_quad(|vertices| self.add_quad(vertices, &mut sink));
 
         Ok(())
     }
@@ -112,12 +112,6 @@ where
 
         if vertices[1] == vertices[2] {
             vertices[2] = vertices[3];
-        }
-
-        let n = self.scalar_field.sample_normal(vertices[0]);
-
-        if should_flip_face(vertices[0], vertices[1], vertices[2], n) {
-            vertices.reverse();
         }
 
         sink.add_quad(
@@ -266,8 +260,4 @@ fn place_feature<S: NormalField>(field: &S, cell: Quant, corners: Corners) -> Ve
     }
 
     x
-}
-
-fn should_flip_face(a: Vec3, b: Vec3, c: Vec3, n: Vec3) -> bool {
-    (b - a).cross(c - a).dot(n) < 0.0
 }

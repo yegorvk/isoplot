@@ -7,7 +7,7 @@ use bevy::{
     anti_alias::taa::TemporalAntiAliasing,
     app::TaskPoolThreadAssignmentPolicy,
     input_focus::{AutoFocus, FocusCause, InputFocus},
-    pbr::{ScreenSpaceAmbientOcclusion, wireframe::WireframePlugin},
+    pbr::ScreenSpaceAmbientOcclusion,
     prelude::*,
     text::{EditableText, TextCursorStyle},
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
@@ -131,7 +131,6 @@ fn main() {
                     ..default()
                 },
             }),
-            WireframePlugin::default(),
             PlotPlugin,
             CameraControlsPlugin,
         ))

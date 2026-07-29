@@ -11,5 +11,5 @@ pub use extractor::{
     SharedFaceKind,
 };
 pub use lattice::{AxisKind, Offset};
-pub use mesh::{PopulateMesh, SeparateNormals, TranslateMesh, Vertex};
+pub use mesh::{PopulateMesh, SeparateNormals, TranslateMesh, Vertex, WindingOrder};
 pub use source::{CentralDifference, NormalField, ScalarField, Translate};

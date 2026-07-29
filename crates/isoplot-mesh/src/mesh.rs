@@ -50,6 +50,14 @@ impl<T: PopulateMesh> PopulateMesh for &mut T {
     fn add_face(&mut self, indices: [Self::Index; 3]) {
         T::add_face(self, indices);
     }
+
+    fn add_triangle(&mut self, vertices: [Vertex; 3]) {
+        T::add_triangle(self, vertices);
+    }
+
+    fn add_quad(&mut self, vertices: [Vertex; 4]) {
+        T::add_quad(self, vertices);
+    }
 }
 
 pub struct TranslateMesh<P> {
@@ -88,11 +96,30 @@ where
     }
 }
 
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub enum WindingOrder {
+    Ccw,
+    Cw,
+}
+
 #[derive(Default)]
 pub struct SeparateNormals {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub indices: Vec<[u32; 3]>,
+}
+
+impl SeparateNormals {
+    pub fn normalize_mesh(&mut self, order: WindingOrder) {
+        for face in &mut self.indices {
+            let p = face.map(|i| Vec3::from(self.positions[i as usize]));
+            let n = Vec3::from(self.normals[face[0] as usize]);
+
+            if is_face_ccw(p, n) != (order == WindingOrder::Ccw) {
+                face.reverse();
+            }
+        }
+    }
 }
 
 impl PopulateMesh for SeparateNormals {
@@ -107,4 +134,8 @@ impl PopulateMesh for SeparateNormals {
     fn add_face(&mut self, indices: [Self::Index; 3]) {
         self.indices.push(indices);
     }
+}
+
+fn is_face_ccw(p: [Vec3; 3], n: Vec3) -> bool {
+    (p[1] - p[0]).cross(p[2] - p[0]).dot(n) >= 0.0
 }

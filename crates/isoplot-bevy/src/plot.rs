@@ -3,7 +3,6 @@ use std::sync::Arc;
 use bevy::{
     asset::RenderAssetUsages,
     mesh::{Indices, PrimitiveTopology},
-    pbr::wireframe::Wireframe,
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
@@ -12,14 +11,21 @@ use dashmap::{DashMap, DashSet};
 use glam::IVec3;
 use isoplot_mesh::{
     BorrowChunk, CentralDifference, Chunk, ChunkEdge, ChunkFace, Extractor, NormalField, Offset,
-    ScalarField, SeparateNormals, SharedEdgeKind, SharedFaceKind,
+    ScalarField, SeparateNormals, SharedEdgeKind, SharedFaceKind, WindingOrder,
 };
+
+const WIREFRAME_OFFSET: f32 = 1e-3;
 
 pub struct PlotPlugin;
 
 impl Plugin for PlotPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (queue_chunk_meshes, spawn_chunk_meshes));
+        app.insert_resource(ShowWireframe(true));
+        app.add_systems(Startup, setup_wireframe_material);
+        app.add_systems(
+            Update,
+            (queue_chunk_meshes, spawn_chunk_meshes, toggle_wireframe),
+        );
 
         app.world_mut()
             .register_component_hooks::<Plot>()
@@ -78,6 +84,8 @@ where
             return out;
         };
 
+        sink.normalize_mesh(WindingOrder::Ccw);
+
         self.world.insert(coords, chunk);
         out.push((coords, sink));
 
@@ -132,6 +140,7 @@ where
         let mut sink = SeparateNormals::default();
 
         if dc.extract_face_seam(face, &mut sink).is_ok() {
+            sink.normalize_mesh(WindingOrder::Ccw);
             out.push((anchor, sink));
         }
     }
@@ -158,6 +167,7 @@ where
         let mut sink = SeparateNormals::default();
 
         if dc.extract_edge_seam(edge, &mut sink).is_ok() {
+            sink.normalize_mesh(WindingOrder::Ccw);
             out.push((anchor, sink));
         }
     }
@@ -167,7 +177,53 @@ where
 struct PlotChunk;
 
 #[derive(Component)]
-struct ExtractTasks(Vec<Task<Vec<(IVec3, Mesh)>>>);
+struct PlotWireframe;
+
+#[derive(Resource)]
+struct ShowWireframe(bool);
+
+impl ShowWireframe {
+    fn visibility(&self) -> Visibility {
+        if self.0 {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        }
+    }
+}
+
+fn toggle_wireframe(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut show: ResMut<ShowWireframe>,
+    mut query: Query<&mut Visibility, With<PlotWireframe>>,
+) {
+    if !keys.just_pressed(KeyCode::F3) {
+        return;
+    }
+
+    show.0 = !show.0;
+
+    for mut visibility in &mut query {
+        *visibility = show.visibility();
+    }
+}
+
+#[derive(Resource)]
+struct WireframeMaterial(Handle<StandardMaterial>);
+
+fn setup_wireframe_material(
+    mut commands: Commands,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.insert_resource(WireframeMaterial(materials.add(StandardMaterial {
+        base_color: Color::srgba(1.0, 1.0, 1.0, 0.4),
+        unlit: true,
+        ..default()
+    })));
+}
+
+#[derive(Component)]
+struct ExtractTasks(Vec<Task<Vec<(IVec3, Mesh, Mesh)>>>);
 
 fn queue_chunk_meshes(mut commands: Commands, query: Query<(Entity, &Plot), Added<Plot>>) {
     let pool = AsyncComputeTaskPool::get();
@@ -185,7 +241,10 @@ fn queue_chunk_meshes(mut commands: Commands, query: Query<(Entity, &Plot), Adde
                         .extract_chunk(coords)
                         .into_iter()
                         .filter(|(_, sink)| !sink.positions.is_empty())
-                        .map(|(anchor, sink)| (anchor, build_bevy_mesh(sink)))
+                        .map(|(anchor, sink)| {
+                            let wireframe = build_wireframe_mesh(&sink);
+                            (anchor, build_bevy_mesh(sink), wireframe)
+                        })
                         .collect()
                 })
             })
@@ -198,18 +257,31 @@ fn queue_chunk_meshes(mut commands: Commands, query: Query<(Entity, &Plot), Adde
 fn spawn_chunk_meshes(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
+    wireframe_material: Res<WireframeMaterial>,
+    show_wireframe: Res<ShowWireframe>,
     mut query: Query<(Entity, &mut ExtractTasks, &MeshMaterial3d<StandardMaterial>)>,
 ) {
     for (entity, mut tasks, material) in &mut query {
         tasks.0.retain_mut(|task| match check_ready(task) {
             Some(batch) => {
-                for (anchor, mesh) in batch {
+                for (anchor, mesh, wireframe) in batch {
+                    let transform =
+                        Transform::from_xyz(anchor.x as f32, anchor.y as f32, anchor.z as f32);
+
                     commands.entity(entity).with_child((
                         PlotChunk,
                         Mesh3d(meshes.add(mesh)),
                         MeshMaterial3d(material.0.clone()),
-                        Wireframe,
-                        Transform::from_xyz(anchor.x as f32, anchor.y as f32, anchor.z as f32),
+                        transform,
+                    ));
+
+                    commands.entity(entity).with_child((
+                        PlotChunk,
+                        PlotWireframe,
+                        Mesh3d(meshes.add(wireframe)),
+                        MeshMaterial3d(wireframe_material.0.clone()),
+                        show_wireframe.visibility(),
+                        transform,
                     ));
                 }
 
@@ -233,6 +305,39 @@ fn build_bevy_mesh(data: SeparateNormals) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, data.positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, data.normals);
     mesh.insert_indices(Indices::U32(cast_vec(data.indices)));
+
+    mesh
+}
+
+fn build_wireframe_mesh(data: &SeparateNormals) -> Mesh {
+    let count = data.positions.len() as u32;
+
+    let shell = |side: f32| {
+        data.positions
+            .iter()
+            .zip(&data.normals)
+            .map(move |(&p, &n)| {
+                (Vec3::from(p) + Vec3::from(n) * side * WIREFRAME_OFFSET).to_array()
+            })
+    };
+
+    let positions: Vec<[f32; 3]> = shell(1.0).chain(shell(-1.0)).collect();
+    let normals: Vec<[f32; 3]> = data.normals.iter().chain(&data.normals).copied().collect();
+
+    let front: Vec<u32> = data
+        .indices
+        .iter()
+        .flat_map(|&[a, b, c]| [a, b, b, c, c, a])
+        .collect();
+
+    let back = front.iter().map(|i| i + count);
+    let lines = front.iter().copied().chain(back.clone()).collect();
+
+    let mut mesh = Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::RENDER_WORLD);
+
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_indices(Indices::U32(lines));
 
     mesh
 }
