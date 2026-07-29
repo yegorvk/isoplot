@@ -173,16 +173,16 @@ where
 
 #[derive_where(Default)]
 #[derive(Debug)]
-pub struct Faces<T> {
+pub(crate) struct Faces<T> {
     axes: [Vec<[T; 2]>; 3],
 }
 
 impl<T> Faces<T> {
-    pub fn insert(&mut self, kind: FaceKind, face: [T; 2]) {
+    pub(crate) fn insert(&mut self, kind: FaceKind, face: [T; 2]) {
         self.axes[kind.axis() as usize].push(face);
     }
 
-    pub fn for_each_axis_mut<F>(&mut self, mut f: F)
+    pub(crate) fn for_each_axis_mut<F>(&mut self, mut f: F)
     where
         F: FnMut(FaceKind, &mut Vec<[T; 2]>),
     {
@@ -191,23 +191,23 @@ impl<T> Faces<T> {
         }
     }
 
-    pub fn into_axes(self) -> impl Iterator<Item = (FaceKind, Vec<[T; 2]>)> {
+    pub(crate) fn into_axes(self) -> impl Iterator<Item = (FaceKind, Vec<[T; 2]>)> {
         iter::zip(FaceKind::ALL, self.axes)
     }
 }
 
 #[derive_where(Default)]
 #[derive(Debug)]
-pub struct Edges<T> {
+pub(crate) struct Edges<T> {
     axes: [Vec<[T; 4]>; 3],
 }
 
 impl<T> Edges<T> {
-    pub fn insert(&mut self, kind: EdgeKind, edge: [T; 4]) {
+    pub(crate) fn insert(&mut self, kind: EdgeKind, edge: [T; 4]) {
         self.axes[kind.axis() as usize].push(edge);
     }
 
-    pub fn for_each_axis_mut<F>(&mut self, mut f: F)
+    pub(crate) fn for_each_axis_mut<F>(&mut self, mut f: F)
     where
         F: FnMut(EdgeKind, &mut Vec<[T; 4]>),
     {
@@ -216,7 +216,7 @@ impl<T> Edges<T> {
         }
     }
 
-    pub fn into_axes(self) -> impl Iterator<Item = (EdgeKind, Vec<[T; 4]>)> {
+    pub(crate) fn into_axes(self) -> impl Iterator<Item = (EdgeKind, Vec<[T; 4]>)> {
         iter::zip(EdgeKind::ALL, self.axes)
     }
 }

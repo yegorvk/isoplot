@@ -6,9 +6,9 @@ use std::{marker::PhantomData, mem, ops::Index};
 ///
 /// Note that the root node is taken into account,
 /// so there is always at least 1 level.
-pub const MAX_LEVELS: u8 = 10;
+pub(crate) const MAX_LEVELS: u8 = 10;
 
-pub trait BuildOctree<T> {
+pub(crate) trait BuildOctree<T> {
     /// A unique identifier for an octree node
     type Tag: Copy;
 
@@ -26,18 +26,18 @@ pub trait BuildOctree<T> {
 }
 
 #[derive(Debug)]
-pub struct InlineOctree<T> {
+pub(crate) struct InlineOctree<T> {
     nodes: Vec<InlineNode<T>>,
 }
 
 impl<T> InlineOctree<T> {
-    pub fn get(&self, key: Key) -> Option<&InlineNode<T>> {
+    pub(crate) fn get(&self, key: Key) -> Option<&InlineNode<T>> {
         self.nodes.get(key.0.as_usize())
     }
 }
 
 impl<T: Payload> InlineOctree<T> {
-    pub fn build<B>(source: &mut B) -> Self
+    pub(crate) fn build<B>(source: &mut B) -> Self
     where
         B: ?Sized + BuildOctree<T>,
     {
@@ -82,7 +82,7 @@ impl<T: Payload> InlineOctree<T> {
         Self { nodes }
     }
 
-    pub fn for_each_branch<F>(&self, mut f: F)
+    pub(crate) fn for_each_branch<F>(&self, mut f: F)
     where
         F: FnMut(Branch),
     {
@@ -135,13 +135,13 @@ where
 }
 
 #[derive(Debug)]
-pub struct Octree<T> {
+pub(crate) struct Octree<T> {
     octree: InlineOctree<u31>,
     leaves: Vec<T>,
 }
 
 impl<T> Octree<T> {
-    pub fn build<S>(source: &mut S) -> Self
+    pub(crate) fn build<S>(source: &mut S) -> Self
     where
         S: BuildOctree<T>,
     {
@@ -158,46 +158,46 @@ impl<T> Octree<T> {
         }
     }
 
-    pub fn for_each_branch<F>(&self, f: F)
+    pub(crate) fn for_each_branch<F>(&self, f: F)
     where
         F: FnMut(Branch),
     {
         self.octree.for_each_branch(f);
     }
 
-    pub fn get(&self, key: Key) -> Option<Node<&T>> {
+    pub(crate) fn get(&self, key: Key) -> Option<Node<&T>> {
         self.octree.get(key).map(|inline| {
             let node = inline.as_node();
             node.map_leaf(|i| &self.leaves[i.as_usize()])
         })
     }
 
-    pub fn is_leaf(&self, key: Key) -> bool {
+    pub(crate) fn is_leaf(&self, key: Key) -> bool {
         self.get(key).unwrap().is_leaf()
     }
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(transparent)]
-pub struct Key(u23);
+pub(crate) struct Key(u23);
 
 impl Key {
     /// The key of the root node
-    pub const ROOT: Self = Self(u23::new(0));
+    pub(crate) const ROOT: Self = Self(u23::new(0));
 }
 
 #[derive(Copy, Clone, Debug)]
-pub enum Node<T> {
+pub(crate) enum Node<T> {
     Branch(Branch),
     Leaf(T),
 }
 
 impl<T> Node<T> {
-    pub fn is_leaf(&self) -> bool {
+    pub(crate) fn is_leaf(&self) -> bool {
         matches!(self, Node::Leaf(_))
     }
 
-    pub fn as_leaf(&self) -> Option<&T> {
+    pub(crate) fn as_leaf(&self) -> Option<&T> {
         match self {
             Node::Leaf(leaf) => Some(leaf),
             _ => None,
@@ -217,7 +217,7 @@ impl<T> Node<T> {
 
 #[derive_where(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 #[repr(transparent)]
-pub struct InlineNode<T> {
+pub(crate) struct InlineNode<T> {
     inner: RawNode,
     _ty: PhantomData<T>,
 }
@@ -237,15 +237,15 @@ impl<T: Payload> InlineNode<T> {
         }
     }
 
-    pub fn is_leaf(self) -> bool {
+    pub(crate) fn is_leaf(self) -> bool {
         matches!(self.inner.kind(), NodeKind::Leaf)
     }
 
-    pub fn is_branch(self) -> bool {
+    pub(crate) fn is_branch(self) -> bool {
         matches!(self.inner.kind(), NodeKind::Branch)
     }
 
-    pub fn as_leaf(self) -> Option<InlineLeaf<T>> {
+    pub(crate) fn as_leaf(self) -> Option<InlineLeaf<T>> {
         if self.is_leaf() {
             Some(unsafe { InlineLeaf::from_bits(self.inner.data()) })
         } else {
@@ -253,7 +253,7 @@ impl<T: Payload> InlineNode<T> {
         }
     }
 
-    pub fn as_branch(self) -> Option<Branch> {
+    pub(crate) fn as_branch(self) -> Option<Branch> {
         if self.is_branch() {
             Some(unsafe { Branch::from_bits(self.inner.data()) })
         } else {
@@ -310,7 +310,7 @@ enum NodeKind {
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 #[repr(transparent)]
-pub struct Branch(RawBranch);
+pub(crate) struct Branch(RawBranch);
 
 impl Branch {
     fn new(mask: u8, offset: u32) -> Self {
@@ -329,7 +329,7 @@ impl Branch {
         self.0.value
     }
 
-    pub fn child(&self, which: ChildIndex) -> Option<Key> {
+    pub(crate) fn child(&self, which: ChildIndex) -> Option<Key> {
         if self.has_child(which) {
             Some(Key(u23::new(self.child_offset(which))))
         } else {
@@ -349,14 +349,14 @@ impl Branch {
 
 #[derive(Copy, Clone, Debug)]
 #[repr(transparent)]
-pub struct ChildIndex(pub u3);
+pub(crate) struct ChildIndex(pub u3);
 
 impl ChildIndex {
-    pub const fn new(index: u8) -> Self {
+    pub(crate) const fn new(index: u8) -> Self {
         Self(u3::new(index))
     }
 
-    pub fn enumerate() -> impl Iterator<Item = Self> {
+    pub(crate) fn enumerate() -> impl Iterator<Item = Self> {
         (0..8u8).map(|i| ChildIndex(u3::new(i)))
     }
 }
@@ -376,7 +376,7 @@ struct RawBranch {
 
 #[derive_where(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 #[repr(transparent)]
-pub struct InlineLeaf<T> {
+pub(crate) struct InlineLeaf<T> {
     payload: u31,
     _ty: PhantomData<T>,
 }
@@ -396,12 +396,12 @@ impl<T: Payload> InlineLeaf<T> {
         }
     }
 
-    pub fn get(self) -> T {
+    pub(crate) fn get(self) -> T {
         unsafe { T::from_bits(self.payload) }
     }
 }
 
-pub trait Payload: Copy {
+pub(crate) trait Payload: Copy {
     /// Converts `Self` into a 31-bit unsigned integer.
     fn into_bits(self) -> u31;
 

@@ -11,8 +11,8 @@ use bytemuck::cast_vec;
 use dashmap::{DashMap, DashSet};
 use glam::IVec3;
 use isoplot_mesh::{
-    BorrowChunk, CentralDifference, Chunk, ChunkEdge, ChunkEdgeKind, ChunkFace, ChunkFaceKind,
-    Extractor, NormalField, Offset, ScalarField, SeparateNormals,
+    BorrowChunk, CentralDifference, Chunk, ChunkEdge, ChunkFace, Extractor, NormalField, Offset,
+    ScalarField, SeparateNormals, SharedEdgeKind, SharedFaceKind,
 };
 
 pub struct PlotPlugin;
@@ -81,14 +81,14 @@ where
         self.world.insert(coords, chunk);
         out.push((coords, sink));
 
-        for kind in ChunkFaceKind::ALL {
+        for kind in SharedFaceKind::ALL {
             for offset in kind.slot_offsets() {
                 let anchor = coords - offset.as_uvec3().as_ivec3();
                 self.try_extract_face_seam(kind, anchor, &mut out);
             }
         }
 
-        for kind in ChunkEdgeKind::ALL {
+        for kind in SharedEdgeKind::ALL {
             for offset in kind.slot_offsets() {
                 let anchor = coords - offset.as_uvec3().as_ivec3();
                 self.try_extract_edge_seam(kind, anchor, &mut out);
@@ -112,7 +112,7 @@ where
 
     fn try_extract_face_seam(
         &self,
-        kind: ChunkFaceKind,
+        kind: SharedFaceKind,
         anchor: IVec3,
         out: &mut Vec<(IVec3, SeparateNormals)>,
     ) {
@@ -138,7 +138,7 @@ where
 
     fn try_extract_edge_seam(
         &self,
-        kind: ChunkEdgeKind,
+        kind: SharedEdgeKind,
         anchor: IVec3,
         out: &mut Vec<(IVec3, SeparateNormals)>,
     ) {
@@ -240,8 +240,8 @@ fn build_bevy_mesh(data: SeparateNormals) -> Mesh {
 #[derive(Debug, Default)]
 struct World {
     chunks: DashMap<IVec3, Arc<Chunk>>,
-    face_seams: DashSet<(ChunkFaceKind, IVec3)>,
-    edge_seams: DashSet<(ChunkEdgeKind, IVec3)>,
+    face_seams: DashSet<(SharedFaceKind, IVec3)>,
+    edge_seams: DashSet<(SharedEdgeKind, IVec3)>,
 }
 
 impl World {
@@ -255,11 +255,11 @@ impl World {
         self.chunks.insert(coords, Arc::new(chunk));
     }
 
-    fn mark_face_seam(&self, kind: ChunkFaceKind, anchor: IVec3) -> bool {
+    fn mark_face_seam(&self, kind: SharedFaceKind, anchor: IVec3) -> bool {
         self.face_seams.insert((kind, anchor))
     }
 
-    fn mark_edge_seam(&self, kind: ChunkEdgeKind, anchor: IVec3) -> bool {
+    fn mark_edge_seam(&self, kind: SharedEdgeKind, anchor: IVec3) -> bool {
         self.edge_seams.insert((kind, anchor))
     }
 }

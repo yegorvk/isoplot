@@ -6,25 +6,25 @@ use crate::octree::{ChildIndex, Payload};
 /// A quantized point in a unit cube
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 #[repr(transparent)]
-pub struct Quant(RawQuant);
+pub(crate) struct Quant(RawQuant);
 
 impl Quant {
     /// Maximum number of consequent subdivisions
-    pub const MAX_SUBDIV: u8 = 10;
+    pub(crate) const MAX_SUBDIV: u8 = 10;
 
-    pub fn root() -> Self {
+    pub(crate) fn root() -> Self {
         Self(RawQuant::root())
     }
 
-    pub fn level(self) -> u8 {
+    pub(crate) fn level(self) -> u8 {
         self.0.level()
     }
 
-    pub fn child(self, which: ChildIndex) -> Option<Quant> {
+    pub(crate) fn child(self, which: ChildIndex) -> Option<Quant> {
         self.0.child(which.0).map(Quant)
     }
 
-    pub fn min_point_size(self) -> (Vec3, f32) {
+    pub(crate) fn min_point_size(self) -> (Vec3, f32) {
         let (parts, level) = self.0.parts_level();
 
         let x = fract_u32_to_f32(parts.x as u32, level as u32);
@@ -34,7 +34,7 @@ impl Quant {
         (vec3(x, y, z), f32_exp2_small(-(level as i8)))
     }
 
-    pub fn center_point(self) -> Vec3 {
+    pub(crate) fn center_point(self) -> Vec3 {
         let (min_point, size) = self.min_point_size();
         min_point + size * 0.5
     }

@@ -7,7 +7,8 @@ mod source;
 mod utils;
 
 pub use extractor::{
-    BorrowChunk, Chunk, ChunkEdge, ChunkEdgeKind, ChunkFace, ChunkFaceKind, ExtractError, Extractor,
+    BorrowChunk, Chunk, ChunkEdge, ChunkFace, ExtractError, Extractor, SharedEdgeKind,
+    SharedFaceKind,
 };
 pub use lattice::{AxisKind, Offset};
 pub use mesh::{PopulateMesh, SeparateNormals, TranslateMesh, Vertex};

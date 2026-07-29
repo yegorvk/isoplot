@@ -101,7 +101,7 @@ const CELL_FACES: [[[Corner; 2]; 4]; 3] = [
     [[c(0), c(4)], [c(1), c(5)], [c(3), c(7)], [c(2), c(6)]],
 ];
 
-pub fn for_each_cell_face<B, R, F>(kind: FaceKind, mut refine: R, mut f: F)
+pub(crate) fn for_each_cell_face<B, R, F>(kind: FaceKind, mut refine: R, mut f: F)
 where
     R: FnMut(Corner) -> B,
     F: FnMut([B; 2]),
@@ -117,7 +117,7 @@ const CELL_EDGES: [[[Corner; 4]; 2]; 3] = [
     [[c(0), c(1), c(3), c(2)], [c(4), c(5), c(7), c(6)]],
 ];
 
-pub fn for_each_cell_edge<B, R, F>(kind: EdgeKind, mut refine: R, mut f: F)
+pub(crate) fn for_each_cell_edge<B, R, F>(kind: EdgeKind, mut refine: R, mut f: F)
 where
     R: FnMut(Corner) -> B,
     F: FnMut([B; 4]),
@@ -209,7 +209,7 @@ const SUB_EDGES: [[[Corner; 4]; 2]; 3] = [
     [[c(3), c(2), c(0), c(1)], [c(7), c(6), c(4), c(5)]],
 ];
 
-pub fn for_each_sub_edge<B, R, F>(kind: EdgeKind, mut refine: R, mut f: F)
+pub(super) fn for_each_sub_edge<B, R, F>(kind: EdgeKind, mut refine: R, mut f: F)
 where
     R: FnMut(EdgeSlot, Corner) -> B,
     F: FnMut([B; 4]),
@@ -278,7 +278,7 @@ impl<T> Face<T> {
 pub(crate) struct Edge<T>(pub [T; 4]);
 
 impl<T> Edge<T> {
-    pub fn try_from_fn<F, E>(mut key: EdgeKey<T>, mut f: F) -> Result<Self, E>
+    pub(crate) fn try_from_fn<F, E>(mut key: EdgeKey<T>, mut f: F) -> Result<Self, E>
     where
         F: FnMut(&mut T, Offset) -> Result<T, E>,
     {
@@ -298,7 +298,7 @@ pub(crate) struct FaceKey<T> {
 }
 
 impl<T> FaceKey<T> {
-    pub fn new(kind: FaceKind, min_cell: T) -> Self {
+    pub(crate) fn new(kind: FaceKind, min_cell: T) -> Self {
         Self { kind, min_cell }
     }
 }
@@ -309,7 +309,7 @@ pub(crate) struct EdgeKey<T> {
 }
 
 impl<T> EdgeKey<T> {
-    pub fn new(kind: EdgeKind, min_cell: T) -> Self {
+    pub(crate) fn new(kind: EdgeKind, min_cell: T) -> Self {
         Self { kind, min_cell }
     }
 }

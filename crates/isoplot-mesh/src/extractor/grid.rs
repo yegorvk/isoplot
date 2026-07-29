@@ -93,7 +93,7 @@ struct Feature {
 }
 
 #[derive(Debug)]
-pub struct AdaptiveGrid {
+pub(super) struct AdaptiveGrid {
     octree: Octree<Feature>,
 }
 

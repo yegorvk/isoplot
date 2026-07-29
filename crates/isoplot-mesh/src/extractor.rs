@@ -128,9 +128,9 @@ where
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
-pub struct ChunkFaceKind(FaceKind);
+pub struct SharedFaceKind(FaceKind);
 
-impl ChunkFaceKind {
+impl SharedFaceKind {
     pub const ALL: [Self; 3] = {
         let [x, y, z] = FaceKind::ALL;
         [Self(x), Self(y), Self(z)]
@@ -142,9 +142,9 @@ impl ChunkFaceKind {
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
-pub struct ChunkEdgeKind(EdgeKind);
+pub struct SharedEdgeKind(EdgeKind);
 
-impl ChunkEdgeKind {
+impl SharedEdgeKind {
     pub const ALL: [Self; 3] = {
         let [x, y, z] = EdgeKind::ALL;
         [Self(x), Self(y), Self(z)]
@@ -161,7 +161,7 @@ pub struct ChunkFace<T> {
 }
 
 impl<T> ChunkFace<T> {
-    pub fn from_fn<F>(kind: ChunkFaceKind, min_chunk: T, mut f: F) -> Option<Self>
+    pub fn from_fn<F>(kind: SharedFaceKind, min_chunk: T, mut f: F) -> Option<Self>
     where
         F: FnMut(&mut T, Offset) -> Option<T>,
     {
@@ -179,7 +179,7 @@ pub struct ChunkEdge<T> {
 }
 
 impl<T> ChunkEdge<T> {
-    pub fn from_fn<F>(kind: ChunkEdgeKind, min_chunk: T, mut f: F) -> Option<Self>
+    pub fn from_fn<F>(kind: SharedEdgeKind, min_chunk: T, mut f: F) -> Option<Self>
     where
         F: FnMut(&mut T, Offset) -> Option<T>,
     {
