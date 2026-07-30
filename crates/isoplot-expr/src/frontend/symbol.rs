@@ -1,16 +1,16 @@
 use std::collections::HashMap;
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
-pub(crate) struct Symbol(u32);
+pub(super) struct Symbol(u32);
 
 #[derive(Debug, Default)]
-pub(crate) struct Interner {
+pub(super) struct Interner {
     map: HashMap<String, Symbol>,
     strings: Vec<String>,
 }
 
 impl Interner {
-    pub(crate) fn get_or_insert(&mut self, value: &str) -> Symbol {
+    pub(super) fn get_or_insert(&mut self, value: &str) -> Symbol {
         if let Some(&symbol) = self.map.get(value) {
             return symbol;
         }
@@ -24,7 +24,7 @@ impl Interner {
         symbol
     }
 
-    pub(crate) fn resolve(&self, symbol: Symbol) -> Option<&str> {
+    pub(super) fn resolve(&self, symbol: Symbol) -> Option<&str> {
         self.strings.get(symbol.0 as usize).map(String::as_str)
     }
 }

@@ -1,136 +1,71 @@
-use crate::{
-    Program, Value, VarSlotKind,
-    ast::{BinOp, ExprId, Intrinsic, Transformer, UnOp},
-    symbol::Symbol,
-};
+use std::sync::Arc;
+
+use crate::instrs::{Instruction, Instructions, ValueId};
 
 pub(crate) struct Instance {
-    program: Program,
-    consts: Vec<f32>,
+    instrs: Arc<Instructions>,
+    buf: Vec<f32>,
+}
+
+impl Clone for Instance {
+    fn clone(&self) -> Self {
+        Self {
+            instrs: Arc::clone(&self.instrs),
+            buf: self.buf.clone(),
+        }
+    }
 }
 
 impl Instance {
-    pub(crate) fn new(program: Program, consts: Vec<f32>) -> Self {
-        Self { program, consts }
-    }
-
-    pub(crate) fn call(&self, inputs: &[&[f32]], out: &mut [f32]) {
-        assert_eq!(inputs.len(), self.program.shape.inputs.len());
-
-        let batch_size = out.len();
-
-        for lane in inputs {
-            assert_eq!(lane.len(), batch_size);
-        }
-
-        let mut buf = Vec::with_capacity(self.program.ast.len() * batch_size);
-
-        let root = self.program.ast.fold(Evaluator {
-            program: &self.program,
-            consts: &self.consts,
-            inputs,
-            batch_size,
-            buf: &mut buf,
-        });
-
-        out.copy_from_slice(&buf[root..root + batch_size]);
-    }
-}
-
-struct Evaluator<'a> {
-    program: &'a Program,
-    consts: &'a [f32],
-    inputs: &'a [&'a [f32]],
-    batch_size: usize,
-    buf: &'a mut Vec<f32>,
-}
-
-impl Transformer for Evaluator<'_> {
-    type In<'a> = usize;
-    type Out = usize;
-
-    fn un_op(&mut self, _id: ExprId, op: UnOp, operand: usize) -> usize {
-        match op {
-            UnOp::Plus => operand,
-            UnOp::Minus => {
-                let off = self.buf.len();
-
-                for i in 0..self.batch_size {
-                    let value = -self.buf[operand + i];
-                    self.buf.push(value);
-                }
-
-                off
-            }
+    pub(super) fn new(instrs: Instructions) -> Self {
+        Self {
+            buf: vec![0f32; instrs.num_params() + instrs.instrs().len()],
+            instrs: Arc::new(instrs),
         }
     }
 
-    fn bin_op(&mut self, _id: ExprId, op: BinOp, lhs: usize, rhs: usize) -> usize {
-        let off = self.buf.len();
+    pub(super) fn evaluate(&mut self, inputs: &[f32]) -> f32 {
+        let num_params = self.instrs.num_params();
+        assert_eq!(inputs.len(), num_params);
 
-        for i in 0..self.batch_size {
-            let (lhs, rhs) = (self.buf[lhs + i], self.buf[rhs + i]);
+        let buf = &mut self.buf;
+        buf[..num_params].copy_from_slice(inputs);
 
-            self.buf.push(match op {
-                BinOp::Add => lhs + rhs,
-                BinOp::Sub => lhs - rhs,
-                BinOp::Mul => lhs * rhs,
-                BinOp::Div => lhs / rhs,
-                BinOp::Pow => lhs.powf(rhs),
-            });
+        for (i, instr) in self.instrs.instrs().iter().enumerate() {
+            let value = |id: ValueId| buf[id.index()];
+
+            let result = match *instr {
+                Instruction::I32Const(_)
+                | Instruction::I32Add(..)
+                | Instruction::I32Sub(..)
+                | Instruction::I32Mul(..)
+                | Instruction::F32FromI32(_)
+                | Instruction::F32Powi(..) => unimplemented!(),
+
+                Instruction::F32Const(value) => value,
+
+                Instruction::F32Neg(src) => -value(src),
+                Instruction::F32Abs(src) => value(src).abs(),
+                Instruction::F32Add(lhs, rhs) => value(lhs) + value(rhs),
+                Instruction::F32Sub(lhs, rhs) => value(lhs) - value(rhs),
+                Instruction::F32Mul(lhs, rhs) => value(lhs) * value(rhs),
+                Instruction::F32Div(lhs, rhs) => value(lhs) / value(rhs),
+                Instruction::F32Min(lhs, rhs) => value(lhs).min(value(rhs)),
+                Instruction::F32Max(lhs, rhs) => value(lhs).max(value(rhs)),
+                Instruction::F32Powf(lhs, rhs) => value(lhs).powf(value(rhs)),
+
+                Instruction::F32Exp(src) => value(src).exp(),
+                Instruction::F32Ln(src) => value(src).ln(),
+                Instruction::F32Lg(src) => value(src).log10(),
+                Instruction::F32Sin(src) => value(src).sin(),
+                Instruction::F32Cos(src) => value(src).cos(),
+                Instruction::F32Tan(src) => value(src).tan(),
+                Instruction::F32Cot(src) => value(src).tan().recip(),
+            };
+
+            buf[num_params + i] = result;
         }
 
-        off
-    }
-
-    fn intrinsic<'a, I>(&mut self, _id: ExprId, intrinsic: Intrinsic, mut args: I) -> usize
-    where
-        I: ExactSizeIterator<Item = Self::In<'a>>,
-    {
-        assert_eq!(args.len(), 1);
-        let arg = args.next().unwrap();
-
-        let off = self.buf.len();
-
-        for i in 0..self.batch_size {
-            let x = self.buf[arg + i];
-
-            self.buf.push(match intrinsic {
-                Intrinsic::Exp => x.exp(),
-                Intrinsic::Log => x.log10(),
-                Intrinsic::Ln => x.ln(),
-                Intrinsic::Sin => x.sin(),
-                Intrinsic::Cos => x.cos(),
-                Intrinsic::Tan => x.tan(),
-                Intrinsic::Cot => x.tan().recip(),
-            });
-        }
-
-        off
-    }
-
-    fn var(&mut self, id: ExprId, _name: Symbol) -> usize {
-        let off = self.buf.len();
-
-        match self.program.var_slots[id].unwrap().kind() {
-            VarSlotKind::Input(index) => self.buf.extend_from_slice(self.inputs[index as usize]),
-            VarSlotKind::Const(index) => {
-                let value = self.consts[index as usize];
-                self.buf.resize(off + self.batch_size, value);
-            }
-        }
-
-        off
-    }
-
-    fn lit(&mut self, _id: ExprId, value: Value) -> usize {
-        let Value::F32(value): Value = value;
-        let off = self.buf.len();
-        self.buf.resize(off + self.batch_size, value);
-        off
-    }
-
-    fn map_error(&mut self, _id: ExprId, _inner: Option<usize>) -> usize {
-        panic!("AST contains an error node")
+        buf.last().copied().unwrap()
     }
 }

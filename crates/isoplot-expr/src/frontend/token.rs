@@ -1,14 +1,14 @@
-use crate::span::{BytePos, Span};
+use super::span::{BytePos, Span};
 use logos::Logos;
 
-pub(crate) struct Token<'src> {
-    pub(crate) kind: TokenKind<'src>,
-    pub(crate) span: Span,
+pub(super) struct Token<'src> {
+    pub(super) kind: TokenKind<'src>,
+    pub(super) span: Span,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Logos)]
 #[logos(skip r"[ \t\r\n\f]+")]
-pub(crate) enum TokenKind<'src> {
+pub(super) enum TokenKind<'src> {
     #[regex(r"[0-9]+\.[0-9]+", |lex| LitFloat(lex.slice()))]
     Float(LitFloat<'src>),
 
@@ -73,7 +73,7 @@ pub(crate) enum TokenKind<'src> {
     Eof,
 }
 
-pub(crate) fn tokenize<'src>(src: &'src str) -> impl Iterator<Item = Token<'src>> {
+pub(super) fn tokenize<'src>(src: &'src str) -> impl Iterator<Item = Token<'src>> {
     assert!(src.len() < u32::MAX as usize, "`src` is too large");
 
     let eof_token = Token {
@@ -91,22 +91,22 @@ pub(crate) fn tokenize<'src>(src: &'src str) -> impl Iterator<Item = Token<'src>
 }
 
 #[derive(Copy, Clone, Debug)]
-pub(crate) struct OverflowError;
+pub(super) struct OverflowError;
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub(crate) struct LitInt<'src>(&'src str);
+pub(super) struct LitInt<'src>(&'src str);
 
 impl LitInt<'_> {
-    pub(crate) fn parse_i32(self) -> Result<i32, OverflowError> {
+    pub(super) fn parse_i32(self) -> Result<i32, OverflowError> {
         self.0.parse().map_err(|_| OverflowError)
     }
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub(crate) struct LitFloat<'src>(&'src str);
+pub(super) struct LitFloat<'src>(&'src str);
 
 impl LitFloat<'_> {
-    pub(crate) fn parse_f32(self) -> Result<f32, OverflowError> {
+    pub(super) fn parse_f32(self) -> Result<f32, OverflowError> {
         let value: f32 = self.0.parse().unwrap();
         if value.is_finite() {
             Ok(value)

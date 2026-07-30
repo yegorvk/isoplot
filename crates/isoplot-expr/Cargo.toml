@@ -15,6 +15,4 @@ optional = true
 features = ["jit", "module", "native"]
 
 [features]
-default = ["interpreter"]
-interpreter = []
 cranelift = ["dep:cranelift"]

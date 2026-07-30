@@ -10,8 +10,8 @@ use bytemuck::cast_vec;
 use dashmap::{DashMap, DashSet};
 use glam::IVec3;
 use isoplot_mesh::{
-    BorrowChunk, CentralDifference, Chunk, ChunkEdge, ChunkFace, Extractor, NormalField, Offset,
-    ScalarField, SeparateNormals, SharedEdgeKind, SharedFaceKind, WindingOrder,
+    BorrowChunk, CentralDifference, Chunk, ChunkEdge, ChunkFace, Extractor, Offset, ScalarField,
+    SeparateNormals, SharedEdgeKind, SharedFaceKind, WindingOrder,
 };
 
 const WIREFRAME_OFFSET: f32 = 1e-3;
@@ -47,16 +47,33 @@ pub struct Plot {
 impl Plot {
     pub fn new<S>(source: S, render_distance: u32, max_level: u8, epsilon: f32) -> Self
     where
-        S: ScalarField + Send + Sync + 'static,
+        S: FieldSource + 'static,
     {
         Self {
             extract: Arc::new(ChunkExtractor {
-                source: CentralDifference::new(source, epsilon),
+                source,
+                epsilon,
                 world: World::default(),
                 max_level,
             }),
             render_distance,
         }
+    }
+}
+
+pub trait FieldSource: Send + Sync {
+    type Field: ScalarField;
+    fn create(&self) -> Self::Field;
+}
+
+impl<S> FieldSource for S
+where
+    S: ScalarField + Clone + Send + Sync,
+{
+    type Field = S;
+
+    fn create(&self) -> S {
+        self.clone()
     }
 }
 
@@ -66,19 +83,22 @@ trait ExtractChunk: Send + Sync {
 
 struct ChunkExtractor<S> {
     source: S,
+    epsilon: f32,
     world: World,
     max_level: u8,
 }
 
 impl<S> ExtractChunk for ChunkExtractor<S>
 where
-    S: NormalField + Send + Sync + 'static,
+    S: FieldSource + 'static,
 {
     fn extract_chunk(&self, coords: IVec3) -> Vec<(IVec3, SeparateNormals)> {
+        let source = CentralDifference::new(self.source.create(), self.epsilon);
+
         let mut out = Vec::new();
         let mut sink = SeparateNormals::default();
 
-        let dc = Extractor::with_offset(&self.source, coords.as_vec3(), self.max_level);
+        let dc = Extractor::with_offset(&source, coords.as_vec3(), self.max_level);
 
         let Ok(chunk) = dc.extract_chunk(&mut sink) else {
             return out;
@@ -92,14 +112,14 @@ where
         for kind in SharedFaceKind::ALL {
             for offset in kind.slot_offsets() {
                 let anchor = coords - offset.as_uvec3().as_ivec3();
-                self.try_extract_face_seam(kind, anchor, &mut out);
+                self.try_extract_face_seam(&source, kind, anchor, &mut out);
             }
         }
 
         for kind in SharedEdgeKind::ALL {
             for offset in kind.slot_offsets() {
                 let anchor = coords - offset.as_uvec3().as_ivec3();
-                self.try_extract_edge_seam(kind, anchor, &mut out);
+                self.try_extract_edge_seam(&source, kind, anchor, &mut out);
             }
         }
 
@@ -109,7 +129,7 @@ where
 
 impl<S> ChunkExtractor<S>
 where
-    S: NormalField + Send + Sync + 'static,
+    S: FieldSource + 'static,
 {
     fn lookup_from(
         &self,
@@ -120,6 +140,7 @@ where
 
     fn try_extract_face_seam(
         &self,
+        source: &CentralDifference<S::Field>,
         kind: SharedFaceKind,
         anchor: IVec3,
         out: &mut Vec<(IVec3, SeparateNormals)>,
@@ -136,7 +157,7 @@ where
             return;
         }
 
-        let dc = Extractor::with_offset(&self.source, anchor.as_vec3(), self.max_level);
+        let dc = Extractor::with_offset(source, anchor.as_vec3(), self.max_level);
         let mut sink = SeparateNormals::default();
 
         if dc.extract_face_seam(face, &mut sink).is_ok() {
@@ -147,6 +168,7 @@ where
 
     fn try_extract_edge_seam(
         &self,
+        source: &CentralDifference<S::Field>,
         kind: SharedEdgeKind,
         anchor: IVec3,
         out: &mut Vec<(IVec3, SeparateNormals)>,
@@ -163,7 +185,7 @@ where
             return;
         }
 
-        let dc = Extractor::with_offset(&self.source, anchor.as_vec3(), self.max_level);
+        let dc = Extractor::with_offset(source, anchor.as_vec3(), self.max_level);
         let mut sink = SeparateNormals::default();
 
         if dc.extract_edge_seam(edge, &mut sink).is_ok() {

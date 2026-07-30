@@ -1,27 +1,68 @@
-use crate::Program;
-
-#[cfg(feature = "interpreter")]
-pub(crate) mod interp;
+mod interp;
 
 #[cfg(feature = "cranelift")]
-pub(crate) mod cranelift;
+mod cranelift;
 
-#[cfg(not(any(feature = "interpreter", feature = "cranelift")))]
-compile_error!("at least one backend feature must be enabled");
+use crate::instrs::Instructions;
 
-pub(crate) enum Instance {
-    #[cfg(feature = "interpreter")]
-    Interp(interp::Instance),
+mod private {
+    use super::Instructions;
+
+    #[doc(hidden)]
+    pub(crate) trait Backend {
+        /// The underlying instance type
+        type Instance: Clone;
+
+        /// Creates an instance from IR.
+        fn instantiate(program: Instructions) -> Self::Instance;
+
+        /// Evaluates the expression with given inputs.
+        fn evaluate(instance: &mut Self::Instance, inputs: &[f32]) -> f32;
+    }
 }
 
-impl Instance {
-    pub(crate) fn new(program: Program, consts: Vec<f32>) -> Self {
-        Instance::Interp(interp::Instance::new(program, consts))
+pub trait Backend: private::Backend {}
+impl<T: private::Backend> Backend for T {}
+
+/// Unoptimized bytecode interpreter
+pub struct Interpreter;
+
+impl private::Backend for Interpreter {
+    type Instance = interp::Instance;
+
+    fn instantiate(program: Instructions) -> Self::Instance {
+        interp::Instance::new(program)
     }
 
-    pub(crate) fn call(&self, inputs: &[&[f32]], out: &mut [f32]) {
-        match self {
-            Instance::Interp(instance) => instance.call(inputs, out),
+    fn evaluate(instance: &mut Self::Instance, inputs: &[f32]) -> f32 {
+        instance.evaluate(inputs)
+    }
+}
+
+pub struct Instance<B>
+where
+    B: Backend,
+{
+    instance: B::Instance,
+}
+
+impl<B: Backend> Clone for Instance<B> {
+    fn clone(&self) -> Self {
+        Self {
+            instance: self.instance.clone(),
         }
+    }
+}
+
+#[allow(private_bounds)]
+impl<B: Backend> Instance<B> {
+    pub(crate) fn new(instrs: Instructions) -> Self {
+        Self {
+            instance: B::instantiate(instrs),
+        }
+    }
+
+    pub fn evaluate(&mut self, inputs: &[f32]) -> f32 {
+        B::evaluate(&mut self.instance, inputs)
     }
 }

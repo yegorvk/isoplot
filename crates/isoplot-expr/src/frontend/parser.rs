@@ -1,14 +1,13 @@
 use std::{f32::consts::PI, mem};
 
-use crate::{
-    Value,
-    ast::{Ast, AstBuilder, BinOp, Intrinsic, NewId, UnOp},
+use super::{
+    ast::{Ast, AstBuilder, BinOp, Intrinsic, NewId, UnOp, Value},
     span::{BytePos, Span},
     symbol::Interner,
     token::{Token, TokenKind},
 };
 
-pub(crate) fn parse<'src, I>(mut input: I, interner: &mut Interner) -> Ast
+pub(super) fn parse<'src, I>(mut input: I, interner: &mut Interner) -> Ast
 where
     I: Iterator<Item = Token<'src>>,
 {
@@ -179,19 +178,19 @@ fn unop_bp(op: UnOp) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{
-        ast::{ExprId, Transformer},
+    use super::super::{
+        ast::{ExprId, Visitor},
         symbol::{Interner, Symbol},
         token::tokenize,
     };
+    use super::*;
 
     #[derive(Default)]
     struct SExpr {
         interner: Interner,
     }
 
-    impl Transformer for SExpr {
+    impl Visitor for SExpr {
         type In<'a> = String;
         type Out = String;
 

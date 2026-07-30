@@ -1,15 +1,21 @@
-use crate::{Value, span::Span, symbol::Symbol};
 use std::{
     collections::HashMap,
     marker::PhantomData,
     ops::{Index, Range},
 };
 
+use super::{span::Span, symbol::Symbol};
+
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub(super) enum Value {
+    F32(f32),
+}
+
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
-pub(crate) struct ExprId(u32);
+pub(super) struct ExprId(u32);
 
 #[derive(Copy, Clone, Debug)]
-pub(crate) struct ExprSetId {
+pub(super) struct ExprSetId {
     start: u32,
     end: u32,
 }
@@ -44,26 +50,26 @@ impl Arena {
 
 type Brand<'b> = PhantomData<fn(&'b ()) -> &'b ()>;
 
-pub(crate) struct AstBuilder<'b> {
+pub(super) struct AstBuilder<'b> {
     arena: Arena,
     isolated: u32,
     _brand: Brand<'b>,
 }
 
 impl<'b> AstBuilder<'b> {
-    pub(crate) fn un_op(&mut self, op_span: Span, op: UnOp, operand: NewId<'b>) -> NewId<'b> {
+    pub(super) fn un_op(&mut self, op_span: Span, op: UnOp, operand: NewId<'b>) -> NewId<'b> {
         let span = op_span.chain(operand.node.span);
         let operand = self.consume(operand);
         self.create(span, ExprKind::UnOp(op, operand))
     }
 
-    pub(crate) fn bin_op(&mut self, op: BinOp, lhs: NewId<'b>, rhs: NewId<'b>) -> NewId<'b> {
+    pub(super) fn bin_op(&mut self, op: BinOp, lhs: NewId<'b>, rhs: NewId<'b>) -> NewId<'b> {
         let span = lhs.node.span.chain(rhs.node.span);
         let (lhs, rhs) = (self.consume(lhs), self.consume(rhs));
         self.create(span, ExprKind::BinOp(op, lhs, rhs))
     }
 
-    pub(crate) fn intrinsic(
+    pub(super) fn intrinsic(
         &mut self,
         mut span: Span,
         intrinsic: Intrinsic,
@@ -83,15 +89,15 @@ impl<'b> AstBuilder<'b> {
         )
     }
 
-    pub(crate) fn lit(&mut self, span: Span, value: Value) -> NewId<'b> {
+    pub(super) fn lit(&mut self, span: Span, value: Value) -> NewId<'b> {
         self.create(span, ExprKind::Lit(value))
     }
 
-    pub(crate) fn var(&mut self, span: Span, name: Symbol) -> NewId<'b> {
+    pub(super) fn var(&mut self, span: Span, name: Symbol) -> NewId<'b> {
         self.create(span, ExprKind::Var(name))
     }
 
-    pub(crate) fn error(&mut self, span: Span, inner: Option<NewId<'b>>) -> NewId<'b> {
+    pub(super) fn error(&mut self, span: Span, inner: Option<NewId<'b>>) -> NewId<'b> {
         match inner {
             Some(inner) => {
                 let span = inner.node.span.chain(span);
@@ -117,17 +123,17 @@ impl<'b> AstBuilder<'b> {
 }
 
 #[must_use]
-pub(crate) struct NewId<'b> {
+pub(super) struct NewId<'b> {
     node: Expr,
     _brand: Brand<'b>,
 }
 
-pub(crate) struct Ast {
+pub(super) struct Ast {
     arena: Arena,
 }
 
 impl Ast {
-    pub(crate) fn build<F>(f: F) -> Self
+    pub(super) fn build<F>(f: F) -> Self
     where
         F: for<'b> FnOnce(&mut AstBuilder<'b>) -> NewId<'b>,
     {
@@ -150,9 +156,9 @@ impl Ast {
         }
     }
 
-    pub(crate) fn fold<F, Acc>(&self, mut folder: F) -> Acc
+    pub(super) fn fold<F, Acc>(&self, mut folder: F) -> Acc
     where
-        F: for<'a> Transformer<In<'a> = Acc, Out = Acc>,
+        F: for<'a> Visitor<In<'a> = Acc, Out = Acc>,
     {
         let mut accs: Vec<Option<Acc>> = Vec::with_capacity(self.arena.nodes.len());
 
@@ -170,7 +176,7 @@ impl Ast {
                     folder.bin_op(id, op, lhs, rhs)
                 }
                 ExprKind::Intrinsic(intrinsic, args) => {
-                    let args = (&mut accs[args.usize_range()])
+                    let args = accs[args.usize_range()]
                         .iter_mut()
                         .map(|arg| arg.take().unwrap());
 
@@ -194,10 +200,6 @@ impl Ast {
     fn root(&self) -> ExprId {
         ExprId(self.arena.nodes.len() as u32 - 1)
     }
-
-    pub(crate) fn len(&self) -> usize {
-        self.arena.nodes.len()
-    }
 }
 
 impl Index<ExprId> for Ast {
@@ -208,14 +210,14 @@ impl Index<ExprId> for Ast {
     }
 }
 
-pub(crate) struct DenseMap<T> {
+pub(super) struct DenseMap<T> {
     map: Vec<T>,
 }
 
 impl<T> DenseMap<T> {
-    pub(crate) fn build<B>(ast: &Ast, mut builder: B) -> Self
+    pub(super) fn build<B>(ast: &Ast, mut builder: B) -> Self
     where
-        B: for<'a> Transformer<In<'a> = &'a T, Out = T>,
+        B: for<'a> Visitor<In<'a> = &'a T, Out = T>,
     {
         let mut map: Vec<T> = Vec::with_capacity(ast.arena.nodes.len());
 
@@ -254,14 +256,14 @@ impl<T> Index<ExprId> for DenseMap<T> {
     }
 }
 
-pub(crate) struct SparseMap<T> {
+pub(super) struct SparseMap<T> {
     map: HashMap<ExprId, T>,
 }
 
 impl<T> SparseMap<T> {
-    pub(crate) fn build<B>(ast: &Ast, mut builder: B) -> Self
+    pub(super) fn build<B>(ast: &Ast, mut builder: B) -> Self
     where
-        B: for<'a> Transformer<In<'a> = Option<&'a T>, Out = Option<T>>,
+        B: for<'a> Visitor<In<'a> = Option<&'a T>, Out = Option<T>>,
     {
         let mut map: HashMap<ExprId, T> = HashMap::new();
 
@@ -293,19 +295,19 @@ impl<T> SparseMap<T> {
         Self { map }
     }
 
-    pub(crate) fn get(&self, id: ExprId) -> Option<&T> {
+    pub(super) fn get(&self, id: ExprId) -> Option<&T> {
         self.map.get(&id)
     }
 }
 
 #[derive(Copy, Clone, Debug)]
-pub(crate) struct Expr {
-    pub(crate) kind: ExprKind,
-    pub(crate) span: Span,
+pub(super) struct Expr {
+    pub(super) kind: ExprKind,
+    pub(super) span: Span,
 }
 
 #[derive(Copy, Clone, Debug)]
-pub(crate) enum ExprKind {
+pub(super) enum ExprKind {
     UnOp(UnOp, ExprId),
     BinOp(BinOp, ExprId, ExprId),
     Intrinsic(Intrinsic, ExprSetId),
@@ -315,7 +317,7 @@ pub(crate) enum ExprKind {
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub(crate) enum Intrinsic {
+pub(super) enum Intrinsic {
     Exp,
     Log,
     Ln,
@@ -326,7 +328,7 @@ pub(crate) enum Intrinsic {
 }
 
 impl Intrinsic {
-    pub(crate) fn num_args(self) -> usize {
+    pub(super) fn num_args(self) -> usize {
         match self {
             Intrinsic::Exp
             | Intrinsic::Log
@@ -340,13 +342,13 @@ impl Intrinsic {
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub(crate) enum UnOp {
+pub(super) enum UnOp {
     Plus,
     Minus,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub(crate) enum BinOp {
+pub(super) enum BinOp {
     Add,
     Sub,
     Mul,
@@ -354,7 +356,7 @@ pub(crate) enum BinOp {
     Pow,
 }
 
-pub(crate) trait Transformer {
+pub(super) trait Visitor {
     /// The input type
     type In<'a>;
 
@@ -383,8 +385,8 @@ pub(crate) trait Transformer {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{span::BytePos, symbol::Interner};
     use super::*;
-    use crate::{span::BytePos, symbol::Interner};
     use std::collections::HashMap;
 
     #[derive(Default)]
@@ -392,7 +394,7 @@ mod tests {
         env: HashMap<Symbol, f32>,
     }
 
-    impl Transformer for Eval {
+    impl Visitor for Eval {
         type In<'a> = f32;
         type Out = f32;
 
@@ -488,7 +490,7 @@ mod tests {
 
     struct Depth;
 
-    impl Transformer for Depth {
+    impl Visitor for Depth {
         type In<'a> = &'a u32;
         type Out = u32;
 
@@ -557,7 +559,7 @@ mod tests {
 
     struct Consts;
 
-    impl Transformer for Consts {
+    impl Visitor for Consts {
         type In<'a> = Option<&'a f32>;
         type Out = Option<f32>;
 

@@ -1,7 +1,7 @@
 mod controls;
 mod plot;
 
-use std::f32::consts::PI;
+use std::{cell::RefCell, collections::HashMap, f32::consts::PI};
 
 use bevy::{
     anti_alias::taa::TemporalAntiAliasing,
@@ -16,12 +16,13 @@ use noise::{NoiseFn, Simplex};
 
 use crate::{
     controls::{CameraControls, CameraControlsPlugin},
-    plot::{Plot, PlotPlugin},
+    plot::{FieldSource, Plot, PlotPlugin},
 };
-use isoplot_expr::{Instance, Program, Shape};
+use isoplot_expr::{Instance, Interpreter, Shape, Template};
 use isoplot_mesh::ScalarField;
 
 #[allow(dead_code)]
+#[derive(Clone)]
 struct EllipticParaboloid {
     pub a: f32,
     pub b: f32,
@@ -41,6 +42,7 @@ impl ScalarField for EllipticParaboloid {
 }
 
 #[allow(dead_code)]
+#[derive(Clone)]
 struct Waves2;
 
 impl ScalarField for Waves2 {
@@ -51,6 +53,7 @@ impl ScalarField for Waves2 {
 }
 
 #[allow(dead_code)]
+#[derive(Clone)]
 struct Sphere;
 
 impl ScalarField for Sphere {
@@ -60,17 +63,32 @@ impl ScalarField for Sphere {
 }
 
 struct ExprField {
-    instance: Instance,
+    instance: Instance<Interpreter>,
 }
 
 impl ExprField {
     fn new(source: &str) -> Self {
-        let program = Program::create(xyz_shape(), source).unwrap();
+        let template = Template::build(&xyz_shape(), source).unwrap();
+        let program = template.specialize(HashMap::new()).unwrap();
 
         Self {
-            instance: program.instantiate(&[]).unwrap(),
+            instance: program.instantiate(),
         }
     }
+}
+
+impl FieldSource for ExprField {
+    type Field = ExprSampler;
+
+    fn create(&self) -> ExprSampler {
+        ExprSampler {
+            instance: RefCell::new(self.instance.clone()),
+        }
+    }
+}
+
+struct ExprSampler {
+    instance: RefCell<Instance<Interpreter>>,
 }
 
 fn xyz_shape() -> Shape {
@@ -81,17 +99,14 @@ fn xyz_shape() -> Shape {
         .build()
 }
 
-impl ScalarField for ExprField {
+impl ScalarField for ExprSampler {
     fn sample(&self, point: glam::Vec3) -> f32 {
         let [x, y, z] = point.to_array();
-
-        let mut out = [0.0];
-        self.instance.call(&[&[x], &[y], &[z]], &mut out);
-        out[0]
+        self.instance.borrow_mut().evaluate(&[x, y, z])
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct SimplexNoise {
     noise: Simplex,
 }
@@ -251,12 +266,13 @@ fn submit_expr(
 
     let (field, mut color) = field.into_inner();
 
-    let Ok(program) = Program::create(xyz_shape(), &field.value().to_string()) else {
+    let Ok(template) = Template::build(&xyz_shape(), &field.value().to_string()) else {
         color.0 = Color::srgb(1.0, 0.3, 0.3);
         return;
     };
 
-    let instance = program.instantiate(&[]).unwrap();
+    let program = template.specialize(HashMap::new()).unwrap();
+    let instance = program.instantiate();
 
     color.0 = Color::WHITE;
     commands.entity(cycler.current).despawn();
