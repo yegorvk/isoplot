@@ -252,7 +252,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
  "x11rb",
 ]
 
@@ -3423,6 +3423,7 @@ dependencies = [
  "codespan-reporting 0.13.1",
  "cranelift",
  "logos",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

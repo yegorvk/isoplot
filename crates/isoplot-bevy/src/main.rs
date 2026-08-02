@@ -1,7 +1,7 @@
 mod controls;
 mod plot;
 
-use std::{cell::RefCell, collections::HashMap, f32::consts::PI};
+use std::{collections::HashMap, f32::consts::PI};
 
 use bevy::{
     anti_alias::taa::TemporalAntiAliasing,
@@ -16,13 +16,13 @@ use noise::{NoiseFn, Simplex};
 
 use crate::{
     controls::{CameraControls, CameraControlsPlugin},
-    plot::{FieldSource, Plot, PlotPlugin},
+    plot::{Plot, PlotPlugin, PlotSource},
 };
-use isoplot_expr::{Instance, Interpreter, Shape, Template};
+use isoplot_expr::{
+    Backend, CompileError, Cranelift, Evaluator, Instance, Program, ProgramDesc, ProgramShape,
+};
 use isoplot_mesh::ScalarField;
 
-#[allow(dead_code)]
-#[derive(Clone)]
 struct EllipticParaboloid {
     pub a: f32,
     pub b: f32,
@@ -41,8 +41,6 @@ impl ScalarField for EllipticParaboloid {
     }
 }
 
-#[allow(dead_code)]
-#[derive(Clone)]
 struct Waves2;
 
 impl ScalarField for Waves2 {
@@ -52,57 +50,11 @@ impl ScalarField for Waves2 {
     }
 }
 
-#[allow(dead_code)]
-#[derive(Clone)]
 struct Sphere;
 
 impl ScalarField for Sphere {
     fn sample(&self, point: glam::Vec3) -> f32 {
         point.length() - 3.0
-    }
-}
-
-struct ExprField {
-    instance: Instance<Interpreter>,
-}
-
-impl ExprField {
-    fn new(source: &str) -> Self {
-        let template = Template::build(&xyz_shape(), source).unwrap();
-        let program = template.specialize(HashMap::new()).unwrap();
-
-        Self {
-            instance: program.instantiate(),
-        }
-    }
-}
-
-impl FieldSource for ExprField {
-    type Field = ExprSampler;
-
-    fn create(&self) -> ExprSampler {
-        ExprSampler {
-            instance: RefCell::new(self.instance.clone()),
-        }
-    }
-}
-
-struct ExprSampler {
-    instance: RefCell<Instance<Interpreter>>,
-}
-
-fn xyz_shape() -> Shape {
-    Shape::builder()
-        .with_input("x")
-        .with_input("y")
-        .with_input("z")
-        .build()
-}
-
-impl ScalarField for ExprSampler {
-    fn sample(&self, point: glam::Vec3) -> f32 {
-        let [x, y, z] = point.to_array();
-        self.instance.borrow_mut().evaluate(&[x, y, z])
     }
 }
 
@@ -117,13 +69,66 @@ impl ScalarField for SimplexNoise {
     }
 }
 
-const DEFAULT_EXPR: &str = "y - (x^2 + z^2)";
+type DefaultBackend = Cranelift;
 
-type PlotFactory = Box<dyn (Fn() -> Plot) + Send + Sync>;
+struct Equation<B: Backend = DefaultBackend> {
+    instance: Instance<B>,
+}
+
+impl Equation {
+    fn new(equation: &str) -> Result<Self, CompileError> {
+        Self::new_with_backend(equation)
+    }
+}
+
+impl<B: Backend> Equation<B> {
+    fn new_with_backend(equation: &str) -> Result<Self, CompileError> {
+        let program = Program::compile(
+            &ProgramDesc::new(&equation_default_shape(), HashMap::new()),
+            equation,
+        )?;
+
+        Ok(Self {
+            instance: program.instantiate(),
+        })
+    }
+
+    fn create_source(&self) -> DynamicSource<B> {
+        DynamicSource {
+            evaluator: self.instance.evaluator(),
+        }
+    }
+}
+
+impl<B: Backend> PlotSource for Equation<B> {
+    fn field(&self) -> impl ScalarField {
+        self.create_source()
+    }
+}
+
+fn equation_default_shape() -> ProgramShape {
+    ProgramShape::builder()
+        .with_input("x")
+        .with_input("y")
+        .with_input("z")
+        .build()
+}
+
+struct DynamicSource<B: Backend> {
+    evaluator: Evaluator<B>,
+}
+
+impl<B: Backend> ScalarField for DynamicSource<B> {
+    fn sample(&self, point: Vec3) -> f32 {
+        self.evaluator.evaluate(&point.to_array())
+    }
+}
+
+const DEFAULT_EQUATION: &str = "y - sin(x^2 + z^2)";
 
 #[derive(Resource)]
 struct PlotCycler {
-    plots: Vec<PlotFactory>,
+    plots: Vec<Box<dyn Fn() -> Plot + Send + Sync>>,
     material: Handle<StandardMaterial>,
     active: usize,
     current: Entity,
@@ -132,7 +137,7 @@ struct PlotCycler {
 fn main() {
     App::new()
         .add_systems(Startup, setup)
-        .add_systems(Update, (toggle_focus, cycle_plots, submit_expr))
+        .add_systems(Update, (toggle_focus, cycle_plots, submit_equation))
         .add_plugins((
             DefaultPlugins.set(TaskPoolPlugin {
                 task_pool_options: TaskPoolOptions {
@@ -160,8 +165,8 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
         ..default()
     });
 
-    let plots: Vec<PlotFactory> = vec![
-        Box::new(|| Plot::new(ExprField::new(DEFAULT_EXPR), 2, 5, 1e-4)),
+    let plots: Vec<Box<dyn Fn() -> Plot + Send + Sync>> = vec![
+        Box::new(|| create_plot(Equation::new(DEFAULT_EQUATION).unwrap())),
         Box::new(|| Plot::new(EllipticParaboloid::new(0.4, 0.4), 2, 5, 1e-4)),
         Box::new(|| Plot::new(Waves2, 1, 5, 1e-4)),
         Box::new(|| Plot::new(Sphere, 3, 5, 1e-4)),
@@ -191,10 +196,10 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
     ));
 
     commands.spawn((
-        ExprText,
+        EquationText,
         EditableText {
             visible_width: Some(40.0),
-            ..EditableText::new(DEFAULT_EXPR)
+            ..EditableText::new(DEFAULT_EQUATION)
         },
         TextCursorStyle::default(),
         AutoFocus,
@@ -252,13 +257,13 @@ fn cycle_plots(
 }
 
 #[derive(Component)]
-struct ExprText;
+struct EquationText;
 
-fn submit_expr(
+fn submit_equation(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     mut cycler: ResMut<PlotCycler>,
-    field: Single<(&EditableText, &mut TextColor), With<ExprText>>,
+    field: Single<(&EditableText, &mut TextColor), With<EquationText>>,
 ) {
     if !keys.just_pressed(KeyCode::Enter) {
         return;
@@ -266,18 +271,23 @@ fn submit_expr(
 
     let (field, mut color) = field.into_inner();
 
-    let Ok(template) = Template::build(&xyz_shape(), &field.value().to_string()) else {
+    let Ok(equation) = Equation::new(&field.value().to_string()) else {
         color.0 = Color::srgb(1.0, 0.3, 0.3);
         return;
     };
 
-    let program = template.specialize(HashMap::new()).unwrap();
-    let instance = program.instantiate();
-
     color.0 = Color::WHITE;
     commands.entity(cycler.current).despawn();
-    let plot = Plot::new(ExprField { instance }, 2, 5, 1e-4);
-    cycler.current = spawn_plot(&mut commands, plot, cycler.material.clone());
+
+    cycler.current = spawn_plot(
+        &mut commands,
+        create_plot(equation),
+        cycler.material.clone(),
+    );
+}
+
+fn create_plot(equation: Equation) -> Plot {
+    Plot::new(equation, 3, 5, 1e-4)
 }
 
 fn toggle_focus(
@@ -285,7 +295,7 @@ fn toggle_focus(
     mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
     mut controls: Query<&mut CameraControls>,
     mut input_focus: ResMut<InputFocus>,
-    expr_field: Single<Entity, With<ExprText>>,
+    expr_field: Single<Entity, With<EquationText>>,
 ) {
     if mouse.just_pressed(MouseButton::Left) {
         cursor.grab_mode = CursorGrabMode::Locked;

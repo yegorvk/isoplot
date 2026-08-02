@@ -38,16 +38,26 @@ impl Plugin for PlotPlugin {
     }
 }
 
+pub trait PlotSource {
+    fn field(&self) -> impl ScalarField;
+}
+
+impl<T: ScalarField> PlotSource for T {
+    fn field(&self) -> impl ScalarField {
+        self
+    }
+}
+
 #[derive(Component)]
 pub struct Plot {
-    extract: Arc<dyn ExtractChunk>,
+    extract: Arc<dyn ExtractChunk + Send + Sync>,
     render_distance: u32,
 }
 
 impl Plot {
     pub fn new<S>(source: S, render_distance: u32, max_level: u8, epsilon: f32) -> Self
     where
-        S: FieldSource + 'static,
+        S: PlotSource + Send + Sync + 'static,
     {
         Self {
             extract: Arc::new(ChunkExtractor {
@@ -61,23 +71,7 @@ impl Plot {
     }
 }
 
-pub trait FieldSource: Send + Sync {
-    type Field: ScalarField;
-    fn create(&self) -> Self::Field;
-}
-
-impl<S> FieldSource for S
-where
-    S: ScalarField + Clone + Send + Sync,
-{
-    type Field = S;
-
-    fn create(&self) -> S {
-        self.clone()
-    }
-}
-
-trait ExtractChunk: Send + Sync {
+trait ExtractChunk {
     fn extract_chunk(&self, coords: IVec3) -> Vec<(IVec3, SeparateNormals)>;
 }
 
@@ -90,15 +84,15 @@ struct ChunkExtractor<S> {
 
 impl<S> ExtractChunk for ChunkExtractor<S>
 where
-    S: FieldSource + 'static,
+    S: PlotSource,
 {
     fn extract_chunk(&self, coords: IVec3) -> Vec<(IVec3, SeparateNormals)> {
-        let source = CentralDifference::new(self.source.create(), self.epsilon);
+        let field = CentralDifference::new(self.source.field(), self.epsilon);
 
         let mut out = Vec::new();
         let mut sink = SeparateNormals::default();
 
-        let dc = Extractor::with_offset(&source, coords.as_vec3(), self.max_level);
+        let dc = Extractor::with_offset(&field, coords.as_vec3(), self.max_level);
 
         let Ok(chunk) = dc.extract_chunk(&mut sink) else {
             return out;
@@ -112,14 +106,14 @@ where
         for kind in SharedFaceKind::ALL {
             for offset in kind.slot_offsets() {
                 let anchor = coords - offset.as_uvec3().as_ivec3();
-                self.try_extract_face_seam(&source, kind, anchor, &mut out);
+                self.try_extract_face_seam(&field, kind, anchor, &mut out);
             }
         }
 
         for kind in SharedEdgeKind::ALL {
             for offset in kind.slot_offsets() {
                 let anchor = coords - offset.as_uvec3().as_ivec3();
-                self.try_extract_edge_seam(&source, kind, anchor, &mut out);
+                self.try_extract_edge_seam(&field, kind, anchor, &mut out);
             }
         }
 
@@ -127,10 +121,7 @@ where
     }
 }
 
-impl<S> ChunkExtractor<S>
-where
-    S: FieldSource + 'static,
-{
+impl<F> ChunkExtractor<F> {
     fn lookup_from(
         &self,
         anchor: IVec3,
@@ -138,9 +129,9 @@ where
         move |_, offset| self.world.get(anchor + offset.as_uvec3().as_ivec3())
     }
 
-    fn try_extract_face_seam(
+    fn try_extract_face_seam<S: ScalarField>(
         &self,
-        source: &CentralDifference<S::Field>,
+        source: &CentralDifference<S>,
         kind: SharedFaceKind,
         anchor: IVec3,
         out: &mut Vec<(IVec3, SeparateNormals)>,
@@ -166,9 +157,9 @@ where
         }
     }
 
-    fn try_extract_edge_seam(
+    fn try_extract_edge_seam<S: ScalarField>(
         &self,
-        source: &CentralDifference<S::Field>,
+        source: &CentralDifference<S>,
         kind: SharedEdgeKind,
         anchor: IVec3,
         out: &mut Vec<(IVec3, SeparateNormals)>,
