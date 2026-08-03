@@ -97,7 +97,7 @@ impl Program {
     pub fn compile(desc: &ProgramDesc, source: &str) -> Result<Self, CompileError> {
         let tape = parse(source)?
             .validate(desc.shape)?
-            .lower_to_ir(&desc.consts);
+            .lower_to_ir(|name| *desc.consts.get(name).unwrap());
 
         Ok(Self { tape })
     }

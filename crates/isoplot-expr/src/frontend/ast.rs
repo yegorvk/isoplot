@@ -15,12 +15,12 @@ pub(super) enum Value {
 pub(super) struct ExprId(u32);
 
 #[derive(Copy, Clone, Debug)]
-pub(super) struct ExprSetId {
+pub(super) struct MultiExprId {
     start: u32,
     end: u32,
 }
 
-impl ExprSetId {
+impl MultiExprId {
     fn raw_range(self) -> Range<u32> {
         self.start..self.end
     }
@@ -85,7 +85,7 @@ impl<'b> AstBuilder<'b> {
         let end = self.arena.nodes.len() as u32;
         self.create(
             span,
-            ExprKind::Intrinsic(intrinsic, ExprSetId { start, end }),
+            ExprKind::Intrinsic(intrinsic, MultiExprId { start, end }),
         )
     }
 
@@ -310,7 +310,7 @@ pub(super) struct Expr {
 pub(super) enum ExprKind {
     UnOp(UnOp, ExprId),
     BinOp(BinOp, ExprId, ExprId),
-    Intrinsic(Intrinsic, ExprSetId),
+    Intrinsic(Intrinsic, MultiExprId),
     Var(Symbol),
     Lit(Value),
     Error(Option<ExprId>),

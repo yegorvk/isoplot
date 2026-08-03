@@ -90,11 +90,12 @@ pub(crate) struct Validated<'a> {
 }
 
 impl Validated<'_> {
-    pub(crate) fn lower_to_ir(&self, consts: &HashMap<String, f32>) -> Tape {
-        assert_eq!(consts.len(), self.consts.len());
-
+    pub(crate) fn lower_to_ir<C>(&self, mut resolve_const: C) -> Tape
+    where
+        C: FnMut(&str) -> f32,
+    {
         let consts: Vec<f32> = (self.consts.iter())
-            .map(|name| *consts.get(name).unwrap())
+            .map(|name| resolve_const(name))
             .collect();
 
         let mut builder = Tape::builder(vec![Type::F32; self.num_inputs as usize]);
