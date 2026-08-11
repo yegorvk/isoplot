@@ -326,6 +326,9 @@ pub(super) enum Intrinsic {
     Cos,
     Tan,
     Cot,
+    Abs,
+    Min,
+    Max,
 }
 
 impl Intrinsic {
@@ -337,7 +340,10 @@ impl Intrinsic {
             | Intrinsic::Sin
             | Intrinsic::Cos
             | Intrinsic::Tan
-            | Intrinsic::Cot => 1,
+            | Intrinsic::Cot
+            | Intrinsic::Abs => 1,
+
+            Intrinsic::Min | Intrinsic::Max => 2,
         }
     }
 }
@@ -421,9 +427,8 @@ mod tests {
             I: ExactSizeIterator<Item = Self::In<'a>>,
         {
             let arg = args.next().unwrap();
-            assert!(args.next().is_none());
 
-            match intrinsic {
+            let result = match intrinsic {
                 Intrinsic::Exp => arg.exp(),
                 Intrinsic::Log => arg.log10(),
                 Intrinsic::Ln => arg.ln(),
@@ -431,7 +436,13 @@ mod tests {
                 Intrinsic::Cos => arg.cos(),
                 Intrinsic::Tan => arg.tan(),
                 Intrinsic::Cot => arg.tan().recip(),
-            }
+                Intrinsic::Abs => arg.abs(),
+                Intrinsic::Min => arg.min(args.next().unwrap()),
+                Intrinsic::Max => arg.max(args.next().unwrap()),
+            };
+
+            assert!(args.next().is_none());
+            result
         }
 
         fn var(&mut self, _id: ExprId, name: Symbol) -> f32 {

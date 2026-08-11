@@ -302,6 +302,17 @@ impl Visitor for Generator<'_> {
             Intrinsic::Cos => Instr::F32Cos(arg),
             Intrinsic::Tan => Instr::F32Tan(arg),
             Intrinsic::Cot => Instr::F32Cot(arg),
+            Intrinsic::Abs => Instr::F32Abs(arg),
+            Intrinsic::Min => {
+                let rhs = args.next().unwrap();
+                let rhs = self.promote(rhs);
+                Instr::F32Min(arg, rhs)
+            }
+            Intrinsic::Max => {
+                let rhs = args.next().unwrap();
+                let rhs = self.promote(rhs);
+                Instr::F32Max(arg, rhs)
+            }
         };
 
         (self.builder.instr(instr), self.ty[id])

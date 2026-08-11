@@ -36,6 +36,15 @@ pub(super) enum TokenKind<'src> {
     #[regex(r"(?i)cotan|cot|ctg")]
     Cot,
 
+    #[regex(r"(?i)abs")]
+    Abs,
+
+    #[regex(r"(?i)min")]
+    Min,
+
+    #[regex(r"(?i)max")]
+    Max,
+
     #[regex(r"(?i)pi|π", priority = 10)]
     Pi,
 
@@ -194,6 +203,9 @@ mod tests {
             [Log, Log, Log, Ln, Ln, Ln, Eof]
         );
         assert_eq!(tokens("pi Pi"), [Pi, Pi, Eof]);
+        assert_eq!(tokens("abs Abs ABS"), [Abs, Abs, Abs, Eof]);
+        assert_eq!(tokens("min MIN max Max"), [Min, Min, Max, Max, Eof]);
+        assert_eq!(tokens("minx"), [Ident("minx"), Eof]);
 
         assert_eq!(
             tokens("SIN SEN COS TAN COT COTAN CTG EXP PI"),

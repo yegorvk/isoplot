@@ -147,6 +147,9 @@ fn intrinsic_op(kind: TokenKind<'_>) -> Option<Intrinsic> {
         TokenKind::Cos => Some(Intrinsic::Cos),
         TokenKind::Tan => Some(Intrinsic::Tan),
         TokenKind::Cot => Some(Intrinsic::Cot),
+        TokenKind::Abs => Some(Intrinsic::Abs),
+        TokenKind::Min => Some(Intrinsic::Min),
+        TokenKind::Max => Some(Intrinsic::Max),
         _ => None,
     }
 }
@@ -225,6 +228,9 @@ mod tests {
                 Intrinsic::Cos => "cos",
                 Intrinsic::Tan => "tan",
                 Intrinsic::Cot => "cot",
+                Intrinsic::Abs => "abs",
+                Intrinsic::Min => "min",
+                Intrinsic::Max => "max",
             };
 
             let parts: Vec<_> = args.collect();
@@ -276,6 +282,9 @@ mod tests {
         assert_eq!(sexpr("-sin(x) ^ 2"), "(- (^ (sin x) 2))");
         assert_eq!(sexpr("cos(x + 1) * 2"), "(* (cos (+ x 1)) 2)");
         assert_eq!(sexpr("exp(sin(x), y)"), "(exp (sin x) y)");
+        assert_eq!(sexpr("abs(x)"), "(abs x)");
+        assert_eq!(sexpr("min(x, 2)"), "(min x 2)");
+        assert_eq!(sexpr("max(x, min(y, z))"), "(max x (min y z))");
     }
 
     #[test]
