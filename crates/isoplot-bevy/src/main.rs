@@ -12,16 +12,18 @@ use bevy::{
     text::{EditableText, TextCursorStyle},
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
+
 use noise::{NoiseFn, Simplex};
+
+use isoplot_eval::{
+    Backend, CompileError, Cranelift, Evaluator, Instance, Program, ProgramDesc, ProgramShape,
+};
+use isoplot_mesh::ScalarField;
 
 use crate::{
     controls::{CameraControls, CameraControlsPlugin},
     plot::{Plot, PlotPlugin, PlotSource},
 };
-use isoplot_expr::{
-    Backend, CompileError, Cranelift, Evaluator, Instance, Program, ProgramDesc, ProgramShape,
-};
-use isoplot_mesh::ScalarField;
 
 struct EllipticParaboloid {
     pub a: f32,

@@ -323,9 +323,7 @@ fn build_bevy_mesh(data: SeparateNormals) -> Mesh {
 }
 
 fn build_wireframe_mesh(data: &SeparateNormals) -> Mesh {
-    let count = data.positions.len() as u32;
-
-    let shell = |side: f32| {
+    let vertices = |side: f32| {
         data.positions
             .iter()
             .zip(&data.normals)
@@ -334,7 +332,7 @@ fn build_wireframe_mesh(data: &SeparateNormals) -> Mesh {
             })
     };
 
-    let positions: Vec<[f32; 3]> = shell(1.0).chain(shell(-1.0)).collect();
+    let positions: Vec<[f32; 3]> = vertices(1.0).chain(vertices(-1.0)).collect();
     let normals: Vec<[f32; 3]> = data.normals.iter().chain(&data.normals).copied().collect();
 
     let front: Vec<u32> = data
@@ -343,7 +341,7 @@ fn build_wireframe_mesh(data: &SeparateNormals) -> Mesh {
         .flat_map(|&[a, b, c]| [a, b, b, c, c, a])
         .collect();
 
-    let back = front.iter().map(|i| i + count);
+    let back = front.iter().map(|i| i + data.positions.len() as u32);
     let lines = front.iter().copied().chain(back.clone()).collect();
 
     let mut mesh = Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::RENDER_WORLD);
