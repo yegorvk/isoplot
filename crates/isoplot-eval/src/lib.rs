@@ -7,7 +7,7 @@ use thiserror::Error;
 #[cfg(feature = "cranelift")]
 pub use crate::backend::Cranelift;
 
-pub use crate::backend::{Backend, Evaluator, Instance, Interpreter};
+pub use crate::backend::{Backend, DefaultBackend, DefaultInstance, Evaluator, Fallback, Instance};
 
 mod backend;
 mod frontend;

@@ -62,7 +62,7 @@ where
 
         match token.kind {
             TokenKind::Int(lit) => match lit.parse_i32() {
-                Ok(value) => self.builder.lit(token.span, Value::F32(value as f32)),
+                Ok(value) => self.builder.lit(token.span, Value::I32(value)),
                 Err(_) => self.builder.error(token.span, None),
             },
             TokenKind::Float(lit) => match lit.parse_f32() {
@@ -238,6 +238,7 @@ mod tests {
         fn lit(&mut self, _id: ExprId, value: Value) -> String {
             match value {
                 Value::F32(x) => format!("{x}"),
+                Value::I32(x) => format!("{x}"),
             }
         }
 

@@ -5,23 +5,17 @@ mod symbol;
 mod token;
 
 use std::{
-    collections::HashMap,
     error::Error,
     fmt::{self, Display},
 };
 
 use crate::{
     ProgramShape,
+    frontend::ast::DenseMap,
     tape::{Instr, Tape, TapeBuilder, Type, ValueId},
 };
 use ast::{Ast, BinOp, ExprId, Intrinsic, SparseMap, UnOp, Value, Visitor};
 use symbol::{Interner, Symbol};
-
-#[derive(Copy, Clone, Debug)]
-enum VarSlot {
-    Const(u32),
-    Input(u32),
-}
 
 #[derive(Debug)]
 pub struct ParseError(());
@@ -61,7 +55,7 @@ pub(crate) struct Parsed {
 impl Parsed {
     pub(crate) fn validate(&self, shape: &ProgramShape) -> Result<Validated<'_>, ValidateError> {
         let mut valid = true;
-        let resolver = Resolver {
+        let resolver = VarResolver {
             interner: &self.interner,
             shape,
             valid: &mut valid,
@@ -78,6 +72,7 @@ impl Parsed {
             num_inputs: shape.inputs.len() as u32,
             consts: shape.consts.clone(),
             vars,
+            ty: DenseMap::build(&self.ast, TypeChecker),
         })
     }
 }
@@ -87,6 +82,7 @@ pub(crate) struct Validated<'a> {
     num_inputs: u32,
     consts: Vec<String>,
     vars: SparseMap<VarSlot>,
+    ty: DenseMap<Type>,
 }
 
 impl Validated<'_> {
@@ -103,10 +99,16 @@ impl Validated<'_> {
         let generator = Generator {
             vars: &self.vars,
             consts: &consts,
+            ty: &self.ty,
             builder: &mut builder,
         };
 
-        let root = self.ast.fold(generator);
+        let (root, root_ty) = self.ast.fold(generator);
+
+        let root = match root_ty {
+            Type::I32 => builder.instr(Instr::F32FromI32(root)),
+            Type::F32 => root,
+        };
 
         if (0..self.num_inputs).any(|index| builder.arg(index) == root) {
             builder.instr(Instr::F32Max(root, root));
@@ -116,13 +118,13 @@ impl Validated<'_> {
     }
 }
 
-struct Resolver<'a> {
+struct VarResolver<'a> {
     interner: &'a Interner,
     shape: &'a ProgramShape,
     valid: &'a mut bool,
 }
 
-impl Visitor for Resolver<'_> {
+impl Visitor for VarResolver<'_> {
     type In<'a> = Option<&'a VarSlot>;
     type Out = Option<VarSlot>;
 
@@ -176,46 +178,121 @@ impl Visitor for Resolver<'_> {
     }
 }
 
-struct Generator<'a> {
-    vars: &'a SparseMap<VarSlot>,
-    consts: &'a [f32],
-    builder: &'a mut TapeBuilder,
-}
+struct TypeChecker;
 
-impl Visitor for Generator<'_> {
-    type In<'a> = ValueId;
-    type Out = ValueId;
+impl Visitor for TypeChecker {
+    type In<'a> = &'a Type;
+    type Out = Type;
 
-    fn un_op(&mut self, _id: ExprId, op: UnOp, operand: Self::In<'_>) -> Self::Out {
+    fn un_op(&mut self, _id: ExprId, _op: UnOp, operand: &Type) -> Type {
+        *operand
+    }
+
+    fn bin_op(&mut self, _id: ExprId, op: BinOp, lhs: &Type, rhs: &Type) -> Type {
         match op {
-            UnOp::Plus => operand,
-            UnOp::Minus => self.builder.instr(Instr::F32Neg(operand)),
+            BinOp::Add | BinOp::Sub | BinOp::Mul => match (lhs, rhs) {
+                (Type::I32, Type::I32) => Type::I32,
+                _ => Type::F32,
+            },
+            BinOp::Div | BinOp::Pow => Type::F32,
         }
     }
 
-    fn bin_op(
-        &mut self,
-        _id: ExprId,
-        op: BinOp,
-        lhs: Self::In<'_>,
-        rhs: Self::In<'_>,
-    ) -> Self::Out {
-        let instr = match op {
-            BinOp::Add => Instr::F32Add(lhs, rhs),
-            BinOp::Sub => Instr::F32Sub(lhs, rhs),
-            BinOp::Mul => Instr::F32Mul(lhs, rhs),
-            BinOp::Div => Instr::F32Div(lhs, rhs),
-            BinOp::Pow => Instr::F32Powf(lhs, rhs),
-        };
-
-        self.builder.instr(instr)
+    fn intrinsic<'a, I>(&mut self, _id: ExprId, _kind: Intrinsic, _args: I) -> Type
+    where
+        I: ExactSizeIterator<Item = Self::In<'a>>,
+    {
+        Type::F32
     }
 
-    fn intrinsic<'a, I>(&mut self, _id: ExprId, kind: Intrinsic, mut args: I) -> Self::Out
+    fn var(&mut self, _id: ExprId, _name: Symbol) -> Type {
+        // All variables and constants are `f32` for now.
+        Type::F32
+    }
+
+    fn lit(&mut self, _id: ExprId, value: Value) -> Type {
+        match value {
+            Value::I32(_) => Type::I32,
+            Value::F32(_) => Type::F32,
+        }
+    }
+
+    fn map_error(&mut self, _id: ExprId, _inner: Option<&Type>) -> Type {
+        // Should have been handled by the resolver.
+        unreachable!()
+    }
+}
+
+struct Generator<'a> {
+    vars: &'a SparseMap<VarSlot>,
+    consts: &'a [f32],
+    ty: &'a DenseMap<Type>,
+    builder: &'a mut TapeBuilder,
+}
+
+impl Generator<'_> {
+    fn promote(&mut self, (value, ty): (ValueId, Type)) -> ValueId {
+        match ty {
+            Type::I32 => self.builder.instr(Instr::F32FromI32(value)),
+            Type::F32 => value,
+        }
+    }
+}
+
+impl Visitor for Generator<'_> {
+    type In<'a> = (ValueId, Type);
+    type Out = (ValueId, Type);
+
+    fn un_op(&mut self, id: ExprId, op: UnOp, operand: Self::In<'_>) -> Self::Out {
+        let ty = self.ty[id];
+
+        let value = match op {
+            UnOp::Plus => operand.0,
+            UnOp::Minus => match ty {
+                Type::I32 => {
+                    let zero = self.builder.instr(Instr::I32Const(0));
+                    self.builder.instr(Instr::I32Sub(zero, operand.0))
+                }
+                Type::F32 => {
+                    let operand = self.promote(operand);
+                    self.builder.instr(Instr::F32Neg(operand))
+                }
+            },
+        };
+
+        (value, ty)
+    }
+
+    fn bin_op(&mut self, id: ExprId, op: BinOp, lhs: Self::In<'_>, rhs: Self::In<'_>) -> Self::Out {
+        let ty = self.ty[id];
+
+        let instr = match (op, ty) {
+            (BinOp::Add, Type::I32) => Instr::I32Add(lhs.0, rhs.0),
+            (BinOp::Sub, Type::I32) => Instr::I32Sub(lhs.0, rhs.0),
+            (BinOp::Mul, Type::I32) => Instr::I32Mul(lhs.0, rhs.0),
+
+            (BinOp::Add, Type::F32) => Instr::F32Add(self.promote(lhs), self.promote(rhs)),
+            (BinOp::Sub, Type::F32) => Instr::F32Sub(self.promote(lhs), self.promote(rhs)),
+            (BinOp::Mul, Type::F32) => Instr::F32Mul(self.promote(lhs), self.promote(rhs)),
+            (BinOp::Div, Type::F32) => Instr::F32Div(self.promote(lhs), self.promote(rhs)),
+
+            (BinOp::Pow, Type::F32) => match rhs.1 {
+                Type::I32 => Instr::F32Powi(self.promote(lhs), rhs.0),
+                Type::F32 => Instr::F32Powf(self.promote(lhs), rhs.0),
+            },
+
+            (BinOp::Div | BinOp::Pow, Type::I32) => unreachable!(),
+        };
+
+        (self.builder.instr(instr), ty)
+    }
+
+    fn intrinsic<'a, I>(&mut self, id: ExprId, kind: Intrinsic, mut args: I) -> Self::Out
     where
         I: ExactSizeIterator<Item = Self::In<'a>>,
     {
         let arg = args.next().unwrap();
+        let arg = self.promote(arg);
 
         let instr = match kind {
             Intrinsic::Exp => Instr::F32Exp(arg),
@@ -227,26 +304,38 @@ impl Visitor for Generator<'_> {
             Intrinsic::Cot => Instr::F32Cot(arg),
         };
 
-        self.builder.instr(instr)
+        (self.builder.instr(instr), self.ty[id])
     }
 
     fn var(&mut self, id: ExprId, _name: Symbol) -> Self::Out {
-        match self.vars.get(id).unwrap() {
+        let value = match self.vars.get(id).unwrap() {
             VarSlot::Const(index) => {
                 let value = self.consts[*index as usize];
                 self.builder.instr(Instr::F32Const(value))
             }
             VarSlot::Input(index) => self.builder.arg(*index),
-        }
+        };
+
+        (value, self.ty[id])
     }
 
-    fn lit(&mut self, _id: ExprId, value: Value) -> Self::Out {
-        let Value::F32(value) = value;
-        self.builder.instr(Instr::F32Const(value))
+    fn lit(&mut self, id: ExprId, value: Value) -> Self::Out {
+        let instr = match value {
+            Value::I32(value) => Instr::I32Const(value),
+            Value::F32(value) => Instr::F32Const(value),
+        };
+
+        (self.builder.instr(instr), self.ty[id])
     }
 
     fn map_error(&mut self, _id: ExprId, _inner: Option<Self::In<'_>>) -> Self::Out {
         // Should have been handled by the resolver.
         unreachable!()
     }
+}
+
+#[derive(Copy, Clone, Debug)]
+enum VarSlot {
+    Const(u32),
+    Input(u32),
 }

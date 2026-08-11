@@ -6,6 +6,7 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
+bytemuck = { workspace = true, features = ["derive"] }
 codespan-reporting = "0.13.1"
 logos = "0.16.1"
 thiserror.workspace = true
@@ -16,4 +17,7 @@ optional = true
 features = ["jit", "module", "native"]
 
 [features]
+default = ["default-fallback"]
 cranelift = ["dep:cranelift"]
+default-fallback = []
+default-cranelift = ["cranelift"]

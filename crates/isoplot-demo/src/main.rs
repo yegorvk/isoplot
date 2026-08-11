@@ -16,7 +16,7 @@ use bevy::{
 use noise::{NoiseFn, Simplex};
 
 use isoplot_eval::{
-    Backend, CompileError, Cranelift, Evaluator, Instance, Program, ProgramDesc, ProgramShape,
+    CompileError, DefaultBackend, DefaultInstance, Evaluator, Program, ProgramDesc, ProgramShape,
 };
 use isoplot_mesh::ScalarField;
 
@@ -71,20 +71,12 @@ impl ScalarField for SimplexNoise {
     }
 }
 
-type DefaultBackend = Cranelift;
-
-struct Equation<B: Backend = DefaultBackend> {
-    instance: Instance<B>,
+struct Equation {
+    instance: DefaultInstance,
 }
 
 impl Equation {
     fn new(equation: &str) -> Result<Self, CompileError> {
-        Self::new_with_backend(equation)
-    }
-}
-
-impl<B: Backend> Equation<B> {
-    fn new_with_backend(equation: &str) -> Result<Self, CompileError> {
         let program = Program::compile(
             &ProgramDesc::new(&equation_default_shape(), HashMap::new()),
             equation,
@@ -95,14 +87,14 @@ impl<B: Backend> Equation<B> {
         })
     }
 
-    fn create_source(&self) -> DynamicSource<B> {
+    fn create_source(&self) -> DynamicSource {
         DynamicSource {
             evaluator: self.instance.evaluator(),
         }
     }
 }
 
-impl<B: Backend> PlotSource for Equation<B> {
+impl PlotSource for Equation {
     fn field(&self) -> impl ScalarField {
         self.create_source()
     }
@@ -116,11 +108,11 @@ fn equation_default_shape() -> ProgramShape {
         .build()
 }
 
-struct DynamicSource<B: Backend> {
-    evaluator: Evaluator<B>,
+struct DynamicSource {
+    evaluator: Evaluator<DefaultBackend>,
 }
 
-impl<B: Backend> ScalarField for DynamicSource<B> {
+impl ScalarField for DynamicSource {
     fn sample(&self, point: Vec3) -> f32 {
         self.evaluator.evaluate(&point.to_array())
     }

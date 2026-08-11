@@ -8,6 +8,7 @@ use super::{span::Span, symbol::Symbol};
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub(super) enum Value {
+    I32(i32),
     F32(f32),
 }
 
@@ -440,6 +441,7 @@ mod tests {
         fn lit(&mut self, _id: ExprId, value: Value) -> f32 {
             match value {
                 Value::F32(x) => x,
+                Value::I32(x) => x as f32,
             }
         }
 
@@ -602,6 +604,7 @@ mod tests {
         fn lit(&mut self, _id: ExprId, value: Value) -> Option<f32> {
             match value {
                 Value::F32(x) => Some(x),
+                Value::I32(x) => Some(x as f32),
             }
         }
 

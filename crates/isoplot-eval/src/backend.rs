@@ -1,4 +1,4 @@
-mod interp;
+mod fallback;
 
 #[cfg(feature = "cranelift")]
 mod cranelift;
@@ -31,15 +31,29 @@ mod private {
 pub trait Backend: private::Backend {}
 impl<T: private::Backend> Backend for T {}
 
-/// Unoptimized bytecode interpreter
-pub struct Interpreter;
+std::cfg_select! {
+    feature = "default-cranelift" => {
+        pub type DefaultBackend = Cranelift;
+    }
+    feature = "default-fallback" => {
+        pub type DefaultBackend = Fallback;
+    }
+    _ => {
+        compile_error!("no default backend feature enabled");
+    }
+}
 
-impl private::Backend for Interpreter {
-    type Instance = interp::Instance;
-    type Evaluator = interp::Evaluator;
+pub type DefaultInstance = Instance<DefaultBackend>;
+
+/// Unoptimized bytecode interpreter
+pub struct Fallback;
+
+impl private::Backend for Fallback {
+    type Instance = fallback::Fallback;
+    type Evaluator = fallback::Evaluator;
 
     fn instantiate(program: Tape) -> Self::Instance {
-        interp::Instance::new(program)
+        fallback::Fallback::new(program)
     }
 
     fn evaluator(instance: &Self::Instance) -> Self::Evaluator {
