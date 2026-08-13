@@ -1,6 +1,6 @@
 mod ast;
 mod parser;
-mod span;
+mod pretty;
 mod symbol;
 mod token;
 
@@ -11,60 +11,99 @@ use std::{
 
 use crate::{
     ProgramShape,
+    diag::Diagnostic,
     frontend::ast::DenseMap,
     tape::{Instr, Tape, TapeBuilder, Type, ValueId},
 };
 use ast::{Ast, BinOp, ExprId, Intrinsic, SparseMap, UnOp, Value, Visitor};
+use pretty::PrettyPrintAst;
 use symbol::{Interner, Symbol};
 
 #[derive(Debug)]
-pub struct ParseError(());
+pub struct ParseError {
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl ParseError {
+    pub(crate) fn new(diagnostics: Vec<Diagnostic>) -> Self {
+        Self { diagnostics }
+    }
+
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+}
 
 impl Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("PARSE_ERROR")
+        f.write_str("failed to parse expression")
     }
 }
 
 impl Error for ParseError {}
 
 #[derive(Debug)]
-pub struct ValidateError(());
+pub struct ValidateError {
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl ValidateError {
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+}
 
 impl Display for ValidateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("VALIDATE_ERROR")
+        f.write_str("failed to validate expression")
     }
 }
 
 impl Error for ValidateError {}
 
-pub(crate) fn parse(source: &str) -> Result<Parsed, ParseError> {
-    let mut interner = Interner::default();
-    Ok(Parsed {
-        ast: parser::parse(token::tokenize(source), &mut interner),
-        interner,
-    })
+pub fn dump_ast(shape: &ProgramShape, source: &str) -> (Parsed, Vec<Diagnostic>) {
+    let (parsed, mut diagnostics) = parse(source);
+
+    if let Err(error) = parsed.validate(shape) {
+        diagnostics.extend(error.diagnostics);
+    }
+
+    (parsed, diagnostics)
 }
 
-pub(crate) struct Parsed {
+pub(crate) fn parse(source: &str) -> (Parsed, Vec<Diagnostic>) {
+    let mut interner = Interner::default();
+    let mut diagnostics = Vec::new();
+    let ast = parser::parse(token::tokenize(source), &mut interner, &mut diagnostics);
+
+    (Parsed { ast, interner }, diagnostics)
+}
+
+pub struct Parsed {
     interner: Interner,
     ast: Ast,
 }
 
 impl Parsed {
+    pub fn pretty_printer(&self) -> impl Display + '_ {
+        PrettyPrintAst::new(&self.ast, &self.interner)
+    }
+
     pub(crate) fn validate(&self, shape: &ProgramShape) -> Result<Validated<'_>, ValidateError> {
-        let mut valid = true;
+        let mut diagnostics = Vec::new();
+
         let resolver = VarResolver {
             interner: &self.interner,
             shape,
-            valid: &mut valid,
+            ast: &self.ast,
+            diags: &mut diagnostics,
         };
 
         let vars = SparseMap::build(&self.ast, resolver);
+        let ty = DenseMap::build(&self.ast, TypeChecker);
 
-        if !valid {
-            return Err(ValidateError(()));
+        if !diagnostics.is_empty() {
+            return Err(ValidateError { diagnostics });
         }
 
         Ok(Validated {
@@ -72,7 +111,7 @@ impl Parsed {
             num_inputs: shape.inputs.len() as u32,
             consts: shape.consts.clone(),
             vars,
-            ty: DenseMap::build(&self.ast, TypeChecker),
+            ty,
         })
     }
 }
@@ -121,7 +160,8 @@ impl Validated<'_> {
 struct VarResolver<'a> {
     interner: &'a Interner,
     shape: &'a ProgramShape,
-    valid: &'a mut bool,
+    ast: &'a Ast,
+    diags: &'a mut Vec<Diagnostic>,
 }
 
 impl Visitor for VarResolver<'_> {
@@ -142,18 +182,26 @@ impl Visitor for VarResolver<'_> {
         None
     }
 
-    fn intrinsic<'a, I>(&mut self, _id: ExprId, intrinsic: Intrinsic, args: I) -> Option<VarSlot>
+    fn intrinsic<'a, I>(&mut self, id: ExprId, intrinsic: Intrinsic, args: I) -> Option<VarSlot>
     where
         I: ExactSizeIterator<Item = Option<&'a VarSlot>>,
     {
         if args.len() != intrinsic.num_args() {
-            *self.valid = false;
+            self.diags.push(Diagnostic::new(
+                format!(
+                    "`{}` expects {} argument(s), got {}",
+                    intrinsic.name(),
+                    intrinsic.num_args(),
+                    args.len(),
+                ),
+                self.ast[id].span,
+            ));
         }
 
         None
     }
 
-    fn var(&mut self, _id: ExprId, name: Symbol) -> Option<VarSlot> {
+    fn var(&mut self, id: ExprId, name: Symbol) -> Option<VarSlot> {
         let name = self.interner.resolve(name).unwrap();
 
         if let Some(index) = self.shape.inputs.iter().position(|input| input == name) {
@@ -164,7 +212,11 @@ impl Visitor for VarResolver<'_> {
             return Some(VarSlot::Const(index as u32));
         }
 
-        *self.valid = false;
+        self.diags.push(Diagnostic::new(
+            format!("unknown variable `{name}`"),
+            self.ast[id].span,
+        ));
+
         None
     }
 
@@ -173,7 +225,6 @@ impl Visitor for VarResolver<'_> {
     }
 
     fn map_error(&mut self, _id: ExprId, _inner: Option<Option<&VarSlot>>) -> Option<VarSlot> {
-        *self.valid = false;
         None
     }
 }
@@ -206,7 +257,6 @@ impl Visitor for TypeChecker {
     }
 
     fn var(&mut self, _id: ExprId, _name: Symbol) -> Type {
-        // All variables and constants are `f32` for now.
         Type::F32
     }
 
@@ -217,9 +267,8 @@ impl Visitor for TypeChecker {
         }
     }
 
-    fn map_error(&mut self, _id: ExprId, _inner: Option<&Type>) -> Type {
-        // Should have been handled by the resolver.
-        unreachable!()
+    fn map_error(&mut self, _id: ExprId, inner: Option<&Type>) -> Type {
+        inner.copied().unwrap_or(Type::F32)
     }
 }
 
@@ -340,7 +389,6 @@ impl Visitor for Generator<'_> {
     }
 
     fn map_error(&mut self, _id: ExprId, _inner: Option<Self::In<'_>>) -> Self::Out {
-        // Should have been handled by the resolver.
         unreachable!()
     }
 }
@@ -349,4 +397,95 @@ impl Visitor for Generator<'_> {
 enum VarSlot {
     Const(u32),
     Input(u32),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shape() -> ProgramShape {
+        ProgramShape::builder().with_input("x").build()
+    }
+
+    fn diagnostics(source: &str) -> Vec<(String, usize, usize)> {
+        let (parsed, mut diagnostics) = parse(source);
+
+        if let Err(error) = parsed.validate(&shape()) {
+            diagnostics.extend(error.diagnostics);
+        }
+
+        diagnostics
+            .iter()
+            .map(|diag| {
+                let span = diag.location();
+                (
+                    diag.message().to_owned(),
+                    span.start.index(),
+                    span.end.index(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn parse_diagnostics() {
+        assert_eq!(
+            diagnostics(""),
+            [(
+                "expected an expression, but found end of input".to_owned(),
+                0,
+                0
+            )]
+        );
+
+        assert_eq!(
+            diagnostics("1 + $"),
+            [("expected an expression, but found `$`".to_owned(), 4, 5)]
+        );
+
+        assert_eq!(
+            diagnostics("(x + 1"),
+            [("expected `)`, but found end of input".to_owned(), 6, 6)]
+        );
+
+        assert_eq!(
+            diagnostics("sin x"),
+            [
+                ("expected `(`, but found `x`".to_owned(), 4, 5),
+                ("expected end of input, but found `x`".to_owned(), 4, 5),
+            ]
+        );
+
+        assert_eq!(
+            diagnostics("2147483648"),
+            [("integer literal is out of range".to_owned(), 0, 10)]
+        );
+    }
+
+    #[test]
+    fn validate_diagnostics() {
+        assert_eq!(
+            diagnostics("x + y"),
+            [("unknown variable `y`".to_owned(), 4, 5)]
+        );
+        assert_eq!(
+            diagnostics("min(x)"),
+            [("`min` expects 2 argument(s), got 1".to_owned(), 0, 5)]
+        );
+
+        assert_eq!(diagnostics("1 / 2"), []);
+        assert_eq!(diagnostics("x / 2"), []);
+        assert_eq!(diagnostics("x ^ -2"), []);
+    }
+
+    #[test]
+    fn validation_with_error_nodes() {
+        assert_eq!(
+            diagnostics("sin(w"),
+            [
+                ("expected `)`, but found end of input".to_owned(), 5, 5),
+                ("unknown variable `w`".to_owned(), 4, 5),
+            ]
+        );
+    }
 }

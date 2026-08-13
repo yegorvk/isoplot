@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::frontend::{ParseError, ValidateError, parse};
+use frontend::{ParseError, ValidateError, parse};
 use tape::Tape;
 use thiserror::Error;
 
@@ -8,18 +8,30 @@ use thiserror::Error;
 pub use crate::backend::Cranelift;
 
 pub use crate::backend::{Backend, DefaultBackend, DefaultInstance, Evaluator, Fallback, Instance};
+pub use crate::diag::{BytePos, Diagnostic, Span};
+pub use crate::frontend::dump_ast;
 
 mod backend;
+mod diag;
 mod frontend;
 mod tape;
 
 #[derive(Error, Debug)]
 pub enum CompileError {
-    #[error("failed to parse expression")]
+    #[error(transparent)]
     Parse(#[from] ParseError),
 
-    #[error("failed to validate expression")]
+    #[error(transparent)]
     Validate(#[from] ValidateError),
+}
+
+impl CompileError {
+    pub fn diagnostics(&self) -> &[diag::Diagnostic] {
+        match self {
+            CompileError::Parse(error) => error.diagnostics(),
+            CompileError::Validate(error) => error.diagnostics(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -95,10 +107,17 @@ pub struct Program {
 
 impl Program {
     pub fn compile(desc: &ProgramDesc, source: &str) -> Result<Self, CompileError> {
-        let tape = parse(source)?
-            .validate(desc.shape)?
-            .lower_to_ir(|name| *desc.consts.get(name).unwrap());
+        let (parsed, mut diagnostics) = parse(source);
+        let validated = parsed.validate(desc.shape);
 
+        if !diagnostics.is_empty() {
+            if let Err(error) = &validated {
+                diagnostics.extend_from_slice(error.diagnostics());
+            }
+            return Err(ParseError::new(diagnostics).into());
+        }
+
+        let tape = validated?.lower_to_ir(|name| *desc.consts.get(name).unwrap());
         Ok(Self { tape })
     }
 

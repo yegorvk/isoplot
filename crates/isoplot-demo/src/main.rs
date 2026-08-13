@@ -16,7 +16,8 @@ use bevy::{
 use noise::{NoiseFn, Simplex};
 
 use isoplot_eval::{
-    CompileError, DefaultBackend, DefaultInstance, Evaluator, Program, ProgramDesc, ProgramShape,
+    CompileError, DefaultBackend, DefaultInstance, Diagnostic, Evaluator, Program, ProgramDesc,
+    ProgramShape,
 };
 use isoplot_mesh::ScalarField;
 
@@ -208,6 +209,21 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
     ));
 
     commands.spawn((
+        DiagnosticsText,
+        Text::new(""),
+        TextColor(Color::srgb(1.0, 0.5, 0.5)),
+        Visibility::Hidden,
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(48.0),
+            left: Val::Px(8.0),
+            padding: UiRect::all(Val::Px(4.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+    ));
+
+    commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 0.4, 1.0).looking_to(Dir3::NEG_Z, Dir3::Y),
         CameraControls::default(),
@@ -253,24 +269,36 @@ fn cycle_plots(
 #[derive(Component)]
 struct EquationText;
 
+#[derive(Component)]
+struct DiagnosticsText;
+
 fn submit_equation(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     mut cycler: ResMut<PlotCycler>,
     field: Single<(&EditableText, &mut TextColor), With<EquationText>>,
+    overlay: Single<(&mut Text, &mut Visibility), With<DiagnosticsText>>,
 ) {
     if !keys.just_pressed(KeyCode::Enter) {
         return;
     }
 
     let (field, mut color) = field.into_inner();
+    let (mut overlay_text, mut overlay_visibility) = overlay.into_inner();
+    let source = field.value().to_string();
 
-    let Ok(equation) = Equation::new(&field.value().to_string()) else {
-        color.0 = Color::srgb(1.0, 0.3, 0.3);
-        return;
+    let equation = match Equation::new(&source) {
+        Ok(equation) => equation,
+        Err(error) => {
+            color.0 = Color::srgb(1.0, 0.3, 0.3);
+            overlay_text.0 = render_diagnostics(&source, error.diagnostics());
+            *overlay_visibility = Visibility::Visible;
+            return;
+        }
     };
 
     color.0 = Color::WHITE;
+    *overlay_visibility = Visibility::Hidden;
     commands.entity(cycler.current).despawn();
 
     cycler.current = spawn_plot(
@@ -278,6 +306,30 @@ fn submit_equation(
         create_plot(equation),
         cycler.material.clone(),
     );
+}
+
+fn render_diagnostics(source: &str, diagnostics: &[Diagnostic]) -> String {
+    let mut out = String::new();
+
+    for (i, diagnostic) in diagnostics.iter().enumerate() {
+        if i > 0 {
+            out.push_str("\n");
+        }
+
+        let span = diagnostic.location();
+        let (start, end) = (span.start.index(), span.end.index());
+        let offset = source[..start].chars().count();
+        let width = source[start..end].chars().count().max(1);
+
+        out.push_str(&format!(
+            "error: {}\n  {source}\n  {}{}",
+            diagnostic.message(),
+            " ".repeat(offset),
+            "^".repeat(width),
+        ));
+    }
+
+    out
 }
 
 fn create_plot(equation: Equation) -> Plot {

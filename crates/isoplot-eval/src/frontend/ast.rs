@@ -4,7 +4,9 @@ use std::{
     ops::{Index, Range},
 };
 
-use super::{span::Span, symbol::Symbol};
+use crate::diag::Span;
+
+use super::symbol::Symbol;
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub(super) enum Value {
@@ -332,6 +334,21 @@ pub(super) enum Intrinsic {
 }
 
 impl Intrinsic {
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Intrinsic::Exp => "exp",
+            Intrinsic::Log => "log",
+            Intrinsic::Ln => "ln",
+            Intrinsic::Sin => "sin",
+            Intrinsic::Cos => "cos",
+            Intrinsic::Tan => "tan",
+            Intrinsic::Cot => "cot",
+            Intrinsic::Abs => "abs",
+            Intrinsic::Min => "min",
+            Intrinsic::Max => "max",
+        }
+    }
+
     pub(super) fn num_args(self) -> usize {
         match self {
             Intrinsic::Exp
@@ -392,8 +409,8 @@ pub(super) trait Visitor {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{span::BytePos, symbol::Interner};
-    use super::*;
+    use super::{super::symbol::Interner, *};
+    use crate::diag::BytePos;
     use std::collections::HashMap;
 
     #[derive(Default)]
@@ -557,7 +574,6 @@ mod tests {
     fn intrinsic_arg_set() {
         let span = Span::new(BytePos(0), BytePos(1));
 
-        // sin(1, 2 * 3) — arity is not enforced at the arena level
         let ast = Ast::build(|b| {
             let one = b.lit(span, Value::F32(1.0));
             let two = b.lit(span, Value::F32(2.0));
@@ -642,7 +658,6 @@ mod tests {
 
         let consts = SparseMap::build(&ast, Consts);
 
-        // Insertion order: 0 = 2, 1 = 3, 2 = x, 3 = 2 * 3, 4 = root.
         assert_eq!(consts.get(ExprId(0)), Some(&2.0));
         assert_eq!(consts.get(ExprId(2)), None);
         assert_eq!(consts.get(ExprId(3)), Some(&6.0));

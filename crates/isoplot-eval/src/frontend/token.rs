@@ -1,5 +1,7 @@
-use super::span::{BytePos, Span};
 use logos::Logos;
+use std::fmt;
+
+use crate::diag::{BytePos, Span};
 
 pub(super) struct Token<'src> {
     pub(super) kind: TokenKind<'src>,
@@ -75,11 +77,44 @@ pub(super) enum TokenKind<'src> {
     #[token(")")]
     RParen,
 
-    #[regex(".", priority = 0)]
-    Unknown,
+    #[regex(".", |lex| lex.slice().chars().next().unwrap(), priority = 0)]
+    Unknown(char),
 
     /// Sentinel "EOF" token
     Eof,
+}
+
+impl fmt::Display for TokenKind<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            TokenKind::Float(lit) => lit.0,
+            TokenKind::Int(lit) => lit.0,
+            TokenKind::Ident(name) => name,
+            TokenKind::Exp => "exp",
+            TokenKind::Log => "log",
+            TokenKind::Ln => "ln",
+            TokenKind::Sin => "sin",
+            TokenKind::Cos => "cos",
+            TokenKind::Tan => "tan",
+            TokenKind::Cot => "cot",
+            TokenKind::Abs => "abs",
+            TokenKind::Min => "min",
+            TokenKind::Max => "max",
+            TokenKind::Pi => "pi",
+            TokenKind::Plus => "+",
+            TokenKind::Minus => "-",
+            TokenKind::Star => "*",
+            TokenKind::Slash => "/",
+            TokenKind::Caret => "^",
+            TokenKind::Comma => ",",
+            TokenKind::LParen => "(",
+            TokenKind::RParen => ")",
+            TokenKind::Unknown(c) => return write!(f, "`{c}`"),
+            TokenKind::Eof => return f.write_str("end of input"),
+        };
+
+        write!(f, "`{text}`")
+    }
 }
 
 pub(super) fn tokenize<'src>(src: &'src str) -> impl Iterator<Item = Token<'src>> {
@@ -171,8 +206,8 @@ mod tests {
 
         assert_eq!(tokens(" \t\r\n"), [Eof]);
 
-        assert_eq!(tokens("1."), [Int(LitInt("1")), Unknown, Eof]);
-        assert_eq!(tokens(".5"), [Unknown, Int(LitInt("5")), Eof]);
+        assert_eq!(tokens("1."), [Int(LitInt("1")), Unknown('.'), Eof]);
+        assert_eq!(tokens(".5"), [Unknown('.'), Int(LitInt("5")), Eof]);
 
         assert_eq!(tokens("-1"), [Minus, Int(LitInt("1")), Eof]);
 

@@ -1,13 +1,18 @@
 use std::{f32::consts::PI, mem};
 
+use crate::diag::{BytePos, Diagnostic, Span};
+
 use super::{
     ast::{Ast, AstBuilder, BinOp, Intrinsic, NewId, UnOp, Value},
-    span::{BytePos, Span},
     symbol::Interner,
     token::{Token, TokenKind},
 };
 
-pub(super) fn parse<'src, I>(mut input: I, interner: &mut Interner) -> Ast
+pub(super) fn parse<'src, I>(
+    mut input: I,
+    interner: &mut Interner,
+    diags: &mut Vec<Diagnostic>,
+) -> Ast
 where
     I: Iterator<Item = Token<'src>>,
 {
@@ -22,10 +27,11 @@ where
             next,
             builder,
             interner,
+            diags,
         };
 
         let root = parser.parse_expr(0);
-        parser.expect(TokenKind::Eof, root)
+        parser.expect(TokenKind::Eof, "expected end of input", root)
     })
 }
 
@@ -34,6 +40,7 @@ struct Parser<'src, 'a, 'b, I> {
     next: Token<'src>,
     builder: &'a mut AstBuilder<'b>,
     interner: &'a mut Interner,
+    diags: &'a mut Vec<Diagnostic>,
 }
 
 impl<'src, 'a, 'b, I> Parser<'src, 'a, 'b, I>
@@ -63,11 +70,11 @@ where
         match token.kind {
             TokenKind::Int(lit) => match lit.parse_i32() {
                 Ok(value) => self.builder.lit(token.span, Value::I32(value)),
-                Err(_) => self.builder.error(token.span, None),
+                Err(_) => self.error(token.span, "integer literal is out of range", None),
             },
             TokenKind::Float(lit) => match lit.parse_f32() {
                 Ok(value) => self.builder.lit(token.span, Value::F32(value)),
-                Err(_) => self.builder.error(token.span, None),
+                Err(_) => self.error(token.span, "float literal is out of range", None),
             },
             TokenKind::Pi => self.builder.lit(token.span, Value::F32(PI)),
             TokenKind::Ident(name) => {
@@ -76,7 +83,7 @@ where
             }
             TokenKind::LParen => {
                 let inner = self.parse_expr(0);
-                self.expect(TokenKind::RParen, inner)
+                self.expect(TokenKind::RParen, "expected `)`", inner)
             }
             kind => {
                 if let Some(intrinsic) = intrinsic_op(kind) {
@@ -85,7 +92,8 @@ where
                     let operand = self.parse_expr(unop_bp(op));
                     self.builder.un_op(token.span, op, operand)
                 } else {
-                    self.builder.error(token.span, None)
+                    let message = format!("expected an expression, but found {kind}");
+                    self.error(token.span, &message, None)
                 }
             }
         }
@@ -93,7 +101,8 @@ where
 
     fn parse_call(&mut self, span: Span, intrinsic: Intrinsic) -> NewId<'b> {
         if self.next.kind != TokenKind::LParen {
-            return self.builder.error(self.next.span, None);
+            let message = format!("expected `(`, but found {}", self.next.kind);
+            return self.error(self.next.span, &message, None);
         }
         self.advance();
 
@@ -105,16 +114,22 @@ where
         }
 
         let call = self.builder.intrinsic(span, intrinsic, args);
-        self.expect(TokenKind::RParen, call)
+        self.expect(TokenKind::RParen, "expected `)`", call)
     }
 
-    fn expect(&mut self, kind: TokenKind<'src>, expr: NewId<'b>) -> NewId<'b> {
+    fn expect(&mut self, kind: TokenKind<'src>, message: &str, expr: NewId<'b>) -> NewId<'b> {
         if self.next.kind == kind {
             self.advance();
             expr
         } else {
-            self.builder.error(self.next.span, Some(expr))
+            let message = format!("{message}, but found {}", self.next.kind);
+            self.error(self.next.span, &message, Some(expr))
         }
+    }
+
+    fn error(&mut self, span: Span, message: &str, inner: Option<NewId<'b>>) -> NewId<'b> {
+        self.diags.push(Diagnostic::new(message, span));
+        self.builder.error(span, inner)
     }
 
     fn advance(&mut self) -> Token<'src> {
@@ -255,7 +270,7 @@ mod tests {
 
     fn sexpr(src: &str) -> String {
         let mut folder = SExpr::default();
-        let ast = parse(tokenize(src), &mut folder.interner);
+        let ast = parse(tokenize(src), &mut folder.interner, &mut Vec::new());
         ast.fold(folder)
     }
 

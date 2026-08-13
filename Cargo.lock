@@ -3421,7 +3421,6 @@ name = "isoplot-eval"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "codespan-reporting 0.13.1",
  "cranelift",
  "logos",
  "thiserror 2.0.19",
