@@ -81,22 +81,47 @@ impl Instr {
     }
 }
 
+struct Shape {
+    num_arguments: u8,
+    num_results: u8,
+}
+
 pub(crate) struct Tape {
-    num_inputs: usize,
+    shape: Shape,
     instrs: Vec<Instr>,
 }
 
 impl Tape {
-    pub(crate) fn builder(params: Vec<Type>) -> TapeBuilder {
+    pub(crate) fn builder(arguments: Vec<Type>, results: Vec<Type>) -> TapeBuilder {
+        assert!(
+            arguments.len() <= u8::MAX as usize,
+            "a tape can take at most {} arguments",
+            u8::MAX
+        );
+
+        assert!(
+            results.len() <= u8::MAX as usize,
+            "a tape can produce at most {} results",
+            u8::MAX
+        );
+
         TapeBuilder {
-            num_params: params.len(),
-            values: params,
-            instrs: Vec::new(),
+            shape: Shape {
+                num_arguments: arguments.len() as u8,
+                num_results: results.len() as u8,
+            },
+            values: arguments,
+            instrs: vec![],
+            res_ty: results,
         }
     }
 
-    pub(crate) fn num_inputs(&self) -> usize {
-        self.num_inputs
+    pub(crate) fn num_arguments(&self) -> usize {
+        self.shape.num_arguments as usize
+    }
+
+    pub(crate) fn num_results(&self) -> usize {
+        self.shape.num_results as usize
     }
 
     pub(crate) fn instrs(&self) -> &[Instr] {
@@ -108,14 +133,15 @@ impl Tape {
 pub(crate) struct ValidateError(());
 
 pub(crate) struct TapeBuilder {
-    num_params: usize,
+    shape: Shape,
     instrs: Vec<Instr>,
     values: Vec<Type>,
+    res_ty: Vec<Type>,
 }
 
 impl TapeBuilder {
-    pub(crate) fn arg(&self, index: u32) -> ValueId {
-        assert!((index as usize) < self.num_params);
+    pub(crate) fn argument(&self, index: u32) -> ValueId {
+        assert!(index < self.shape.num_arguments as u32);
         ValueId(index as u16)
     }
 
@@ -130,22 +156,26 @@ impl TapeBuilder {
     pub(crate) fn build(self) -> Result<Tape, ValidateError> {
         self.validate()?;
         Ok(Tape {
-            num_inputs: self.num_params,
+            shape: self.shape,
             instrs: self.instrs,
         })
     }
 
     fn validate(&self) -> Result<(), ValidateError> {
-        if self.values.last() != Some(&Type::F32) {
+        // Enforce that arguments are not implicitly used as results (not technically required by the backends).
+        if self.values.len() < self.shape.num_arguments as usize + self.shape.num_results as usize {
+            return Err(ValidateError(()));
+        }
+
+        if &self.values[(self.values.len() - self.shape.num_results as usize)..] != &self.res_ty {
             return Err(ValidateError(()));
         }
 
         for (index, &instr) in self.instrs.iter().enumerate() {
-            let cur_dst = self.num_params + index;
+            let cur_dst = self.shape.num_arguments as usize + index;
 
             let check = |value: ValueId, ty: Type| {
                 let value = value.0 as usize;
-
                 if value < cur_dst && self.values[value] == ty {
                     Ok(())
                 } else {

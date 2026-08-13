@@ -1,4 +1,7 @@
-use std::{cell::RefCell, sync::Arc};
+use std::{
+    cell::{RefCell, RefMut},
+    sync::Arc,
+};
 
 use bytemuck::{Pod, Zeroable};
 
@@ -25,7 +28,7 @@ impl Fallback {
 
     pub(super) fn evaluator(&self) -> Evaluator {
         Evaluator {
-            buf: vec![Value::ZERO; self.tape.num_inputs() + self.tape.instrs().len()].into(),
+            buf: vec![Value::ZERO; self.tape.num_arguments() + self.tape.instrs().len()].into(),
             tape: Arc::clone(&self.tape),
         }
     }
@@ -63,7 +66,21 @@ pub(super) struct Evaluator {
 
 impl Evaluator {
     pub(super) fn evaluate(&self, inputs: &[f32]) -> f32 {
-        let num_params = self.tape.num_inputs();
+        assert_eq!(self.tape.num_results(), 1);
+        self.run(inputs).last().unwrap().as_f32()
+    }
+
+    pub(super) fn evaluate_into(&self, inputs: &[f32], outputs: &mut [f32]) {
+        assert_eq!(outputs.len(), self.tape.num_results());
+        let buf = self.run(inputs);
+        let results = &buf[buf.len() - outputs.len()..];
+        for (output, result) in outputs.iter_mut().zip(results) {
+            *output = result.as_f32();
+        }
+    }
+
+    fn run(&self, inputs: &[f32]) -> RefMut<'_, Vec<Value>> {
+        let num_params = self.tape.num_arguments();
         assert_eq!(inputs.len(), num_params);
 
         let mut buf = self.buf.borrow_mut();
@@ -106,6 +123,28 @@ impl Evaluator {
             buf[num_params + i] = result;
         }
 
-        buf.last().unwrap().as_f32()
+        buf
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tape::Type;
+
+    #[test]
+    fn multi_results() {
+        let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32; 3]);
+        let x = b.argument(0);
+        let y = b.argument(1);
+        b.instr(Instr::F32Add(x, y));
+        b.instr(Instr::F32Mul(x, y));
+        b.instr(Instr::F32Sub(x, y));
+        let tape = b.build().unwrap();
+
+        let (x, y) = (1.5f32, 2.25f32);
+        let mut outputs = [0.0f32; 3];
+        Fallback::new(tape).evaluator().evaluate_into(&[x, y], &mut outputs);
+        assert_eq!(outputs, [x + y, x * y, x - y]);
     }
 }

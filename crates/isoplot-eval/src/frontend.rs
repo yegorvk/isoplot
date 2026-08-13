@@ -133,7 +133,7 @@ impl Validated<'_> {
             .map(|name| resolve_const(name))
             .collect();
 
-        let mut builder = Tape::builder(vec![Type::F32; self.num_inputs as usize]);
+        let mut builder = Tape::builder(vec![Type::F32; self.num_inputs as usize], vec![Type::F32]);
 
         let generator = Generator {
             vars: &self.vars,
@@ -149,7 +149,7 @@ impl Validated<'_> {
             Type::F32 => root,
         };
 
-        if (0..self.num_inputs).any(|index| builder.arg(index) == root) {
+        if (0..self.num_inputs).any(|index| builder.argument(index) == root) {
             builder.instr(Instr::F32Max(root, root));
         }
 
@@ -373,7 +373,7 @@ impl Visitor for Generator<'_> {
                 let value = self.consts[*index as usize];
                 self.builder.instr(Instr::F32Const(value))
             }
-            VarSlot::Input(index) => self.builder.arg(*index),
+            VarSlot::Input(index) => self.builder.argument(*index),
         };
 
         (value, self.ty[id])

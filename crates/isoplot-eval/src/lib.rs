@@ -1,20 +1,24 @@
-use std::collections::HashMap;
-
-use frontend::{ParseError, ValidateError, parse};
-use tape::Tape;
-use thiserror::Error;
-
-#[cfg(feature = "cranelift")]
-pub use crate::backend::Cranelift;
-
-pub use crate::backend::{Backend, DefaultBackend, DefaultInstance, Evaluator, Fallback, Instance};
-pub use crate::diag::{BytePos, Diagnostic, Span};
-pub use crate::frontend::dump_ast;
-
+mod autodiff;
 mod backend;
 mod diag;
 mod frontend;
 mod tape;
+
+use std::collections::HashMap;
+use thiserror::Error;
+
+use frontend::{ParseError, ValidateError, parse};
+use tape::Tape;
+
+pub use backend::{
+    Backend, DefaultBackend, DefaultInstance, DefaultMultiBackend, DefaultMultiInstance, Evaluator,
+    Fallback, FallbackMulti, Instance, ScalarBackend,
+};
+pub use diag::{BytePos, Diagnostic, Span};
+pub use frontend::dump_ast;
+
+#[cfg(feature = "cranelift")]
+pub use backend::{Cranelift, CraneliftMulti};
 
 #[derive(Error, Debug)]
 pub enum CompileError {
