@@ -5,9 +5,11 @@ use std::sync::Arc;
 use cranelift::codegen::ir::{
     AbiParam, FuncRef, InstBuilder, MemFlagsData, Signature, Type, Value, types,
 };
+use cranelift::codegen::settings::{self, Configurable};
 use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift::jit::{JITBuilder, JITModule};
 use cranelift::module::{FuncId, Linkage, Module, default_libcall_names};
+use cranelift::native;
 
 use crate::tape::{Instr, Tape, ValueId};
 
@@ -168,10 +170,21 @@ fn default_lib_funcs() -> impl Iterator<Item = LibFuncDesc> {
 }
 
 fn create_module() -> JITModule {
-    let mut jit_builder = JITBuilder::new(default_libcall_names()).unwrap();
+    let mut flags = settings::builder();
+    flags.set("use_colocated_libcalls", "false").unwrap();
+    flags.set("is_pic", "false").unwrap();
+    flags.set("opt_level", "speed").unwrap();
+
+    let isa = native::builder()
+        .unwrap()
+        .finish(settings::Flags::new(flags))
+        .unwrap();
+
+    let mut jit_builder = JITBuilder::with_isa(isa, default_libcall_names());
     for func in default_lib_funcs() {
         jit_builder.symbol(func.name, func.ptr);
     }
+
     JITModule::new(jit_builder)
 }
 
@@ -257,8 +270,14 @@ impl Translator<'_> {
 
             Instr::F32FromI32(src) => self.b.ins().fcvt_from_sint(types::F32, v(src)),
 
+            Instr::Copy(src) => v(src),
+
             Instr::F32Neg(src) => self.b.ins().fneg(v(src)),
             Instr::F32Abs(src) => self.b.ins().fabs(v(src)),
+            Instr::F32Sign(src) => {
+                let one = self.b.ins().f32const(1.0);
+                self.b.ins().fcopysign(one, v(src))
+            }
             Instr::F32Add(lhs, rhs) => self.b.ins().fadd(v(lhs), v(rhs)),
             Instr::F32Sub(lhs, rhs) => self.b.ins().fsub(v(lhs), v(rhs)),
             Instr::F32Mul(lhs, rhs) => self.b.ins().fmul(v(lhs), v(rhs)),
@@ -306,6 +325,7 @@ mod tests {
         let quot = b.instr(Instr::F32Div(diff, y));
         let neg = b.instr(Instr::F32Neg(quot));
         let abs = b.instr(Instr::F32Abs(neg));
+        let abs = b.instr(Instr::Copy(abs));
         let min = b.instr(Instr::F32Min(abs, x));
         let max = b.instr(Instr::F32Max(min, y));
         let c = b.instr(Instr::F32Const(0.5));
@@ -370,6 +390,20 @@ mod tests {
 
         let x = 1.5f32;
         assert_eq!(inst.evaluate(&[x]), 6.0 + x.powi(3));
+    }
+
+    #[test]
+    fn f32_sign() {
+        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let x = b.argument(0);
+        b.instr(Instr::F32Sign(x));
+        let tape = b.build().unwrap();
+        let inst = ScalarInstance::new(&tape);
+
+        assert_eq!(inst.evaluate(&[-3.5]), -1.0);
+        assert_eq!(inst.evaluate(&[2.0]), 1.0);
+        assert_eq!(inst.evaluate(&[0.0]), 1.0);
+        assert_eq!(inst.evaluate(&[-0.0]), -1.0);
     }
 
     #[test]

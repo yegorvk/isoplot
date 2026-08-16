@@ -71,7 +71,7 @@ fn dev_opt() -> Result<()> {
         .args([
             "run",
             "--package",
-            "isoplot-bevy",
+            "isoplot-demo",
             "--release",
             "-F",
             "bevy/dynamic_linking",

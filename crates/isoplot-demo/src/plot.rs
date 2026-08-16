@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -9,9 +9,10 @@ use bevy::{
 use bytemuck::cast_vec;
 use dashmap::{DashMap, DashSet};
 use glam::IVec3;
+
 use isoplot_mesh::{
-    BorrowChunk, CentralDifference, Chunk, ChunkEdge, ChunkFace, Extractor, Offset, ScalarField,
-    SeparateNormals, SharedEdgeKind, SharedFaceKind, WindingOrder,
+    BorrowChunk, Chunk, ChunkEdge, ChunkFace, Extractor, NormalField, Offset, SeparateNormals,
+    SharedEdgeKind, SharedFaceKind, WindingOrder,
 };
 
 const WIREFRAME_OFFSET: f32 = 1e-3;
@@ -39,11 +40,11 @@ impl Plugin for PlotPlugin {
 }
 
 pub trait PlotSource {
-    fn field(&self) -> impl ScalarField;
+    fn field(&self) -> impl NormalField;
 }
 
-impl<T: ScalarField> PlotSource for T {
-    fn field(&self) -> impl ScalarField {
+impl<T: NormalField> PlotSource for T {
+    fn field(&self) -> impl NormalField {
         self
     }
 }
@@ -55,14 +56,13 @@ pub struct Plot {
 }
 
 impl Plot {
-    pub fn new<S>(source: S, render_distance: u32, max_level: u8, epsilon: f32) -> Self
+    pub fn new<S>(source: S, render_distance: u32, max_level: u8) -> Self
     where
         S: PlotSource + Send + Sync + 'static,
     {
         Self {
             extract: Arc::new(ChunkExtractor {
                 source,
-                epsilon,
                 world: World::default(),
                 max_level,
             }),
@@ -77,7 +77,6 @@ trait ExtractChunk {
 
 struct ChunkExtractor<S> {
     source: S,
-    epsilon: f32,
     world: World,
     max_level: u8,
 }
@@ -87,7 +86,7 @@ where
     S: PlotSource,
 {
     fn extract_chunk(&self, coords: IVec3) -> Vec<(IVec3, SeparateNormals)> {
-        let field = CentralDifference::new(self.source.field(), self.epsilon);
+        let field = self.source.field();
 
         let mut out = Vec::new();
         let mut sink = SeparateNormals::default();
@@ -129,9 +128,9 @@ impl<F> ChunkExtractor<F> {
         move |_, offset| self.world.get(anchor + offset.as_uvec3().as_ivec3())
     }
 
-    fn try_extract_face_seam<S: ScalarField>(
+    fn try_extract_face_seam<S: NormalField>(
         &self,
-        source: &CentralDifference<S>,
+        source: &S,
         kind: SharedFaceKind,
         anchor: IVec3,
         out: &mut Vec<(IVec3, SeparateNormals)>,
@@ -157,9 +156,9 @@ impl<F> ChunkExtractor<F> {
         }
     }
 
-    fn try_extract_edge_seam<S: ScalarField>(
+    fn try_extract_edge_seam<S: NormalField>(
         &self,
-        source: &CentralDifference<S>,
+        source: &S,
         kind: SharedEdgeKind,
         anchor: IVec3,
         out: &mut Vec<(IVec3, SeparateNormals)>,
@@ -323,13 +322,26 @@ fn build_bevy_mesh(data: SeparateNormals) -> Mesh {
 }
 
 fn build_wireframe_mesh(data: &SeparateNormals) -> Mesh {
+    let mut face_normals: HashMap<[u32; 3], Vec3> = HashMap::new();
+
+    for &[a, b, c] in &data.indices {
+        let p = [a, b, c].map(|i| Vec3::from(data.positions[i as usize]));
+        let n = (p[1] - p[0]).cross(p[2] - p[0]);
+
+        for i in [a, b, c] {
+            *face_normals
+                .entry(data.positions[i as usize].map(f32::to_bits))
+                .or_default() += n;
+        }
+    }
+
+    let face_normals = &face_normals;
+
     let vertices = |side: f32| {
-        data.positions
-            .iter()
-            .zip(&data.normals)
-            .map(move |(&p, &n)| {
-                (Vec3::from(p) + Vec3::from(n) * side * WIREFRAME_OFFSET).to_array()
-            })
+        data.positions.iter().map(move |&p| {
+            let n = face_normals[&p.map(f32::to_bits)].normalize_or_zero();
+            (Vec3::from(p) + n * side * WIREFRAME_OFFSET).to_array()
+        })
     };
 
     let positions: Vec<[f32; 3]> = vertices(1.0).chain(vertices(-1.0)).collect();
@@ -342,7 +354,7 @@ fn build_wireframe_mesh(data: &SeparateNormals) -> Mesh {
         .collect();
 
     let back = front.iter().map(|i| i + data.positions.len() as u32);
-    let lines = front.iter().copied().chain(back.clone()).collect();
+    let lines = front.iter().copied().chain(back).collect();
 
     let mut mesh = Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::RENDER_WORLD);
 

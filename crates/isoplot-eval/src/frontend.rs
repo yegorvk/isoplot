@@ -150,7 +150,7 @@ impl Validated<'_> {
         };
 
         if (0..self.num_inputs).any(|index| builder.argument(index) == root) {
-            builder.instr(Instr::F32Max(root, root));
+            builder.instr(Instr::Copy(root));
         }
 
         builder.build().unwrap()

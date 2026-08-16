@@ -114,10 +114,21 @@ where
             vertices[2] = vertices[3];
         }
 
-        sink.add_quad(
-            vertices
-                .map(|position| Vertex::new(position, self.scalar_field.sample_normal(position))),
-        );
+        let [a, b, c, d] = vertices;
+
+        let mut emit_face = |face: [Vec3; 3]| {
+            let c = face.iter().sum::<Vec3>() / 3.0;
+            let n_c = self.scalar_field.sample_normal(c);
+            sink.add_triangle(face.map(|position| Vertex::new(position, n_c)));
+        };
+
+        if c != d {
+            for face in [[a, b, c], [a, c, d]] {
+                emit_face(face);
+            }
+        } else {
+            emit_face([a, b, c]);
+        }
     }
 }
 
@@ -222,14 +233,8 @@ fn place_feature<S: NormalField>(field: &S, cell: Quant, corners: Corners) -> Ve
                 continue;
             }
 
-            let (va, vb) = (values[a], values[b]);
-            let t = if (va - vb).abs() > f32::EPSILON {
-                (va / (va - vb)).clamp(0.0, 1.0)
-            } else {
-                0.5
-            };
+            let point = bisect(field, positions[a], positions[b], values[a], values[b]);
 
-            let point = positions[a].lerp(positions[b], t);
             points[count] = point;
             normals[count] = field.sample_normal(point);
             count += 1;
@@ -260,4 +265,33 @@ fn place_feature<S: NormalField>(field: &S, cell: Quant, corners: Corners) -> Ve
     }
 
     x
+}
+
+fn bisect<S>(field: &S, a: Vec3, b: Vec3, v_a: f32, v_b: f32) -> Vec3
+where
+    S: ScalarField,
+{
+    const ITERS: usize = 3;
+
+    let (mut t_0, mut t_1) = (0.0f32, 1.0f32);
+    let (mut v_0, mut v_1) = (v_a, v_b);
+
+    for _ in 0..ITERS {
+        let t_m = 0.5 * (t_0 + t_1);
+        let v_m = field.sample(a.lerp(b, t_m));
+
+        if (v_m < 0.0) == (v_0 < 0.0) {
+            (t_0, v_0) = (t_m, v_m);
+        } else {
+            (t_1, v_1) = (t_m, v_m);
+        }
+    }
+
+    let t = if (v_0 - v_1).abs() > f32::EPSILON {
+        (t_0 + (t_1 - t_0) * v_0 / (v_0 - v_1)).clamp(t_0, t_1)
+    } else {
+        0.5 * (t_0 + t_1)
+    };
+
+    a.lerp(b, t)
 }

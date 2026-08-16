@@ -29,9 +29,13 @@ pub(crate) enum Instr {
     // Conversions
     F32FromI32(ValueId),
 
+    // Identity copy of any value
+    Copy(ValueId),
+
     // Basic `f32` operations
     F32Neg(ValueId),
     F32Abs(ValueId),
+    F32Sign(ValueId),
     F32Add(ValueId, ValueId),
     F32Sub(ValueId, ValueId),
     F32Mul(ValueId, ValueId),
@@ -52,8 +56,10 @@ pub(crate) enum Instr {
 }
 
 impl Instr {
-    fn result_type(self) -> Type {
+    fn result_type(self, values: &[Type]) -> Type {
         match self {
+            Instr::Copy(src) => values[src.index()],
+
             Instr::I32Const(_) | Instr::I32Add(..) | Instr::I32Sub(..) | Instr::I32Mul(..) => {
                 Type::I32
             }
@@ -62,6 +68,7 @@ impl Instr {
             | Instr::F32FromI32(_)
             | Instr::F32Neg(_)
             | Instr::F32Abs(_)
+            | Instr::F32Sign(_)
             | Instr::F32Add(..)
             | Instr::F32Sub(..)
             | Instr::F32Mul(..)
@@ -148,7 +155,8 @@ impl TapeBuilder {
     pub(crate) fn instr(&mut self, instr: Instr) -> ValueId {
         let index = self.values.len();
         assert!(index < u16::MAX as usize);
-        self.values.push(instr.result_type());
+        let ty = instr.result_type(&self.values);
+        self.values.push(ty);
         self.instrs.push(instr);
         ValueId(index as u16)
     }
@@ -167,7 +175,7 @@ impl TapeBuilder {
             return Err(ValidateError(()));
         }
 
-        if &self.values[(self.values.len() - self.shape.num_results as usize)..] != &self.res_ty {
+        if self.values[(self.values.len() - self.shape.num_results as usize)..] != self.res_ty {
             return Err(ValidateError(()));
         }
 
@@ -185,6 +193,11 @@ impl TapeBuilder {
 
             match instr {
                 Instr::I32Const(_) | Instr::F32Const(_) => {}
+                Instr::Copy(src) => {
+                    if src.0 as usize >= cur_dst {
+                        return Err(ValidateError(()));
+                    }
+                }
                 Instr::I32Add(lhs, rhs) | Instr::I32Sub(lhs, rhs) | Instr::I32Mul(lhs, rhs) => {
                     check(lhs, Type::I32)?;
                     check(rhs, Type::I32)?;
@@ -193,6 +206,7 @@ impl TapeBuilder {
                 Instr::F32FromI32(src) => check(src, Type::I32)?,
                 Instr::F32Neg(src)
                 | Instr::F32Abs(src)
+                | Instr::F32Sign(src)
                 | Instr::F32Exp(src)
                 | Instr::F32Ln(src)
                 | Instr::F32Lg(src)

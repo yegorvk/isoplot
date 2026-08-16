@@ -7,73 +7,25 @@ use bevy::{
     anti_alias::taa::TemporalAntiAliasing,
     app::TaskPoolThreadAssignmentPolicy,
     input_focus::{AutoFocus, FocusCause, InputFocus},
-    pbr::ScreenSpaceAmbientOcclusion,
     prelude::*,
     text::{EditableText, TextCursorStyle},
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
 
-use noise::{NoiseFn, Simplex};
-
 use isoplot_eval::{
-    CompileError, DefaultBackend, DefaultInstance, Diagnostic, Evaluator, Program, ProgramDesc,
-    ProgramShape,
+    CompileError, DefaultBackend, DefaultInstance, DefaultMultiBackend, DefaultMultiInstance,
+    Diagnostic, Evaluator, Program, ProgramDesc, ProgramShape,
 };
-use isoplot_mesh::ScalarField;
+use isoplot_mesh::{NormalField, ScalarField};
 
 use crate::{
     controls::{CameraControls, CameraControlsPlugin},
     plot::{Plot, PlotPlugin, PlotSource},
 };
 
-struct EllipticParaboloid {
-    pub a: f32,
-    pub b: f32,
-}
-
-impl EllipticParaboloid {
-    fn new(a: f32, b: f32) -> Self {
-        Self { a, b }
-    }
-}
-
-impl ScalarField for EllipticParaboloid {
-    fn sample(&self, point: glam::Vec3) -> f32 {
-        let [x, y, z] = point.to_array();
-        y - (x * x / (self.a * self.a) + z * z / (self.b * self.b))
-    }
-}
-
-struct Waves2;
-
-impl ScalarField for Waves2 {
-    fn sample(&self, point: glam::Vec3) -> f32 {
-        let [x, y, z] = point.to_array();
-        (x + y).sin() + (1.4 * x - 0.9 * y).sin() + (2.3 * x + 1.7 * y).sin() - z
-    }
-}
-
-struct Sphere;
-
-impl ScalarField for Sphere {
-    fn sample(&self, point: glam::Vec3) -> f32 {
-        point.length() - 3.0
-    }
-}
-
-#[derive(Clone, Default)]
-struct SimplexNoise {
-    noise: Simplex,
-}
-
-impl ScalarField for SimplexNoise {
-    fn sample(&self, point: glam::Vec3) -> f32 {
-        self.noise.get((point * 0.6).as_dvec3().to_array()) as f32
-    }
-}
-
 struct Equation {
-    instance: DefaultInstance,
+    scalar_sampler: DefaultInstance,
+    normal_sampler: DefaultMultiInstance,
 }
 
 impl Equation {
@@ -84,19 +36,21 @@ impl Equation {
         )?;
 
         Ok(Self {
-            instance: program.instantiate(),
+            normal_sampler: program.autodiff().instantiate(),
+            scalar_sampler: program.instantiate(),
         })
     }
 
     fn create_source(&self) -> DynamicSource {
         DynamicSource {
-            evaluator: self.instance.evaluator(),
+            evaluator: self.scalar_sampler.evaluator(),
+            gradient: self.normal_sampler.evaluator(),
         }
     }
 }
 
 impl PlotSource for Equation {
-    fn field(&self) -> impl ScalarField {
+    fn field(&self) -> impl NormalField {
         self.create_source()
     }
 }
@@ -111,6 +65,7 @@ fn equation_default_shape() -> ProgramShape {
 
 struct DynamicSource {
     evaluator: Evaluator<DefaultBackend>,
+    gradient: Evaluator<DefaultMultiBackend>,
 }
 
 impl ScalarField for DynamicSource {
@@ -119,20 +74,26 @@ impl ScalarField for DynamicSource {
     }
 }
 
-const DEFAULT_EQUATION: &str = "y - sin(x^2 + z^2)";
+impl NormalField for DynamicSource {
+    fn sample_normal(&self, point: Vec3) -> Vec3 {
+        let mut outputs = [0.0f32; 4];
+        self.gradient.evaluate_into(&point.to_array(), &mut outputs);
+        Vec3::new(outputs[1], outputs[2], outputs[3]).normalize_or_zero()
+    }
+}
+
+const DEFAULT_EQUATION: &str = "max(y - (x^2 + z^2), x^2+y^2+z^2 - 4)";
 
 #[derive(Resource)]
-struct PlotCycler {
-    plots: Vec<Box<dyn Fn() -> Plot + Send + Sync>>,
+struct ActivePlot {
+    entity: Entity,
     material: Handle<StandardMaterial>,
-    active: usize,
-    current: Entity,
 }
 
 fn main() {
     App::new()
         .add_systems(Startup, setup)
-        .add_systems(Update, (toggle_focus, cycle_plots, submit_equation))
+        .add_systems(Update, (toggle_focus, submit_equation))
         .add_plugins((
             DefaultPlugins.set(TaskPoolPlugin {
                 task_pool_options: TaskPoolOptions {
@@ -157,24 +118,16 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
         base_color: Color::LinearRgba(LinearRgba::GREEN),
         metallic: 1.0,
         cull_mode: None,
+        double_sided: true,
         ..default()
     });
 
-    let plots: Vec<Box<dyn Fn() -> Plot + Send + Sync>> = vec![
-        Box::new(|| create_plot(Equation::new(DEFAULT_EQUATION).unwrap())),
-        Box::new(|| Plot::new(EllipticParaboloid::new(0.4, 0.4), 2, 5, 1e-4)),
-        Box::new(|| Plot::new(Waves2, 1, 5, 1e-4)),
-        Box::new(|| Plot::new(Sphere, 3, 5, 1e-4)),
-        Box::new(|| Plot::new(SimplexNoise::default(), 5, 5, 1e-4)),
-    ];
+    let plot = create_plot(Equation::new(DEFAULT_EQUATION).unwrap());
+    let entity = spawn_plot(&mut commands, plot, simple_material.clone());
 
-    let current = spawn_plot(&mut commands, plots[0](), simple_material.clone());
-
-    commands.insert_resource(PlotCycler {
-        plots,
+    commands.insert_resource(ActivePlot {
+        entity,
         material: simple_material,
-        active: 0,
-        current,
     });
 
     commands.spawn((
@@ -227,10 +180,6 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
         Camera3d::default(),
         Transform::from_xyz(0.0, 0.4, 1.0).looking_to(Dir3::NEG_Z, Dir3::Y),
         CameraControls::default(),
-        ScreenSpaceAmbientOcclusion {
-            quality_level: bevy::pbr::ScreenSpaceAmbientOcclusionQualityLevel::High,
-            ..Default::default()
-        },
         TemporalAntiAliasing { reset: false },
         Msaa::Off,
         AmbientLight {
@@ -250,22 +199,6 @@ fn spawn_plot(commands: &mut Commands, plot: Plot, material: Handle<StandardMate
         .id()
 }
 
-fn cycle_plots(
-    mut commands: Commands,
-    keys: Res<ButtonInput<KeyCode>>,
-    mut cycler: ResMut<PlotCycler>,
-) {
-    if !keys.just_pressed(KeyCode::Tab) {
-        return;
-    }
-
-    commands.entity(cycler.current).despawn();
-
-    cycler.active = (cycler.active + 1) % cycler.plots.len();
-    let plot = (cycler.plots[cycler.active])();
-    cycler.current = spawn_plot(&mut commands, plot, cycler.material.clone());
-}
-
 #[derive(Component)]
 struct EquationText;
 
@@ -275,7 +208,7 @@ struct DiagnosticsText;
 fn submit_equation(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
-    mut cycler: ResMut<PlotCycler>,
+    mut active: ResMut<ActivePlot>,
     field: Single<(&EditableText, &mut TextColor), With<EquationText>>,
     overlay: Single<(&mut Text, &mut Visibility), With<DiagnosticsText>>,
 ) {
@@ -299,12 +232,11 @@ fn submit_equation(
 
     color.0 = Color::WHITE;
     *overlay_visibility = Visibility::Hidden;
-    commands.entity(cycler.current).despawn();
-
-    cycler.current = spawn_plot(
+    commands.entity(active.entity).despawn();
+    active.entity = spawn_plot(
         &mut commands,
         create_plot(equation),
-        cycler.material.clone(),
+        active.material.clone(),
     );
 }
 
@@ -313,7 +245,7 @@ fn render_diagnostics(source: &str, diagnostics: &[Diagnostic]) -> String {
 
     for (i, diagnostic) in diagnostics.iter().enumerate() {
         if i > 0 {
-            out.push_str("\n");
+            out.push('\n');
         }
 
         let span = diagnostic.location();
@@ -333,7 +265,7 @@ fn render_diagnostics(source: &str, diagnostics: &[Diagnostic]) -> String {
 }
 
 fn create_plot(equation: Equation) -> Plot {
-    Plot::new(equation, 3, 5, 1e-4)
+    Plot::new(equation, 3, 5)
 }
 
 fn toggle_focus(

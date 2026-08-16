@@ -125,7 +125,14 @@ impl Program {
         Ok(Self { tape })
     }
 
+    pub fn autodiff(&self) -> Program {
+        Self {
+            tape: autodiff::autodiff(&self.tape),
+        }
+    }
+
     pub fn instantiate<B: Backend>(self) -> Instance<B> {
         Instance::new(self.tape)
     }
 }
+

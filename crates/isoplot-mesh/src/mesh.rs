@@ -113,7 +113,11 @@ impl SeparateNormals {
     pub fn normalize_mesh(&mut self, order: WindingOrder) {
         for face in &mut self.indices {
             let p = face.map(|i| Vec3::from(self.positions[i as usize]));
-            let n = Vec3::from(self.normals[face[0] as usize]);
+
+            let n = face
+                .iter()
+                .map(|&i| Vec3::from(self.normals[i as usize]))
+                .sum::<Vec3>();
 
             if is_face_ccw(p, n) != (order == WindingOrder::Ccw) {
                 face.reverse();
