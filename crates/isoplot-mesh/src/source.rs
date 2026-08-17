@@ -5,6 +5,15 @@ pub trait ScalarField {
     /// Samples the scalar field at the specified point.
     fn sample(&self, point: Vec3) -> f32;
 
+    /// Returns `true` *only if* the given region is flat.
+    ///
+    /// A region is considered flat when it does not need to be further
+    /// subdivided. Note that this method is always allowed to return `false`.
+    fn is_flat(&self, min: Vec3, size: f32) -> bool {
+        _ = (min, size);
+        false
+    }
+
     fn translated(self, offset: Vec3) -> Translate<Self>
     where
         Self: Sized,
@@ -16,6 +25,10 @@ pub trait ScalarField {
 impl<S: ?Sized + ScalarField> ScalarField for &S {
     fn sample(&self, point: Vec3) -> f32 {
         <S as ScalarField>::sample(self, point)
+    }
+
+    fn is_flat(&self, min: Vec3, size: f32) -> bool {
+        <S as ScalarField>::is_flat(&self, min, size)
     }
 }
 
@@ -46,6 +59,10 @@ impl<S: ScalarField> ScalarField for Translate<S> {
     fn sample(&self, point: Vec3) -> f32 {
         self.source.sample(point + self.offset)
     }
+
+    fn is_flat(&self, min: Vec3, size: f32) -> bool {
+        self.source.is_flat(min + self.offset, size)
+    }
 }
 
 impl<S: NormalField> NormalField for Translate<S> {
@@ -68,6 +85,10 @@ impl<S: ScalarField> CentralDifference<S> {
 impl<S: ScalarField> ScalarField for CentralDifference<S> {
     fn sample(&self, point: Vec3) -> f32 {
         self.source.sample(point)
+    }
+
+    fn is_flat(&self, min: Vec3, size: f32) -> bool {
+        self.source.is_flat(min, size)
     }
 }
 

@@ -62,7 +62,12 @@ where
     }
 
     fn is_leaf(&mut self, tag: Self::Tag) -> bool {
-        tag.level() >= self.max_level
+        if tag.level() >= self.max_level {
+            return true;
+        }
+
+        let (min_p, size) = tag.min_point_size();
+        self.scalar_field.is_flat(min_p, size)
     }
 
     fn refine(&mut self, tag: Self::Tag, which: ChildIndex) -> Option<Self::Tag> {

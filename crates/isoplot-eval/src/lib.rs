@@ -135,4 +135,3 @@ impl Program {
         Instance::new(self.tape)
     }
 }
-
