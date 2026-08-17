@@ -13,8 +13,8 @@ use bevy::{
 };
 
 use isoplot_eval::{
-    CompileError, DefaultBackend, DefaultInstance, DefaultMultiBackend, DefaultMultiInstance,
-    Diagnostic, Evaluator, Program, ProgramDesc, ProgramShape,
+    CompileError, DefaultEvaluator, DefaultGradientEvaluator, DefaultGradientInstance,
+    DefaultInstance, Diagnostic, Program, ProgramDesc, ProgramShape,
 };
 use isoplot_mesh::{NormalField, ScalarField};
 
@@ -25,7 +25,7 @@ use crate::{
 
 struct Equation {
     scalar_sampler: DefaultInstance,
-    normal_sampler: DefaultMultiInstance,
+    normal_sampler: DefaultGradientInstance,
 }
 
 impl Equation {
@@ -64,8 +64,8 @@ fn equation_default_shape() -> ProgramShape {
 }
 
 struct DynamicSource {
-    evaluator: Evaluator<DefaultBackend>,
-    gradient: Evaluator<DefaultMultiBackend>,
+    evaluator: DefaultEvaluator,
+    gradient: DefaultGradientEvaluator,
 }
 
 impl ScalarField for DynamicSource {
@@ -112,9 +112,9 @@ impl ScalarField for DynamicSource {
 
 impl DynamicSource {
     fn sample_with_gradient(&self, point: Vec3) -> (f32, Vec3) {
-        let mut outputs = [0.0f32; 4];
-        self.gradient.evaluate_into(&point.to_array(), &mut outputs);
-        (outputs[0], Vec3::new(outputs[1], outputs[2], outputs[3]))
+        let mut gradient = [0.0f32; 3];
+        let value = self.gradient.evaluate(&point.to_array(), &mut gradient);
+        (value, Vec3::from(gradient))
     }
 }
 

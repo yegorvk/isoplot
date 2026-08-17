@@ -28,15 +28,15 @@ pub struct Span {
 }
 
 impl Span {
-    pub(super) fn new(start: BytePos, end: BytePos) -> Self {
+    pub(crate) fn new(start: BytePos, end: BytePos) -> Self {
         Self { start, end }
     }
 
-    pub(super) fn empty(position: BytePos) -> Self {
+    pub(crate) fn empty(position: BytePos) -> Self {
         Self::new(position, position)
     }
 
-    pub(super) fn chain(self, other: Span) -> Self {
+    pub(crate) fn chain(self, other: Span) -> Self {
         Self::new(self.start, other.end)
     }
 }

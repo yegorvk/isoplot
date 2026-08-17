@@ -57,6 +57,8 @@ std::cfg_select! {
 
 pub type DefaultInstance = Instance<DefaultBackend>;
 pub type DefaultMultiInstance = Instance<DefaultMultiBackend>;
+pub type DefaultEvaluator = Evaluator<DefaultBackend>;
+pub type DefaultMultiEvaluator = Evaluator<DefaultMultiBackend>;
 
 /// Unoptimized bytecode interpreter
 pub struct Fallback;

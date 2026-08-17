@@ -1,52 +1,124 @@
-use crate::tape::{Instr, Tape, TapeBuilder, Type, ValueId};
+use std::cell::RefCell;
 
-pub(crate) fn autodiff(source: &Tape) -> Tape {
-    assert_eq!(
-        source.num_results(),
-        1,
-        "only scalar-valued functions are supported"
-    );
+use crate::{
+    backend::{Backend, DefaultMultiBackend, Evaluator, Instance},
+    tape::{Instr, Tape, TapeBuilder, Type, ValueId},
+};
 
-    let num_arguments = source.num_arguments();
-    let num_values = num_arguments + source.instrs().len();
+pub(crate) struct GradientTape(Tape);
 
-    let mut diff = Diff {
-        b: Tape::builder(
-            vec![Type::F32; num_arguments],
-            vec![Type::F32; 1 + num_arguments],
-        ),
-        adjoints: vec![None; num_values],
-    };
+impl GradientTape {
+    pub(crate) fn build(source: &Tape) -> Self {
+        assert_eq!(
+            source.num_results(),
+            1,
+            "only scalar-valued functions are supported"
+        );
 
-    let mut values = Vec::with_capacity(num_values);
-    for i in 0..num_arguments {
-        values.push(diff.b.argument(i as u32));
-    }
-    for &instr in source.instrs() {
-        values.push(diff.b.instr(instr));
-    }
+        let num_arguments = source.num_arguments();
+        let num_values = num_arguments + source.instrs().len();
 
-    let ret = *values.last().unwrap();
-    let seed = diff.c_f32(1.0);
-    diff.adjoints[ret.index()] = Some(seed);
-
-    for (i, &instr) in source.instrs().iter().enumerate().rev() {
-        let index = num_arguments + i;
-        let Some(w_bar) = diff.adjoints[index] else {
-            continue;
+        let mut diff = Diff {
+            b: Tape::builder(
+                vec![Type::F32; num_arguments],
+                vec![Type::F32; 1 + num_arguments],
+            ),
+            adjoints: vec![None; num_values],
         };
-        diff.propagate(instr, values[index], w_bar);
+
+        let mut values = Vec::with_capacity(num_values);
+        for i in 0..num_arguments {
+            values.push(diff.b.argument(i as u32));
+        }
+        for &instr in source.instrs() {
+            values.push(diff.b.instr(instr));
+        }
+
+        let ret = *values.last().unwrap();
+        let seed = diff.c_f32(1.0);
+        diff.adjoints[ret.index()] = Some(seed);
+
+        for (i, &instr) in source.instrs().iter().enumerate().rev() {
+            let index = num_arguments + i;
+            let Some(w_bar) = diff.adjoints[index] else {
+                continue;
+            };
+            diff.propagate(instr, values[index], w_bar);
+        }
+
+        diff.b.instr(Instr::Copy(ret));
+        for i in 0..num_arguments {
+            match diff.adjoints[i] {
+                None => diff.b.instr(Instr::F32Const(0.0)),
+                Some(v) => diff.b.instr(Instr::Copy(v)),
+            };
+        }
+
+        Self(diff.b.build().unwrap())
     }
 
-    diff.b.instr(Instr::Copy(ret));
-    for i in 0..num_arguments {
-        match diff.adjoints[i] {
-            None => diff.b.instr(Instr::F32Const(0.0)),
-            Some(v) => diff.b.instr(Instr::Copy(v)),
-        };
+    pub(crate) fn num_inputs(&self) -> usize {
+        self.0.num_arguments()
     }
 
-    diff.b.build().unwrap()
+    pub(crate) fn tape(&self) -> &Tape {
+        &self.0
+    }
+
+    pub(crate) fn into_tape(self) -> Tape {
+        self.0
+    }
+}
+
+pub type DefaultGradientInstance = GradientInstance<DefaultMultiBackend>;
+pub type DefaultGradientEvaluator = GradientEvaluator<DefaultMultiBackend>;
+
+pub struct GradientInstance<B: Backend> {
+    instance: Instance<B>,
+    num_inputs: usize,
+}
+
+impl<B: Backend> GradientInstance<B> {
+    pub(crate) fn new(tape: GradientTape) -> Self {
+        Self {
+            num_inputs: tape.num_inputs(),
+            instance: Instance::new(tape.into_tape()),
+        }
+    }
+}
+
+impl<B: Backend> Clone for GradientInstance<B> {
+    fn clone(&self) -> Self {
+        Self {
+            instance: self.instance.clone(),
+            num_inputs: self.num_inputs,
+        }
+    }
+}
+
+impl<B: Backend> GradientInstance<B> {
+    pub fn evaluator(&self) -> GradientEvaluator<B> {
+        GradientEvaluator {
+            evaluator: self.instance.evaluator(),
+            outputs: RefCell::new(vec![0.0; 1 + self.num_inputs]),
+        }
+    }
+}
+
+pub struct GradientEvaluator<B: Backend> {
+    evaluator: Evaluator<B>,
+    outputs: RefCell<Vec<f32>>,
+}
+
+impl<B: Backend> GradientEvaluator<B> {
+    pub fn evaluate(&self, inputs: &[f32], gradient: &mut [f32]) -> f32 {
+        let mut outputs = self.outputs.borrow_mut();
+        assert_eq!(gradient.len(), outputs.len() - 1);
+
+        self.evaluator.evaluate_into(inputs, &mut outputs);
+        gradient.copy_from_slice(&outputs[1..]);
+        outputs[0]
+    }
 }
 
 struct Diff {
@@ -216,19 +288,18 @@ impl Diff {
         self.b.instr(Instr::F32Const(value))
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::{FallbackMulti, Instance};
 
     fn gradient(tape: &Tape, inputs: &[f32]) -> Vec<f32> {
-        let grad = autodiff(tape);
-        assert_eq!(grad.num_results(), 1 + tape.num_arguments());
+        let grad = GradientTape::build(tape);
+        assert_eq!(grad.num_inputs(), tape.num_arguments());
 
-        let mut outputs = vec![0.0f32; grad.num_results()];
+        let mut outputs = vec![0.0f32; 1 + grad.num_inputs()];
 
-        Instance::<FallbackMulti>::new(grad)
+        Instance::<FallbackMulti>::new(grad.into_tape())
             .evaluator()
             .evaluate_into(inputs, &mut outputs);
 
