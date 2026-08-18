@@ -6,9 +6,12 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
-bytemuck = { workspace = true, features = ["derive"] }
 logos = "0.16.1"
 thiserror.workspace = true
+
+[dependencies.bytemuck]
+workspace = true
+features = ["derive", "min_const_generics", "must_cast"]
 
 [dependencies.cranelift]
 version = "0.134.2"

@@ -26,11 +26,11 @@ pub(crate) enum Instr {
     I32Sub(ValueId, ValueId),
     I32Mul(ValueId, ValueId),
 
-    // Conversions
-    F32FromI32(ValueId),
-
     // Identity copy of any value
     Copy(ValueId),
+
+    // Conversions
+    F32FromI32(ValueId),
 
     // Basic `f32` operations
     F32Neg(ValueId),
@@ -88,20 +88,16 @@ impl Instr {
     }
 }
 
-struct Shape {
-    num_arguments: u8,
-    num_results: u8,
-}
-
 pub(crate) struct Tape {
-    shape: Shape,
+    args: Vec<Type>,
+    results: Vec<Type>,
     instrs: Vec<Instr>,
 }
 
 impl Tape {
-    pub(crate) fn builder(arguments: Vec<Type>, results: Vec<Type>) -> TapeBuilder {
+    pub(crate) fn builder(args: Vec<Type>, results: Vec<Type>) -> TapeBuilder {
         assert!(
-            arguments.len() <= u8::MAX as usize,
+            args.len() <= u8::MAX as usize,
             "a tape can take at most {} arguments",
             u8::MAX
         );
@@ -113,22 +109,27 @@ impl Tape {
         );
 
         TapeBuilder {
-            shape: Shape {
-                num_arguments: arguments.len() as u8,
-                num_results: results.len() as u8,
-            },
-            values: arguments,
+            num_args: args.len(),
+            values: args,
             instrs: vec![],
-            res_ty: results,
+            results,
         }
     }
 
-    pub(crate) fn num_arguments(&self) -> usize {
-        self.shape.num_arguments as usize
+    pub(crate) fn num_args(&self) -> usize {
+        self.args.len()
     }
 
     pub(crate) fn num_results(&self) -> usize {
-        self.shape.num_results as usize
+        self.results.len()
+    }
+
+    pub(crate) fn arg_types(&self) -> &[Type] {
+        &self.args
+    }
+
+    pub(crate) fn result_types(&self) -> &[Type] {
+        &self.results
     }
 
     pub(crate) fn instrs(&self) -> &[Instr] {
@@ -140,15 +141,15 @@ impl Tape {
 pub(crate) struct ValidateError(());
 
 pub(crate) struct TapeBuilder {
-    shape: Shape,
+    num_args: usize,
     instrs: Vec<Instr>,
     values: Vec<Type>,
-    res_ty: Vec<Type>,
+    results: Vec<Type>,
 }
 
 impl TapeBuilder {
-    pub(crate) fn argument(&self, index: u32) -> ValueId {
-        assert!(index < self.shape.num_arguments as u32);
+    pub(crate) fn arg(&self, index: usize) -> ValueId {
+        assert!(index < self.num_args);
         ValueId(index as u16)
     }
 
@@ -161,26 +162,28 @@ impl TapeBuilder {
         ValueId(index as u16)
     }
 
-    pub(crate) fn build(self) -> Result<Tape, ValidateError> {
+    pub(crate) fn build(mut self) -> Result<Tape, ValidateError> {
         self.validate()?;
+        self.values.truncate(self.num_args);
         Ok(Tape {
-            shape: self.shape,
+            args: self.values,
+            results: self.results,
             instrs: self.instrs,
         })
     }
 
     fn validate(&self) -> Result<(), ValidateError> {
         // Enforce that arguments are not implicitly used as results (not technically required by the backends).
-        if self.values.len() < self.shape.num_arguments as usize + self.shape.num_results as usize {
+        if self.values.len() < self.num_args + self.results.len() {
             return Err(ValidateError(()));
         }
 
-        if self.values[(self.values.len() - self.shape.num_results as usize)..] != self.res_ty {
+        if self.values[(self.values.len() - self.results.len())..] != self.results {
             return Err(ValidateError(()));
         }
 
         for (index, &instr) in self.instrs.iter().enumerate() {
-            let cur_dst = self.shape.num_arguments as usize + index;
+            let cur_dst = self.num_args + index;
 
             let check = |value: ValueId, ty: Type| {
                 let value = value.0 as usize;

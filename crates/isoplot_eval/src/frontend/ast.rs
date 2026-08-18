@@ -4,9 +4,8 @@ use std::{
     ops::{Index, Range},
 };
 
-use crate::diag::Span;
-
 use super::symbol::Symbol;
+use crate::diag::Span;
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub(super) enum Value {
@@ -18,7 +17,7 @@ pub(super) enum Value {
 pub(super) struct ExprId(u32);
 
 #[derive(Copy, Clone, Debug)]
-pub(super) struct MultiExprId {
+struct MultiExprId {
     start: u32,
     end: u32,
 }
@@ -305,12 +304,12 @@ impl<T> SparseMap<T> {
 
 #[derive(Copy, Clone, Debug)]
 pub(super) struct Expr {
-    pub(super) kind: ExprKind,
+    kind: ExprKind,
     pub(super) span: Span,
 }
 
 #[derive(Copy, Clone, Debug)]
-pub(super) enum ExprKind {
+enum ExprKind {
     UnOp(UnOp, ExprId),
     BinOp(BinOp, ExprId, ExprId),
     Intrinsic(Intrinsic, MultiExprId),

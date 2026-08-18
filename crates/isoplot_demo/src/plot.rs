@@ -1,14 +1,15 @@
 use std::{collections::HashMap, sync::Arc};
 
+use bytemuck::cast_vec;
+use dashmap::{DashMap, DashSet};
+use glam::IVec3;
+
 use bevy::{
     asset::RenderAssetUsages,
     mesh::{Indices, PrimitiveTopology},
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
-use bytemuck::cast_vec;
-use dashmap::{DashMap, DashSet};
-use glam::IVec3;
 
 use isoplot_mesh::{
     BorrowChunk, Chunk, ChunkEdge, ChunkFace, Extractor, NormalField, Offset, SeparateNormals,

@@ -28,7 +28,7 @@ impl<S: ?Sized + ScalarField> ScalarField for &S {
     }
 
     fn is_flat(&self, min: Vec3, size: f32) -> bool {
-        <S as ScalarField>::is_flat(&self, min, size)
+        <S as ScalarField>::is_flat(self, min, size)
     }
 }
 

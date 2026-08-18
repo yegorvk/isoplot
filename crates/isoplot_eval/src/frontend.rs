@@ -4,23 +4,20 @@ mod pretty;
 mod symbol;
 mod token;
 
-use std::{
-    error::Error,
-    fmt::{self, Display},
-};
+use std::{error::Error, fmt};
 
 use crate::{
-    ProgramShape,
     diag::Diagnostic,
-    frontend::ast::DenseMap,
+    layout::{Layout, TypedValue, ValueType},
     tape::{Instr, Tape, TapeBuilder, Type, ValueId},
 };
-use ast::{Ast, BinOp, ExprId, Intrinsic, SparseMap, UnOp, Value, Visitor};
+
+use ast::{Ast, BinOp, DenseMap, ExprId, Intrinsic, SparseMap, UnOp, Value, Visitor};
 use pretty::PrettyPrintAst;
 use symbol::{Interner, Symbol};
 
 #[derive(Debug)]
-pub struct ParseError {
+pub(crate) struct ParseError {
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -29,12 +26,12 @@ impl ParseError {
         Self { diagnostics }
     }
 
-    pub fn diagnostics(&self) -> &[Diagnostic] {
+    pub(crate) fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
     }
 }
 
-impl Display for ParseError {
+impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("failed to parse expression")
     }
@@ -43,17 +40,17 @@ impl Display for ParseError {
 impl Error for ParseError {}
 
 #[derive(Debug)]
-pub struct ValidateError {
+pub(crate) struct ValidateError {
     diagnostics: Vec<Diagnostic>,
 }
 
 impl ValidateError {
-    pub fn diagnostics(&self) -> &[Diagnostic] {
+    pub(crate) fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
     }
 }
 
-impl Display for ValidateError {
+impl fmt::Display for ValidateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("failed to validate expression")
     }
@@ -61,15 +58,12 @@ impl Display for ValidateError {
 
 impl Error for ValidateError {}
 
-pub fn dump_ast(shape: &ProgramShape, source: &str) -> (Parsed, Vec<Diagnostic>) {
-    let (parsed, mut diagnostics) = parse(source);
+//     if let Err(error) = parsed.validate(desc.bindings()) {
+//         diagnostics.extend(error.diagnostics);
+//     }
 
-    if let Err(error) = parsed.validate(shape) {
-        diagnostics.extend(error.diagnostics);
-    }
-
-    (parsed, diagnostics)
-}
+//     (parsed, diagnostics)
+// }
 
 pub(crate) fn parse(source: &str) -> (Parsed, Vec<Diagnostic>) {
     let mut interner = Interner::default();
@@ -85,22 +79,22 @@ pub struct Parsed {
 }
 
 impl Parsed {
-    pub fn pretty_printer(&self) -> impl Display + '_ {
+    pub fn pretty_printer(&self) -> impl fmt::Display + '_ {
         PrettyPrintAst::new(&self.ast, &self.interner)
     }
 
-    pub(crate) fn validate(&self, shape: &ProgramShape) -> Result<Validated<'_>, ValidateError> {
+    pub(crate) fn validate(&self, bindings: &Bindings) -> Result<Validated<'_>, ValidateError> {
         let mut diagnostics = Vec::new();
 
         let resolver = VarResolver {
             interner: &self.interner,
-            shape,
+            bindings,
             ast: &self.ast,
             diags: &mut diagnostics,
         };
 
         let vars = SparseMap::build(&self.ast, resolver);
-        let ty = DenseMap::build(&self.ast, TypeChecker);
+        let ty = DenseMap::build(&self.ast, TypeChecker { vars: &vars });
 
         if !diagnostics.is_empty() {
             return Err(ValidateError { diagnostics });
@@ -108,8 +102,8 @@ impl Parsed {
 
         Ok(Validated {
             ast: &self.ast,
-            num_inputs: shape.inputs.len() as u32,
-            consts: shape.consts.clone(),
+            arg_types: bindings.args.iter().map(|&(_, ty)| ty).collect(),
+            consts: bindings.consts.iter().map(|&(_, value)| value).collect(),
             vars,
             ty,
         })
@@ -118,26 +112,19 @@ impl Parsed {
 
 pub(crate) struct Validated<'a> {
     ast: &'a Ast,
-    num_inputs: u32,
-    consts: Vec<String>,
+    arg_types: Vec<Type>,
+    consts: Vec<TypedValue>,
     vars: SparseMap<VarSlot>,
     ty: DenseMap<Type>,
 }
 
 impl Validated<'_> {
-    pub(crate) fn lower_to_ir<C>(&self, mut resolve_const: C) -> Tape
-    where
-        C: FnMut(&str) -> f32,
-    {
-        let consts: Vec<f32> = (self.consts.iter())
-            .map(|name| resolve_const(name))
-            .collect();
-
-        let mut builder = Tape::builder(vec![Type::F32; self.num_inputs as usize], vec![Type::F32]);
+    pub(crate) fn lower_to_ir(&self) -> Tape {
+        let mut builder = Tape::builder(self.arg_types.clone(), vec![Type::F32]);
 
         let generator = Generator {
             vars: &self.vars,
-            consts: &consts,
+            consts: &self.consts,
             ty: &self.ty,
             builder: &mut builder,
         };
@@ -149,7 +136,7 @@ impl Validated<'_> {
             Type::F32 => root,
         };
 
-        if (0..self.num_inputs).any(|index| builder.argument(index) == root) {
+        if (0..self.arg_types.len()).any(|index| builder.arg(index) == root) {
             builder.instr(Instr::Copy(root));
         }
 
@@ -159,7 +146,7 @@ impl Validated<'_> {
 
 struct VarResolver<'a> {
     interner: &'a Interner,
-    shape: &'a ProgramShape,
+    bindings: &'a Bindings<'a>,
     ast: &'a Ast,
     diags: &'a mut Vec<Diagnostic>,
 }
@@ -204,12 +191,19 @@ impl Visitor for VarResolver<'_> {
     fn var(&mut self, id: ExprId, name: Symbol) -> Option<VarSlot> {
         let name = self.interner.resolve(name).unwrap();
 
-        if let Some(index) = self.shape.inputs.iter().position(|input| input == name) {
-            return Some(VarSlot::Input(index as u32));
+        if let Some(index) = self.bindings.args.iter().position(|&(var, _)| var == name) {
+            let ty = self.bindings.args[index].1;
+            return Some(VarSlot::Arg(VarIndex(index as u32), ty));
         }
 
-        if let Some(index) = self.shape.consts.iter().position(|cst| cst == name) {
-            return Some(VarSlot::Const(index as u32));
+        if let Some(index) = self
+            .bindings
+            .consts
+            .iter()
+            .position(|&(var, _)| var == name)
+        {
+            let ty = lower_type(self.bindings.consts[index].1.ty());
+            return Some(VarSlot::Const(VarIndex(index as u32), ty));
         }
 
         self.diags.push(Diagnostic::new(
@@ -229,9 +223,11 @@ impl Visitor for VarResolver<'_> {
     }
 }
 
-struct TypeChecker;
+struct TypeChecker<'a> {
+    vars: &'a SparseMap<VarSlot>,
+}
 
-impl Visitor for TypeChecker {
+impl Visitor for TypeChecker<'_> {
     type In<'a> = &'a Type;
     type Out = Type;
 
@@ -256,8 +252,11 @@ impl Visitor for TypeChecker {
         Type::F32
     }
 
-    fn var(&mut self, _id: ExprId, _name: Symbol) -> Type {
-        Type::F32
+    fn var(&mut self, id: ExprId, _name: Symbol) -> Type {
+        match self.vars.get(id) {
+            Some(VarSlot::Const(_, ty) | VarSlot::Arg(_, ty)) => *ty,
+            None => Type::F32,
+        }
     }
 
     fn lit(&mut self, _id: ExprId, value: Value) -> Type {
@@ -274,7 +273,7 @@ impl Visitor for TypeChecker {
 
 struct Generator<'a> {
     vars: &'a SparseMap<VarSlot>,
-    consts: &'a [f32],
+    consts: &'a [TypedValue],
     ty: &'a DenseMap<Type>,
     builder: &'a mut TapeBuilder,
 }
@@ -368,12 +367,15 @@ impl Visitor for Generator<'_> {
     }
 
     fn var(&mut self, id: ExprId, _name: Symbol) -> Self::Out {
-        let value = match self.vars.get(id).unwrap() {
-            VarSlot::Const(index) => {
-                let value = self.consts[*index as usize];
-                self.builder.instr(Instr::F32Const(value))
+        let value = match *self.vars.get(id).unwrap() {
+            VarSlot::Const(index, ty) => {
+                let value = self.consts[index.0 as usize].value();
+                self.builder.instr(match ty {
+                    Type::I32 => Instr::I32Const(value.as_i32()),
+                    Type::F32 => Instr::F32Const(value.as_f32()),
+                })
             }
-            VarSlot::Input(index) => self.builder.argument(*index),
+            VarSlot::Arg(index, _) => self.builder.arg(index.0 as usize),
         };
 
         (value, self.ty[id])
@@ -393,24 +395,65 @@ impl Visitor for Generator<'_> {
     }
 }
 
+pub(crate) struct Bindings<'a> {
+    args: Vec<(&'a str, Type)>,
+    consts: &'a [(&'a str, TypedValue)],
+}
+
+impl<'a> Bindings<'a> {
+    pub(crate) fn new<Args: Layout>(args: &[&'a str], consts: &'a [(&'a str, TypedValue)]) -> Self {
+        assert_eq!(
+            args.len(),
+            Args::LEN,
+            "argument names do not match the argument layout"
+        );
+
+        let all_vars = || {
+            args.iter()
+                .copied()
+                .chain(consts.iter().map(|&(name, _)| name))
+        };
+        for (i, name) in all_vars().enumerate() {
+            if all_vars().take(i).any(|prev| prev == name) {
+                panic!("duplicate variable `{name}`");
+            }
+        }
+
+        Self {
+            args: args
+                .iter()
+                .copied()
+                .zip(Args::types().map(lower_type))
+                .collect(),
+            consts,
+        }
+    }
+}
+
+pub(crate) fn lower_type(ty: ValueType) -> Type {
+    match ty {
+        ValueType::I32 => Type::I32,
+        ValueType::F32 => Type::F32,
+    }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+struct VarIndex(u32);
+
 #[derive(Copy, Clone, Debug)]
 enum VarSlot {
-    Const(u32),
-    Input(u32),
+    Const(VarIndex, Type),
+    Arg(VarIndex, Type),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn shape() -> ProgramShape {
-        ProgramShape::builder().with_input("x").build()
-    }
-
     fn diagnostics(source: &str) -> Vec<(String, usize, usize)> {
         let (parsed, mut diagnostics) = parse(source);
 
-        if let Err(error) = parsed.validate(&shape()) {
+        if let Err(error) = parsed.validate(&Bindings::new::<f32>(&["x"], &[])) {
             diagnostics.extend(error.diagnostics);
         }
 

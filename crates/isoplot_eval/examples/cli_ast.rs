@@ -1,6 +1,6 @@
 use std::{env, process::ExitCode};
 
-use isoplot_eval::{Diagnostic, ProgramShape, dump_ast};
+use isoplot_eval::{Diagnostic, ProgramDesc, dump_ast};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -10,13 +10,10 @@ fn main() -> ExitCode {
     }
     let source = args.join(" ");
 
-    let shape = ProgramShape::builder()
-        .with_input("x")
-        .with_input("y")
-        .with_input("z")
-        .build();
-
-    let (parsed, diagnostics) = dump_ast(&shape, &source);
+    let (parsed, diagnostics) = dump_ast(
+        &ProgramDesc::<[f32; 3]>::new(&["x", "y", "z"], &[]),
+        &source,
+    );
     println!("{}", parsed.pretty_printer());
 
     for diagnostic in &diagnostics {

@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-use std::mem;
-use std::sync::Arc;
+use std::{collections::HashMap, marker::PhantomData, mem, sync::Arc};
 
 use cranelift::codegen::ir::{
     AbiParam, FuncRef, InstBuilder, MemFlagsData, Signature, Type, Value, types,
@@ -11,87 +9,63 @@ use cranelift::jit::{JITBuilder, JITModule};
 use cranelift::module::{FuncId, Linkage, Module, default_libcall_names};
 use cranelift::native;
 
-use crate::tape::{Instr, Tape, ValueId};
+use crate::{
+    layout::{RawValue, Vector},
+    tape::{Instr, Tape, ValueId},
+};
 
 type ScalarEvalFunc = extern "C" fn(*const f32) -> f32;
 type MultiEvalFunc = extern "C" fn(*const f32, *mut f32);
 
-pub(super) struct ScalarInstance {
-    num_inputs: usize,
-    module: Arc<ModuleGuard>,
-    func: ScalarEvalFunc,
-}
-
-impl Clone for ScalarInstance {
-    fn clone(&self) -> Self {
-        Self {
-            num_inputs: self.num_inputs,
-            module: Arc::clone(&self.module),
-            func: self.func,
-        }
-    }
-}
-
-impl ScalarInstance {
-    pub(super) fn new(tape: &Tape) -> Self {
-        assert_eq!(tape.num_results(), 1);
-        let (module, code) = compile(tape, false);
-
-        Self {
-            num_inputs: tape.num_arguments(),
-            module: Arc::new(ModuleGuard(Some(module))),
-            func: unsafe { mem::transmute::<*const u8, ScalarEvalFunc>(code) },
-        }
-    }
-
-    #[inline(always)]
-    pub(super) fn evaluate(&self, inputs: &[f32]) -> f32 {
-        assert_eq!(inputs.len(), self.num_inputs);
-        (self.func)(inputs.as_ptr())
-    }
-
-    #[inline(always)]
-    pub(super) fn evaluate_into(&self, inputs: &[f32], outputs: &mut [f32]) {
-        assert_eq!(outputs.len(), 1);
-        outputs[0] = self.evaluate(inputs);
-    }
-}
-
-pub(super) struct MultiInstance {
-    num_inputs: usize,
+pub(super) struct Instance<Ret> {
+    num_args: usize,
     num_results: usize,
     module: Arc<ModuleGuard>,
-    func: MultiEvalFunc,
+    code: *const u8,
+    _marker: PhantomData<fn() -> Ret>,
 }
 
-impl Clone for MultiInstance {
+// Safety: `code` points into the finalized module, which is kept alive by `module`.
+unsafe impl<Ret> Send for Instance<Ret> {}
+unsafe impl<Ret> Sync for Instance<Ret> {}
+
+impl<Ret> Clone for Instance<Ret> {
     fn clone(&self) -> Self {
         Self {
-            num_inputs: self.num_inputs,
+            num_args: self.num_args,
             num_results: self.num_results,
             module: Arc::clone(&self.module),
-            func: self.func,
+            code: self.code,
+            _marker: PhantomData,
         }
     }
 }
 
-impl MultiInstance {
+impl<Ret: Vector> Instance<Ret> {
     pub(super) fn new(tape: &Tape) -> Self {
-        let (module, code) = compile(tape, true);
+        let (module, code) = compile(tape, Ret::LEN != 1);
 
         Self {
-            num_inputs: tape.num_arguments(),
+            num_args: tape.num_args(),
             num_results: tape.num_results(),
             module: Arc::new(ModuleGuard(Some(module))),
-            func: unsafe { mem::transmute::<*const u8, MultiEvalFunc>(code) },
+            code,
+            _marker: PhantomData,
         }
     }
 
     #[inline(always)]
-    pub(super) fn evaluate_into(&self, inputs: &[f32], outputs: &mut [f32]) {
-        assert_eq!(inputs.len(), self.num_inputs);
-        assert_eq!(outputs.len(), self.num_results);
-        (self.func)(inputs.as_ptr(), outputs.as_mut_ptr())
+    pub(super) fn evaluate_into(&self, args: &[RawValue], results: &mut [RawValue]) {
+        debug_assert_eq!(args.len(), self.num_args);
+        debug_assert_eq!(results.len(), self.num_results);
+
+        if Ret::LEN == 1 {
+            let func = unsafe { mem::transmute::<*const u8, ScalarEvalFunc>(self.code) };
+            results[0] = RawValue::from_f32(func(args.as_ptr().cast()));
+        } else {
+            let func = unsafe { mem::transmute::<*const u8, MultiEvalFunc>(self.code) };
+            func(args.as_ptr().cast(), results.as_mut_ptr().cast());
+        }
     }
 }
 
@@ -223,8 +197,8 @@ impl Translator<'_> {
         self.b.seal_block(block);
         let base = self.b.block_params(block)[0];
 
-        let mut values = Vec::with_capacity(tape.num_arguments() + tape.instrs().len());
-        for i in 0..tape.num_arguments() {
+        let mut values = Vec::with_capacity(tape.num_args() + tape.instrs().len());
+        for i in 0..tape.num_args() {
             let offset = i32::try_from(4 * i).unwrap();
             values.push(
                 self.b
@@ -314,11 +288,17 @@ mod tests {
     use super::*;
     use crate::tape::Type;
 
+    fn eval(inst: &Instance<f32>, args: &[f32]) -> f32 {
+        let mut output = [RawValue::ZERO];
+        inst.evaluate_into(bytemuck::cast_slice(args), &mut output);
+        output[0].as_f32()
+    }
+
     #[test]
     fn f32_ops() {
         let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
-        let x = b.argument(0);
-        let y = b.argument(1);
+        let x = b.arg(0);
+        let y = b.arg(1);
         let sum = b.instr(Instr::F32Add(x, y));
         let prod = b.instr(Instr::F32Mul(sum, x));
         let diff = b.instr(Instr::F32Sub(prod, y));
@@ -334,14 +314,14 @@ mod tests {
 
         let (x, y) = (1.75f32, -0.5f32);
         let expected = (-((x + y) * x - y) / y).abs().min(x).max(y) + 0.5;
-        assert_eq!(ScalarInstance::new(&tape).evaluate(&[x, y]), expected);
+        assert_eq!(eval(&Instance::<f32>::new(&tape), &[x, y]), expected);
     }
 
     #[test]
     fn f32_fn_calls() {
         let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
-        let x = b.argument(0);
-        let y = b.argument(1);
+        let x = b.arg(0);
+        let y = b.arg(1);
         let sin = b.instr(Instr::F32Sin(x));
         let cos = b.instr(Instr::F32Cos(y));
         let tan = b.instr(Instr::F32Tan(x));
@@ -357,7 +337,7 @@ mod tests {
         }
 
         let tape = b.build().unwrap();
-        let inst = ScalarInstance::new(&tape);
+        let inst = Instance::<f32>::new(&tape);
 
         let (x, y) = (0.7f32, 1.3f32);
         let expected = x.sin()
@@ -369,13 +349,13 @@ mod tests {
             + x.log10()
             + x.powf(y);
 
-        assert_eq!(inst.evaluate(&[x, y]), expected);
+        assert_eq!(eval(&inst, &[x, y]), expected);
     }
 
     #[test]
     fn i32_ops() {
         let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
-        let x = b.argument(0);
+        let x = b.arg(0);
         let three = b.instr(Instr::I32Const(3));
         let two = b.instr(Instr::I32Const(2));
         let five = b.instr(Instr::I32Add(three, two));
@@ -386,55 +366,58 @@ mod tests {
         b.instr(Instr::F32Add(sixf, cube));
 
         let tape = b.build().unwrap();
-        let inst = ScalarInstance::new(&tape);
+        let inst = Instance::<f32>::new(&tape);
 
         let x = 1.5f32;
-        assert_eq!(inst.evaluate(&[x]), 6.0 + x.powi(3));
+        assert_eq!(eval(&inst, &[x]), 6.0 + x.powi(3));
     }
 
     #[test]
     fn f32_sign() {
         let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
-        let x = b.argument(0);
+        let x = b.arg(0);
         b.instr(Instr::F32Sign(x));
         let tape = b.build().unwrap();
-        let inst = ScalarInstance::new(&tape);
+        let inst = Instance::<f32>::new(&tape);
 
-        assert_eq!(inst.evaluate(&[-3.5]), -1.0);
-        assert_eq!(inst.evaluate(&[2.0]), 1.0);
-        assert_eq!(inst.evaluate(&[0.0]), 1.0);
-        assert_eq!(inst.evaluate(&[-0.0]), -1.0);
+        assert_eq!(eval(&inst, &[-3.5]), -1.0);
+        assert_eq!(eval(&inst, &[2.0]), 1.0);
+        assert_eq!(eval(&inst, &[0.0]), 1.0);
+        assert_eq!(eval(&inst, &[-0.0]), -1.0);
     }
 
     #[test]
     fn multi_results() {
         let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32; 3]);
-        let x = b.argument(0);
-        let y = b.argument(1);
+        let x = b.arg(0);
+        let y = b.arg(1);
         b.instr(Instr::F32Add(x, y));
         b.instr(Instr::F32Mul(x, y));
         b.instr(Instr::F32Sub(x, y));
         let tape = b.build().unwrap();
 
         let (x, y) = (1.5f32, 2.25f32);
-        let mut outputs = [0.0f32; 3];
-        MultiInstance::new(&tape).evaluate_into(&[x, y], &mut outputs);
-        assert_eq!(outputs, [x + y, x * y, x - y]);
+        let mut results = [0.0f32; 3];
+        Instance::<[f32; 3]>::new(&tape).evaluate_into(
+            bytemuck::cast_slice(&[x, y]),
+            bytemuck::cast_slice_mut(&mut results),
+        );
+        assert_eq!(results, [x + y, x * y, x - y]);
     }
 
     #[test]
     fn clone_outlives_original() {
         let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
-        let x = b.argument(0);
+        let x = b.arg(0);
         let c = b.instr(Instr::F32Const(1.0));
         b.instr(Instr::F32Add(x, c));
 
         let tape = b.build().unwrap();
-        let inst = ScalarInstance::new(&tape);
+        let inst = Instance::<f32>::new(&tape);
         let clone = inst.clone();
         drop(inst);
 
-        assert_eq!(clone.evaluate(&[2.0]), 3.0);
+        assert_eq!(eval(&clone, &[2.0]), 3.0);
     }
 }
 
