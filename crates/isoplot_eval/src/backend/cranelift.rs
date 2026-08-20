@@ -1,7 +1,9 @@
 use std::{collections::HashMap, marker::PhantomData, mem, sync::Arc};
 
 use cranelift::codegen::ir::{
-    AbiParam, FuncRef, InstBuilder, MemFlagsData, Signature, Type, Value, types,
+    AbiParam, FuncRef, InstBuilder, MemFlagsData, Signature, Type, Value,
+    condcodes::{FloatCC, IntCC},
+    types,
 };
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -236,13 +238,47 @@ impl Translator<'_> {
 
         match instr {
             Instr::I32Const(c) => self.builder.ins().iconst(types::I32, c as i64),
+            Instr::BoolConst(c) => self.builder.ins().iconst(types::I8, c as i64),
             Instr::F32Const(c) => self.builder.ins().f32const(c),
 
             Instr::I32Add(lhs, rhs) => self.builder.ins().iadd(v(lhs), v(rhs)),
             Instr::I32Sub(lhs, rhs) => self.builder.ins().isub(v(lhs), v(rhs)),
             Instr::I32Mul(lhs, rhs) => self.builder.ins().imul(v(lhs), v(rhs)),
 
+            Instr::I32Eq(lhs, rhs) => self.builder.ins().icmp(IntCC::Equal, v(lhs), v(rhs)),
+            Instr::I32Ne(lhs, rhs) => self.builder.ins().icmp(IntCC::NotEqual, v(lhs), v(rhs)),
+            Instr::I32Lt(lhs, rhs) => {
+                self.builder
+                    .ins()
+                    .icmp(IntCC::SignedLessThan, v(lhs), v(rhs))
+            }
+            Instr::I32Le(lhs, rhs) => {
+                self.builder
+                    .ins()
+                    .icmp(IntCC::SignedLessThanOrEqual, v(lhs), v(rhs))
+            }
+            Instr::I32Gt(lhs, rhs) => {
+                self.builder
+                    .ins()
+                    .icmp(IntCC::SignedGreaterThan, v(lhs), v(rhs))
+            }
+            Instr::I32Ge(lhs, rhs) => {
+                self.builder
+                    .ins()
+                    .icmp(IntCC::SignedGreaterThanOrEqual, v(lhs), v(rhs))
+            }
+
+            Instr::Not(src) => self.builder.ins().icmp_imm_u(IntCC::Equal, v(src), 0),
+            Instr::And(lhs, rhs) => self.builder.ins().band(v(lhs), v(rhs)),
+            Instr::Or(lhs, rhs) => self.builder.ins().bor(v(lhs), v(rhs)),
+            Instr::Xor(lhs, rhs) => self.builder.ins().bxor(v(lhs), v(rhs)),
+
+            Instr::I32FromBool(src) => self.builder.ins().uextend(types::I32, v(src)),
             Instr::F32FromI32(src) => self.builder.ins().fcvt_from_sint(types::F32, v(src)),
+            Instr::F32FromBool(src) => {
+                let int = self.builder.ins().uextend(types::I32, v(src));
+                self.builder.ins().fcvt_from_uint(types::F32, int)
+            }
 
             Instr::Copy(src) => v(src),
 
@@ -271,6 +307,28 @@ impl Translator<'_> {
             Instr::F32Cos(src) => self.call("cos", &[v(src)]),
             Instr::F32Tan(src) => self.call("tan", &[v(src)]),
             Instr::F32Cot(src) => self.call("cot", &[v(src)]),
+
+            Instr::F32Eq(lhs, rhs) => self.builder.ins().fcmp(FloatCC::Equal, v(lhs), v(rhs)),
+            Instr::F32Ne(lhs, rhs) => self.builder.ins().fcmp(FloatCC::NotEqual, v(lhs), v(rhs)),
+            Instr::F32Lt(lhs, rhs) => self.builder.ins().fcmp(FloatCC::LessThan, v(lhs), v(rhs)),
+            Instr::F32Le(lhs, rhs) => {
+                self.builder
+                    .ins()
+                    .fcmp(FloatCC::LessThanOrEqual, v(lhs), v(rhs))
+            }
+            Instr::F32Gt(lhs, rhs) => self
+                .builder
+                .ins()
+                .fcmp(FloatCC::GreaterThan, v(lhs), v(rhs)),
+            Instr::F32Ge(lhs, rhs) => {
+                self.builder
+                    .ins()
+                    .fcmp(FloatCC::GreaterThanOrEqual, v(lhs), v(rhs))
+            }
+
+            Instr::I32Sel(cond, v_true, v_false) | Instr::F32Sel(cond, v_true, v_false) => {
+                self.builder.ins().select(v(cond), v(v_true), v(v_false))
+            }
         }
     }
 
@@ -398,6 +456,50 @@ mod tests {
         assert_eq!(eval(&inst, &[2.7]), 2.0);
         assert_eq!(eval(&inst, &[-2.3]), -3.0);
         assert_eq!(eval(&inst, &[4.0]), 4.0);
+    }
+
+    #[test]
+    fn f32_select() {
+        // f = if 0 < x && x < y { x } else { y }
+        let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
+        let x = b.arg(0);
+        let y = b.arg(1);
+        let zero = b.instr(Instr::F32Const(0.0));
+        let lt = b.instr(Instr::F32Lt(x, y));
+        let pos = b.instr(Instr::F32Gt(x, zero));
+        let both = b.instr(Instr::And(lt, pos));
+        b.instr(Instr::F32Sel(both, x, y));
+        let tape = b.build().unwrap();
+        let inst = Instance::<f32>::new(&tape);
+
+        assert_eq!(eval(&inst, &[1.0, 2.0]), 1.0);
+        assert_eq!(eval(&inst, &[-1.0, 2.0]), 2.0);
+        assert_eq!(eval(&inst, &[3.0, 2.0]), 2.0);
+    }
+
+    #[test]
+    fn bool_i32_ops() {
+        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let x = b.arg(0);
+        let two = b.instr(Instr::I32Const(2));
+        let three = b.instr(Instr::I32Const(3));
+        let lt = b.instr(Instr::I32Lt(two, three)); // true
+        let ge = b.instr(Instr::I32Ge(two, three)); // false
+        let yes = b.instr(Instr::BoolConst(true));
+        let xor = b.instr(Instr::Xor(lt, yes)); // false
+        let any = b.instr(Instr::Or(xor, ge)); // false
+        let not = b.instr(Instr::Not(any)); // true
+        let sel = b.instr(Instr::I32Sel(not, two, three)); // 2
+        let bump = b.instr(Instr::I32FromBool(lt)); // 1
+        let sum = b.instr(Instr::I32Add(sel, bump)); // 3
+        let sum = b.instr(Instr::F32FromI32(sum));
+        let one = b.instr(Instr::F32FromBool(not)); // 1.0
+        let sum = b.instr(Instr::F32Add(sum, one)); // 4.0
+        b.instr(Instr::F32Add(sum, x));
+        let tape = b.build().unwrap();
+        let inst = Instance::<f32>::new(&tape);
+
+        assert_eq!(eval(&inst, &[0.5]), 4.5);
     }
 
     #[test]

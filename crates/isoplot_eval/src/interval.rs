@@ -91,12 +91,12 @@ fn translate(source: &Tape) -> Tape {
 }
 
 #[derive(Copy, Clone)]
-struct ValueRange {
+struct F32Range {
     lo: ValueId,
     hi: ValueId,
 }
 
-impl ValueRange {
+impl F32Range {
     fn new(lo: ValueId, hi: ValueId) -> Self {
         Self { lo, hi }
     }
@@ -104,12 +104,55 @@ impl ValueRange {
     fn point(v: ValueId) -> Self {
         Self { lo: v, hi: v }
     }
+
+    fn map<F>(&self, mut f: F) -> Self
+    where
+        F: FnMut(ValueId) -> ValueId,
+    {
+        Self {
+            lo: f(self.lo),
+            hi: f(self.hi),
+        }
+    }
+
+    fn values(&self) -> [ValueId; 2] {
+        [self.lo, self.hi]
+    }
+}
+
+#[derive(Copy, Clone)]
+struct BoolRange {
+    all: ValueId,
+    any: ValueId,
+}
+
+impl BoolRange {
+    fn point(v: ValueId) -> Self {
+        Self { all: v, any: v }
+    }
+
+    fn definite(self) -> Option<ValueId> {
+        (self.all == self.any).then_some(self.all)
+    }
 }
 
 #[derive(Copy, Clone)]
 enum Value {
     I32(ValueId),
-    F32(ValueRange),
+    Bool(BoolRange),
+    F32(F32Range),
+}
+
+impl From<BoolRange> for Value {
+    fn from(range: BoolRange) -> Self {
+        Self::Bool(range)
+    }
+}
+
+impl From<F32Range> for Value {
+    fn from(range: F32Range) -> Self {
+        Self::F32(range)
+    }
 }
 
 struct Translator<'a> {
@@ -137,7 +180,7 @@ impl<'a> Translator<'a> {
         );
 
         let values = (0..num_args)
-            .map(|i| Value::F32(ValueRange::new(builder.arg(2 * i), builder.arg(2 * i + 1))))
+            .map(|i| Value::F32(F32Range::new(builder.arg(2 * i), builder.arg(2 * i + 1))))
             .collect();
 
         Self {
@@ -168,155 +211,347 @@ impl<'a> Translator<'a> {
     fn translate(&mut self, instr: Instr) -> Value {
         match instr {
             Instr::I32Const(_) => Value::I32(self.builder.instr(instr)),
-            Instr::F32Const(_) => Value::F32(ValueRange::point(self.builder.instr(instr))),
+            Instr::BoolConst(_) => BoolRange::point(self.builder.instr(instr)).into(),
+            Instr::F32Const(_) => F32Range::point(self.builder.instr(instr)).into(),
 
-            Instr::I32Add(lhs, rhs) => Value::I32(self.i32_binary(Instr::I32Add, lhs, rhs)),
-            Instr::I32Sub(lhs, rhs) => Value::I32(self.i32_binary(Instr::I32Sub, lhs, rhs)),
-            Instr::I32Mul(lhs, rhs) => Value::I32(self.i32_binary(Instr::I32Mul, lhs, rhs)),
+            Instr::I32Add(lhs, rhs) => {
+                let (x, y) = (self.i32(lhs), self.i32(rhs));
+                Value::I32(self.builder.instr(Instr::I32Add(x, y)))
+            }
+
+            Instr::I32Sub(lhs, rhs) => {
+                let (x, y) = (self.i32(lhs), self.i32(rhs));
+                Value::I32(self.builder.instr(Instr::I32Sub(x, y)))
+            }
+
+            Instr::I32Mul(lhs, rhs) => {
+                let (x, y) = (self.i32(lhs), self.i32(rhs));
+                Value::I32(self.builder.instr(Instr::I32Mul(x, y)))
+            }
+
+            Instr::I32Eq(lhs, rhs) => {
+                let (x, y) = (self.i32(lhs), self.i32(rhs));
+                BoolRange::point(self.builder.instr(Instr::I32Eq(x, y))).into()
+            }
+
+            Instr::I32Ne(lhs, rhs) => {
+                let (x, y) = (self.i32(lhs), self.i32(rhs));
+                BoolRange::point(self.builder.instr(Instr::I32Ne(x, y))).into()
+            }
+
+            Instr::I32Lt(lhs, rhs) => {
+                let (x, y) = (self.i32(lhs), self.i32(rhs));
+                BoolRange::point(self.builder.instr(Instr::I32Lt(x, y))).into()
+            }
+
+            Instr::I32Le(lhs, rhs) => {
+                let (x, y) = (self.i32(lhs), self.i32(rhs));
+                BoolRange::point(self.builder.instr(Instr::I32Le(x, y))).into()
+            }
+
+            Instr::I32Gt(lhs, rhs) => {
+                let (x, y) = (self.i32(lhs), self.i32(rhs));
+                BoolRange::point(self.builder.instr(Instr::I32Gt(x, y))).into()
+            }
+
+            Instr::I32Ge(lhs, rhs) => {
+                let (x, y) = (self.i32(lhs), self.i32(rhs));
+                BoolRange::point(self.builder.instr(Instr::I32Ge(x, y))).into()
+            }
+
+            Instr::Not(src) => {
+                let x = self.bool(src);
+                self.bool_not(x).into()
+            }
+
+            Instr::And(lhs, rhs) => {
+                let (x, y) = (self.bool(lhs), self.bool(rhs));
+                let all = self.builder.instr(Instr::And(x.all, y.all));
+                let any = if x.definite().is_some() && y.definite().is_some() {
+                    all
+                } else {
+                    self.builder.instr(Instr::And(x.any, y.any))
+                };
+                BoolRange { all, any }.into()
+            }
+
+            Instr::Or(lhs, rhs) => {
+                let (x, y) = (self.bool(lhs), self.bool(rhs));
+                let all = self.builder.instr(Instr::Or(x.all, y.all));
+                let any = if x.definite().is_some() && y.definite().is_some() {
+                    all
+                } else {
+                    self.builder.instr(Instr::Or(x.any, y.any))
+                };
+                BoolRange { all, any }.into()
+            }
+
+            Instr::Xor(lhs, rhs) => {
+                let (x, y) = (self.bool(lhs), self.bool(rhs));
+                let definite = self.builder.instr(Instr::Xor(x.all, y.all));
+                if x.definite().is_some() && y.definite().is_some() {
+                    BoolRange::point(definite).into()
+                } else {
+                    // Any uncertain operand makes the result fully uncertain.
+                    let unc_x = self.builder.instr(Instr::Xor(x.all, x.any));
+                    let unc_y = self.builder.instr(Instr::Xor(y.all, y.any));
+                    let uncertain = self.builder.instr(Instr::Or(unc_x, unc_y));
+                    let certain = self.builder.instr(Instr::Not(uncertain));
+                    let all = self.builder.instr(Instr::And(definite, certain));
+                    let any = self.builder.instr(Instr::Or(definite, uncertain));
+                    BoolRange { all, any }.into()
+                }
+            }
 
             Instr::Copy(src) => self.values[src.index()],
+
+            Instr::I32FromBool(src) => {
+                let Some(src) = self.bool(src).definite() else {
+                    unimplemented!(
+                        "data-dependent i32 values are not supported in interval translation"
+                    );
+                };
+
+                Value::I32(self.builder.instr(Instr::I32FromBool(src)))
+            }
 
             Instr::F32FromI32(src) => {
                 let src = self.i32(src);
                 let converted = self.builder.instr(Instr::F32FromI32(src));
-                Value::F32(ValueRange::point(converted))
+                F32Range::point(converted).into()
+            }
+
+            Instr::F32FromBool(src) => {
+                let x = self.bool(src);
+                match x.definite() {
+                    Some(v) => F32Range::point(self.builder.instr(Instr::F32FromBool(v))).into(),
+                    None => {
+                        let lo = self.builder.instr(Instr::F32FromBool(x.all));
+                        let hi = self.builder.instr(Instr::F32FromBool(x.any));
+                        F32Range::new(lo, hi).into()
+                    }
+                }
             }
 
             Instr::F32Neg(src) => {
                 let x = self.f32(src);
-                let negated = self.map(x, Instr::F32Neg);
-                Value::F32(ValueRange::new(negated.hi, negated.lo))
+                let [lo, hi] = x.values().map(|v| self.builder.instr(Instr::F32Neg(v)));
+                F32Range::new(hi, lo).into()
             }
 
             Instr::F32Abs(src) => {
                 // |[lo, hi]| = [max(lo, -hi, 0), max(hi, -lo)]
                 let x = self.f32(src);
-                let neg_lo = self.unary(Instr::F32Neg, x.lo);
-                let neg_hi = self.unary(Instr::F32Neg, x.hi);
+                let neg_lo = self.builder.instr(Instr::F32Neg(x.lo));
+                let neg_hi = self.builder.instr(Instr::F32Neg(x.hi));
                 let zero = self.c_f32(0.0);
                 let lo = self.max_of([x.lo, neg_hi, zero]);
                 let hi = self.max(x.hi, neg_lo);
-                Value::F32(ValueRange::new(lo, hi))
+                F32Range::new(lo, hi).into()
             }
 
-            Instr::F32Sign(src) => self.monotone(Instr::F32Sign, src),
-            Instr::F32Floor(src) => self.monotone(Instr::F32Floor, src),
+            Instr::F32Sign(src) => {
+                let x = self.f32(src);
+                x.map(|v| self.builder.instr(Instr::F32Sign(v))).into()
+            }
+
+            Instr::F32Floor(src) => {
+                let x = self.f32(src);
+                x.map(|v| self.builder.instr(Instr::F32Floor(v))).into()
+            }
 
             Instr::F32Add(lhs, rhs) => {
                 let (x, y) = (self.f32(lhs), self.f32(rhs));
-                Value::F32(ValueRange::new(self.add(x.lo, y.lo), self.add(x.hi, y.hi)))
+                F32Range::new(self.add(x.lo, y.lo), self.add(x.hi, y.hi)).into()
             }
 
             Instr::F32Sub(lhs, rhs) => {
                 let (x, y) = (self.f32(lhs), self.f32(rhs));
-                Value::F32(ValueRange::new(self.sub(x.lo, y.hi), self.sub(x.hi, y.lo)))
+                F32Range::new(self.sub(x.lo, y.hi), self.sub(x.hi, y.lo)).into()
             }
 
             Instr::F32Mul(lhs, rhs) => {
                 let (x, y) = (self.f32(lhs), self.f32(rhs));
-                Value::F32(self.mul_range(x, y))
+                self.mul_range(x, y).into()
             }
 
             Instr::F32Div(lhs, rhs) => {
                 let (x, y) = (self.f32(lhs), self.f32(rhs));
                 let recip = self.recip(y);
-                Value::F32(self.mul_range(x, recip))
+                self.mul_range(x, recip).into()
             }
 
             Instr::F32Min(lhs, rhs) => {
                 let (x, y) = (self.f32(lhs), self.f32(rhs));
-                Value::F32(ValueRange::new(self.min(x.lo, y.lo), self.min(x.hi, y.hi)))
+                F32Range::new(self.min(x.lo, y.lo), self.min(x.hi, y.hi)).into()
             }
 
             Instr::F32Max(lhs, rhs) => {
                 let (x, y) = (self.f32(lhs), self.f32(rhs));
-                Value::F32(ValueRange::new(self.max(x.lo, y.lo), self.max(x.hi, y.hi)))
+                F32Range::new(self.max(x.lo, y.lo), self.max(x.hi, y.hi)).into()
             }
 
             Instr::F32Powf(lhs, rhs) => {
                 // lhs^rhs = exp(rhs * ln(lhs))
                 let (x, y) = (self.f32(lhs), self.f32(rhs));
-                let ln = self.log(Instr::F32Ln, x);
+                let clamped = self.ensure_positive_safe(x);
+                let ln = clamped.map(|v| self.builder.instr(Instr::F32Ln(v)));
                 let exponent = self.mul_range(ln, y);
-                Value::F32(self.map(exponent, Instr::F32Exp))
+                exponent
+                    .map(|v| self.builder.instr(Instr::F32Exp(v)))
+                    .into()
             }
 
             Instr::F32Powi(lhs, rhs) => {
                 let x = self.f32(lhs);
                 let n = self.i32(rhs);
-                let tiny = self.c_f32(f32::MIN_POSITIVE);
-                let lo = self.ensure_magnitude(x.lo, tiny);
-                let hi = self.ensure_magnitude(x.hi, tiny);
-                let a = self.builder.instr(Instr::F32Powi(lo, n));
-                let b = self.builder.instr(Instr::F32Powi(hi, n));
-                let range = self.hull(a, b);
+                let nonzero = self.ensure_nonzero(x);
+                let [a, b] = nonzero
+                    .values()
+                    .map(|v| self.builder.instr(Instr::F32Powi(v, n)));
+                let range = self.f32_hull(a, b);
 
                 // `range` might miss zero for even powers, e.g. [-1, 2]^2 = [1, 4].
-                let zero = self.contains_zero(x);
-                let range = self.include_zero_if(range, zero);
+                let zero_in_base = self.contains_zero(x);
+                let range = self.include_zero_if(range, zero_in_base);
 
                 // Negative powers blow up around zero.
-                let n_f32 = self.builder.instr(Instr::F32FromI32(n));
-                let negative_power = self.is_negative(n_f32);
-                let pole = self.mul(zero, negative_power);
-                Value::F32(self.widen_if(range, pole))
+                let zero = self.builder.instr(Instr::I32Const(0));
+                let negative_power = self.builder.instr(Instr::I32Lt(n, zero));
+                let pole = self.builder.instr(Instr::And(zero_in_base, negative_power));
+                self.widen_if(range, pole).into()
             }
 
-            Instr::F32Exp(src) => self.monotone(Instr::F32Exp, src),
-            Instr::F32Ln(src) => self.monotone_log(Instr::F32Ln, src),
-            Instr::F32Lg(src) => self.monotone_log(Instr::F32Lg, src),
+            Instr::F32Exp(src) => {
+                let x = self.f32(src);
+                x.map(|v| self.builder.instr(Instr::F32Exp(v))).into()
+            }
 
-            Instr::F32Sin(src) => self.periodic_wave(Instr::F32Sin, FRAC_PI_2, src),
-            Instr::F32Cos(src) => self.periodic_wave(Instr::F32Cos, 0.0, src),
-            Instr::F32Tan(src) => self.periodic_monotone(Instr::F32Tan, FRAC_PI_2, src),
-            Instr::F32Cot(src) => self.periodic_monotone(Instr::F32Cot, 0.0, src),
+            Instr::F32Ln(src) => {
+                let x = self.f32(src);
+                let clamped = self.ensure_positive_safe(x);
+                clamped.map(|v| self.builder.instr(Instr::F32Ln(v))).into()
+            }
+
+            Instr::F32Lg(src) => {
+                let x = self.f32(src);
+                let clamped = self.ensure_positive_safe(x);
+                clamped.map(|v| self.builder.instr(Instr::F32Lg(v))).into()
+            }
+
+            Instr::F32Sin(src) => {
+                let x = self.f32(src);
+                let [a, b] = x.values().map(|v| self.builder.instr(Instr::F32Sin(v)));
+                let range = self.f32_hull(a, b);
+                self.normalized_periodic_wave(x, range, FRAC_PI_2, PI)
+                    .into()
+            }
+
+            Instr::F32Cos(src) => {
+                let x = self.f32(src);
+                let [a, b] = x.values().map(|v| self.builder.instr(Instr::F32Cos(v)));
+                let range = self.f32_hull(a, b);
+                self.normalized_periodic_wave(x, range, 0.0, PI).into()
+            }
+
+            Instr::F32Tan(src) => {
+                let x = self.f32(src);
+                let [a, b] = x.values().map(|v| self.builder.instr(Instr::F32Tan(v)));
+                let range = self.f32_hull(a, b);
+                self.periodic_monotone(x, range, FRAC_PI_2, PI).into()
+            }
+
+            Instr::F32Cot(src) => {
+                let x = self.f32(src);
+                let [a, b] = x.values().map(|v| self.builder.instr(Instr::F32Cot(v)));
+                let range = self.f32_hull(a, b);
+                self.periodic_monotone(x, range, 0.0, PI).into()
+            }
+
+            Instr::F32Eq(lhs, rhs) => {
+                let (x, y) = (self.f32(lhs), self.f32(rhs));
+                self.f32_eq(x, y).into()
+            }
+
+            Instr::F32Ne(lhs, rhs) => {
+                let (x, y) = (self.f32(lhs), self.f32(rhs));
+                let eq = self.f32_eq(x, y);
+                self.bool_not(eq).into()
+            }
+
+            Instr::F32Lt(lhs, rhs) => {
+                let (x, y) = (self.f32(lhs), self.f32(rhs));
+                self.f32_lt(x, y).into()
+            }
+
+            Instr::F32Le(lhs, rhs) => {
+                let (x, y) = (self.f32(lhs), self.f32(rhs));
+                self.f32_le(x, y).into()
+            }
+
+            Instr::F32Gt(lhs, rhs) => {
+                let (x, y) = (self.f32(lhs), self.f32(rhs));
+                self.f32_lt(y, x).into()
+            }
+
+            Instr::F32Ge(lhs, rhs) => {
+                let (x, y) = (self.f32(lhs), self.f32(rhs));
+                self.f32_le(y, x).into()
+            }
+
+            Instr::I32Sel(cond, v_true, v_false) => {
+                let Some(cond) = self.bool(cond).definite() else {
+                    unimplemented!(
+                        "data-dependent i32 values are not supported in interval translation"
+                    );
+                };
+                let (t, f) = (self.i32(v_true), self.i32(v_false));
+                Value::I32(self.builder.instr(Instr::I32Sel(cond, t, f)))
+            }
+
+            Instr::F32Sel(cond, v_true, v_false) => {
+                let cond = self.bool(cond);
+                let (t, f) = (self.f32(v_true), self.f32(v_false));
+                match cond.definite() {
+                    Some(cond) => self.select_range(cond, t, f).into(),
+                    None => {
+                        // An undecided condition yields the hull of both branches.
+                        let merged = F32Range::new(self.min(t.lo, f.lo), self.max(t.hi, f.hi));
+                        let unless_true = self.select_range(cond.any, merged, f);
+                        self.select_range(cond.all, t, unless_true).into()
+                    }
+                }
+            }
         }
+    }
+
+    fn c_f32(&mut self, value: f32) -> ValueId {
+        self.builder.instr(Instr::F32Const(value))
     }
 
     fn i32(&self, id: ValueId) -> ValueId {
         match self.values[id.index()] {
             Value::I32(v) => v,
-            Value::F32(_) => unreachable!("expected an i32 value"),
+            _ => unreachable!("expected an i32 value"),
         }
     }
 
-    fn f32(&self, id: ValueId) -> ValueRange {
+    fn bool(&self, id: ValueId) -> BoolRange {
+        match self.values[id.index()] {
+            Value::Bool(range) => range,
+            _ => unreachable!("expected a bool value"),
+        }
+    }
+
+    fn f32(&self, id: ValueId) -> F32Range {
         match self.values[id.index()] {
             Value::F32(range) => range,
-            Value::I32(_) => unreachable!("expected an f32 value"),
+            _ => unreachable!("expected an f32 value"),
         }
     }
 
-    fn i32_binary(
-        &mut self,
-        op: impl FnOnce(ValueId, ValueId) -> Instr,
-        lhs: ValueId,
-        rhs: ValueId,
-    ) -> ValueId {
-        let (lhs, rhs) = (self.i32(lhs), self.i32(rhs));
-        self.builder.instr(op(lhs, rhs))
-    }
-
-    fn unary(&mut self, f: impl FnOnce(ValueId) -> Instr, src: ValueId) -> ValueId {
-        self.builder.instr(f(src))
-    }
-
-    /// Applies a non-decreasing function to both endpoints.
-    fn map(&mut self, x: ValueRange, mut op: impl FnMut(ValueId) -> Instr) -> ValueRange {
-        ValueRange::new(self.unary(&mut op, x.lo), self.unary(&mut op, x.hi))
-    }
-
-    fn map_hull(&mut self, x: ValueRange, mut f: impl FnMut(ValueId) -> Instr) -> ValueRange {
-        let (a, b) = (self.unary(&mut f, x.lo), self.unary(&mut f, x.hi));
-        self.hull(a, b)
-    }
-
-    fn hull(&mut self, a: ValueId, b: ValueId) -> ValueRange {
-        ValueRange::new(self.min(a, b), self.max(a, b))
-    }
-
-    fn c_f32(&mut self, value: f32) -> ValueId {
-        self.builder.instr(Instr::F32Const(value))
+    fn f32_hull(&mut self, a: ValueId, b: ValueId) -> F32Range {
+        F32Range::new(self.min(a, b), self.max(a, b))
     }
 
     fn add(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
@@ -347,146 +582,141 @@ impl<'a> Translator<'a> {
         values.into_iter().reduce(|x, y| self.max(x, y)).unwrap()
     }
 
-    fn one_minus(&mut self, v: ValueId) -> ValueId {
-        let one = self.c_f32(1.0);
-        self.sub(one, v)
+    fn bool_not(&mut self, x: BoolRange) -> BoolRange {
+        let all = self.builder.instr(Instr::Not(x.any));
+        let any = match x.definite() {
+            Some(_) => all,
+            None => self.builder.instr(Instr::Not(x.all)),
+        };
+        BoolRange { all, any }
     }
 
-    /// Returns 1.0 if `v` is negative, 0.0 otherwise.
-    fn is_negative(&mut self, v: ValueId) -> ValueId {
-        let sign = self.unary(Instr::F32Sign, v);
+    fn f32_lt(&mut self, x: F32Range, y: F32Range) -> BoolRange {
+        BoolRange {
+            all: self.builder.instr(Instr::F32Lt(x.hi, y.lo)),
+            any: self.builder.instr(Instr::F32Lt(x.lo, y.hi)),
+        }
+    }
+
+    fn f32_le(&mut self, x: F32Range, y: F32Range) -> BoolRange {
+        BoolRange {
+            all: self.builder.instr(Instr::F32Le(x.hi, y.lo)),
+            any: self.builder.instr(Instr::F32Le(x.lo, y.hi)),
+        }
+    }
+
+    fn f32_eq(&mut self, x: F32Range, y: F32Range) -> BoolRange {
+        let xy = self.f32_le(x, y);
+        let yx = self.f32_le(y, x);
+        BoolRange {
+            all: self.builder.instr(Instr::And(xy.all, yx.all)),
+            any: self.builder.instr(Instr::And(xy.any, yx.any)),
+        }
+    }
+
+    fn contains_zero(&mut self, x: F32Range) -> ValueId {
+        let signs = x.map(|v| self.builder.instr(Instr::F32Sign(v)));
+        self.builder.instr(Instr::F32Lt(signs.lo, signs.hi))
+    }
+
+    fn include_zero_if(&mut self, x: F32Range, cond: ValueId) -> F32Range {
         let zero = self.c_f32(0.0);
-        let clamped = self.min(sign, zero);
-        self.unary(Instr::F32Neg, clamped)
+        let extended = F32Range::new(self.min(x.lo, zero), self.max(x.hi, zero));
+        self.select_range(cond, extended, x)
     }
 
-    /// Returns 1.0 if the range contains zero, 0.0 otherwise.
-    fn contains_zero(&mut self, x: ValueRange) -> ValueId {
-        let signs = self.map(x, Instr::F32Sign);
-        let product = self.mul(signs.lo, signs.hi);
-        self.is_negative(product)
+    fn widen_if(&mut self, x: F32Range, cond: ValueId) -> F32Range {
+        let wide = F32Range::new(self.c_f32(-f32::MAX), self.c_f32(f32::MAX));
+        self.select_range(cond, wide, x)
     }
 
-    /// Extends the range to include zero when `cond` is 1.0.
-    ///
-    /// This method *must* only be called when `cond` is either `0.0` or `1.0`.
-    fn include_zero_if(&mut self, x: ValueRange, cond: ValueId) -> ValueRange {
-        let keep = self.one_minus(cond);
-        let (lo_or_zero, hi_or_zero) = (self.mul(x.lo, keep), self.mul(x.hi, keep));
-        ValueRange::new(self.min(x.lo, lo_or_zero), self.max(x.hi, hi_or_zero))
-    }
-
-    /// Extends the range to cover the entire finite `f32` range when `cond` is 1.0.
-    ///
-    /// This method *must* only be called when `cond` is either `0.0` or `1.0`.
-    fn widen_if(&mut self, x: ValueRange, cond: ValueId) -> ValueRange {
-        let huge = self.c_f32(f32::MAX);
-        let neg_huge = self.c_f32(-f32::MAX);
-        let delta = self.mul(cond, huge);
-        let lo = self.sub(x.lo, delta);
-        let hi = self.add(x.hi, delta);
-        ValueRange::new(self.max(lo, neg_huge), self.min(hi, huge))
-    }
-
-    fn mul_range(&mut self, x: ValueRange, y: ValueRange) -> ValueRange {
+    fn mul_range(&mut self, x: F32Range, y: F32Range) -> F32Range {
         let products = [
             self.mul(x.lo, y.lo),
             self.mul(x.lo, y.hi),
             self.mul(x.hi, y.lo),
             self.mul(x.hi, y.hi),
         ];
-        ValueRange::new(self.min_of(products), self.max_of(products))
+        F32Range::new(self.min_of(products), self.max_of(products))
     }
 
-    fn ensure_magnitude(&mut self, v: ValueId, tiny: ValueId) -> ValueId {
-        let sign = self.unary(Instr::F32Sign, v);
-        let magnitude = self.unary(Instr::F32Abs, v);
-        let clamped = self.max(magnitude, tiny);
+    fn ensure_magnitude(&mut self, v: ValueId, min: ValueId) -> ValueId {
+        let sign = self.builder.instr(Instr::F32Sign(v));
+        let magnitude = self.builder.instr(Instr::F32Abs(v));
+        let clamped = self.max(magnitude, min);
         self.mul(sign, clamped)
     }
 
-    fn recip(&mut self, x: ValueRange) -> ValueRange {
-        let one = self.c_f32(1.0);
+    fn ensure_nonzero(&mut self, x: F32Range) -> F32Range {
         let tiny = self.c_f32(f32::MIN_POSITIVE);
-        let lo = self.ensure_magnitude(x.lo, tiny);
-        let hi = self.ensure_magnitude(x.hi, tiny);
-        let a = self.builder.instr(Instr::F32Div(one, lo));
-        let b = self.builder.instr(Instr::F32Div(one, hi));
-        let range = self.hull(a, b);
+        x.map(|v| self.ensure_magnitude(v, tiny))
+    }
+
+    fn recip(&mut self, x: F32Range) -> F32Range {
+        let one = self.c_f32(1.0);
+        let nonzero = self.ensure_nonzero(x);
+        let [a, b] = nonzero
+            .values()
+            .map(|v| self.builder.instr(Instr::F32Div(one, v)));
+        let range = self.f32_hull(a, b);
         let pole = self.contains_zero(x);
         self.widen_if(range, pole)
     }
 
-    fn log(&mut self, op: impl FnMut(ValueId) -> Instr, x: ValueRange) -> ValueRange {
+    fn ensure_positive_safe(&mut self, x: F32Range) -> F32Range {
         let tiny = self.c_f32(f32::MIN_POSITIVE);
-        let clamped = ValueRange::new(self.max(x.lo, tiny), self.max(x.hi, tiny));
-        self.map(clamped, op)
+        x.map(|v| self.max(v, tiny))
     }
 
-    fn monotone(&mut self, op: impl FnMut(ValueId) -> Instr, src: ValueId) -> Value {
-        let x = self.f32(src);
-        Value::F32(self.map(x, op))
+    fn select(&mut self, cond: ValueId, if_true: ValueId, if_false: ValueId) -> ValueId {
+        self.builder.instr(Instr::F32Sel(cond, if_true, if_false))
     }
 
-    fn monotone_log(&mut self, op: impl FnMut(ValueId) -> Instr, src: ValueId) -> Value {
-        let x = self.f32(src);
-        Value::F32(self.log(op, x))
-    }
-
-    /// Returns `a` when `cond` is 0.0 and `b` when it is 1.0.
-    fn select(&mut self, a: ValueId, b: ValueId, cond: ValueId) -> ValueId {
-        let diff = self.sub(b, a);
-        let step = self.mul(cond, diff);
-        self.add(a, step)
+    fn select_range(&mut self, cond: ValueId, if_true: F32Range, if_false: F32Range) -> F32Range {
+        F32Range::new(
+            self.select(cond, if_true.lo, if_false.lo),
+            self.select(cond, if_true.hi, if_false.hi),
+        )
     }
 
     fn period_index(&mut self, v: ValueId, offset: ValueId, scale: ValueId) -> ValueId {
         let shifted = self.sub(v, offset);
         let scaled = self.mul(shifted, scale);
-        self.unary(Instr::F32Floor, scaled)
+        self.builder.instr(Instr::F32Floor(scaled))
     }
 
-    /// Returns 1.0 if the range contains a point equal to `offset` modulo `period`, 0.0 otherwise.
-    fn crosses(&mut self, x: ValueRange, offset: f32, period: f32) -> ValueId {
-        let offset = self.c_f32(offset);
+    /// Returns whether the range contains a point equal to `v` modulo `period`.
+    fn contains_modulo(&mut self, x: F32Range, v: f32, period: f32) -> ValueId {
+        let offset = self.c_f32(v);
         let scale = self.c_f32(period.recip());
         let first = self.period_index(x.lo, offset, scale);
         let last = self.period_index(x.hi, offset, scale);
         let count = self.sub(last, first);
         let half = self.c_f32(0.5);
-        let rem = self.sub(half, count);
-        self.is_negative(rem)
+        self.builder.instr(Instr::F32Gt(count, half))
     }
 
-    // Periodic functions reaching 1 at `peak` and -1 at `peak + PI`, both modulo `2 * PI`
-    fn periodic_wave(
+    // Periodic waves reaching 1 at `peak` and -1 at `peak + half_period`, repeating every `2 * half_period`
+    fn normalized_periodic_wave(
         &mut self,
-        op: impl FnMut(ValueId) -> Instr,
+        x: F32Range,
+        im: F32Range,
         peak: f32,
-        src: ValueId,
-    ) -> Value {
-        let x = self.f32(src);
-        let range = self.map_hull(x, op);
-        let has_max = self.crosses(x, peak, 2.0 * PI);
-        let has_min = self.crosses(x, peak + PI, 2.0 * PI);
+        half_period: f32,
+    ) -> F32Range {
+        let has_max = self.contains_modulo(x, peak, 2.0 * half_period);
+        let has_min = self.contains_modulo(x, peak + half_period, 2.0 * half_period);
         let one = self.c_f32(1.0);
         let neg_one = self.c_f32(-1.0);
-        let hi = self.select(range.hi, one, has_max);
-        let lo = self.select(range.lo, neg_one, has_min);
-        Value::F32(ValueRange::new(lo, hi))
+        let hi = self.select(has_max, one, im.hi);
+        let lo = self.select(has_min, neg_one, im.lo);
+        F32Range::new(lo, hi)
     }
 
-    // Periodic functions monotone between poles spaced `PI` apart, at `pole` modulo `PI`
-    fn periodic_monotone(
-        &mut self,
-        op: impl FnMut(ValueId) -> Instr,
-        pole: f32,
-        src: ValueId,
-    ) -> Value {
-        let x = self.f32(src);
-        let range = self.map_hull(x, op);
-        let has_pole = self.crosses(x, pole, PI);
-        Value::F32(self.widen_if(range, has_pole))
+    // Periodic functions monotone between consecutive poles, at `pole` modulo `period`
+    fn periodic_monotone(&mut self, x: F32Range, im: F32Range, pole: f32, period: f32) -> F32Range {
+        let has_pole = self.contains_modulo(x, pole, period);
+        self.widen_if(im, has_pole)
     }
 }
 
@@ -679,6 +909,50 @@ mod tests {
             interval(1f32.tan().recip(), 0.5f32.tan().recip()),
         );
         assert_wide(eval(&cot, &[interval(-0.5, 0.5)]));
+    }
+
+    #[test]
+    fn select() {
+        // f = if x < y { x } else { y }
+        let mut b = Tape::builder(vec![Type::F32; 2], vec![Type::F32]);
+        let (x, y) = (b.arg(0), b.arg(1));
+        let lt = b.instr(Instr::F32Lt(x, y));
+        b.instr(Instr::F32Sel(lt, x, y));
+        let tape = b.build().unwrap();
+
+        // The condition is decided when the ranges are disjoint.
+        assert_eq!(
+            eval(&tape, &[interval(0.0, 1.0), interval(2.0, 3.0)]),
+            interval(0.0, 1.0)
+        );
+        assert_eq!(
+            eval(&tape, &[interval(4.0, 5.0), interval(2.0, 3.0)]),
+            interval(2.0, 3.0)
+        );
+
+        // Overlapping ranges leave it undecided, so the branches merge.
+        assert_eq!(
+            eval(&tape, &[interval(0.0, 3.0), interval(2.0, 5.0)]),
+            interval(0.0, 5.0)
+        );
+    }
+
+    #[test]
+    fn definite_conditions() {
+        // f = x * float(if 1 < 2 { 3 } else { 4 })
+        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let x = b.arg(0);
+        let one = b.instr(Instr::I32Const(1));
+        let two = b.instr(Instr::I32Const(2));
+        let lt = b.instr(Instr::I32Lt(one, two));
+        let three = b.instr(Instr::I32Const(3));
+        let four = b.instr(Instr::I32Const(4));
+        let sel = b.instr(Instr::I32Sel(lt, three, four));
+        let scale = b.instr(Instr::F32FromI32(sel));
+        b.instr(Instr::F32Mul(x, scale));
+        let tape = b.build().unwrap();
+
+        assert_eq!(eval(&tape, &[interval(-1.0, 2.0)]), interval(-3.0, 6.0));
     }
 
     #[test]

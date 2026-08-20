@@ -2,6 +2,7 @@
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub(crate) enum Type {
     I32,
+    Bool,
     F32,
 }
 
@@ -15,22 +16,41 @@ impl ValueId {
     }
 }
 
+// Some instructions are not emitted by the frontend yet, only consumed by the backends.
+#[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
 pub(crate) enum Instr {
     // Constants
     I32Const(i32),
+    BoolConst(bool),
     F32Const(f32),
+
+    // Identity copy of any value
+    Copy(ValueId),
 
     // Basic `i32` operations
     I32Add(ValueId, ValueId),
     I32Sub(ValueId, ValueId),
     I32Mul(ValueId, ValueId),
 
-    // Identity copy of any value
-    Copy(ValueId),
+    // `i32` comparison operations
+    I32Eq(ValueId, ValueId),
+    I32Ne(ValueId, ValueId),
+    I32Lt(ValueId, ValueId),
+    I32Le(ValueId, ValueId),
+    I32Gt(ValueId, ValueId),
+    I32Ge(ValueId, ValueId),
+
+    // Basic `bool` operations
+    Not(ValueId),
+    And(ValueId, ValueId),
+    Or(ValueId, ValueId),
+    Xor(ValueId, ValueId),
 
     // Conversions
+    I32FromBool(ValueId),
     F32FromI32(ValueId),
+    F32FromBool(ValueId),
 
     // Basic `f32` operations
     F32Neg(ValueId),
@@ -54,6 +74,18 @@ pub(crate) enum Instr {
     F32Cos(ValueId),
     F32Tan(ValueId),
     F32Cot(ValueId),
+
+    // `f32` comparison operations
+    F32Eq(ValueId, ValueId),
+    F32Ne(ValueId, ValueId),
+    F32Lt(ValueId, ValueId),
+    F32Le(ValueId, ValueId),
+    F32Gt(ValueId, ValueId),
+    F32Ge(ValueId, ValueId),
+
+    // Branchless select (cond, v_true, v_false)
+    I32Sel(ValueId, ValueId, ValueId),
+    F32Sel(ValueId, ValueId, ValueId),
 }
 
 impl Instr {
@@ -61,12 +93,35 @@ impl Instr {
         match self {
             Instr::Copy(src) => values[src.index()],
 
-            Instr::I32Const(_) | Instr::I32Add(..) | Instr::I32Sub(..) | Instr::I32Mul(..) => {
-                Type::I32
-            }
+            Instr::I32Const(_)
+            | Instr::I32Add(..)
+            | Instr::I32Sub(..)
+            | Instr::I32Mul(..)
+            | Instr::I32FromBool(_)
+            | Instr::I32Sel(..) => Type::I32,
+
+            Instr::BoolConst(_)
+            | Instr::I32Eq(..)
+            | Instr::I32Ne(..)
+            | Instr::I32Lt(..)
+            | Instr::I32Le(..)
+            | Instr::I32Gt(..)
+            | Instr::I32Ge(..)
+            | Instr::Not(_)
+            | Instr::And(..)
+            | Instr::Or(..)
+            | Instr::Xor(..)
+            | Instr::F32Eq(..)
+            | Instr::F32Ne(..)
+            | Instr::F32Lt(..)
+            | Instr::F32Le(..)
+            | Instr::F32Gt(..)
+            | Instr::F32Ge(..) => Type::Bool,
 
             Instr::F32Const(_)
             | Instr::F32FromI32(_)
+            | Instr::F32FromBool(_)
+            | Instr::F32Sel(..)
             | Instr::F32Neg(_)
             | Instr::F32Abs(_)
             | Instr::F32Sign(_)
@@ -197,17 +252,32 @@ impl TapeBuilder {
             };
 
             match instr {
-                Instr::I32Const(_) | Instr::F32Const(_) => {}
+                Instr::I32Const(_) | Instr::BoolConst(_) | Instr::F32Const(_) => {}
                 Instr::Copy(src) => {
                     if src.0 as usize >= cur_dst {
                         return Err(ValidateError(()));
                     }
                 }
-                Instr::I32Add(lhs, rhs) | Instr::I32Sub(lhs, rhs) | Instr::I32Mul(lhs, rhs) => {
+                Instr::I32Add(lhs, rhs)
+                | Instr::I32Sub(lhs, rhs)
+                | Instr::I32Mul(lhs, rhs)
+                | Instr::I32Eq(lhs, rhs)
+                | Instr::I32Ne(lhs, rhs)
+                | Instr::I32Lt(lhs, rhs)
+                | Instr::I32Le(lhs, rhs)
+                | Instr::I32Gt(lhs, rhs)
+                | Instr::I32Ge(lhs, rhs) => {
                     check(lhs, Type::I32)?;
                     check(rhs, Type::I32)?;
                 }
 
+                Instr::Not(src) => check(src, Type::Bool)?,
+                Instr::And(lhs, rhs) | Instr::Or(lhs, rhs) | Instr::Xor(lhs, rhs) => {
+                    check(lhs, Type::Bool)?;
+                    check(rhs, Type::Bool)?;
+                }
+
+                Instr::I32FromBool(src) | Instr::F32FromBool(src) => check(src, Type::Bool)?,
                 Instr::F32FromI32(src) => check(src, Type::I32)?,
                 Instr::F32Neg(src)
                 | Instr::F32Abs(src)
@@ -227,7 +297,13 @@ impl TapeBuilder {
                 | Instr::F32Div(lhs, rhs)
                 | Instr::F32Min(lhs, rhs)
                 | Instr::F32Max(lhs, rhs)
-                | Instr::F32Powf(lhs, rhs) => {
+                | Instr::F32Powf(lhs, rhs)
+                | Instr::F32Eq(lhs, rhs)
+                | Instr::F32Ne(lhs, rhs)
+                | Instr::F32Lt(lhs, rhs)
+                | Instr::F32Le(lhs, rhs)
+                | Instr::F32Gt(lhs, rhs)
+                | Instr::F32Ge(lhs, rhs) => {
                     check(lhs, Type::F32)?;
                     check(rhs, Type::F32)?;
                 }
@@ -235,6 +311,18 @@ impl TapeBuilder {
                 Instr::F32Powi(lhs, rhs) => {
                     check(lhs, Type::F32)?;
                     check(rhs, Type::I32)?;
+                }
+
+                Instr::I32Sel(cond, v_true, v_false) => {
+                    check(cond, Type::Bool)?;
+                    check(v_true, Type::I32)?;
+                    check(v_false, Type::I32)?;
+                }
+
+                Instr::F32Sel(cond, v_true, v_false) => {
+                    check(cond, Type::Bool)?;
+                    check(v_true, Type::F32)?;
+                    check(v_false, Type::F32)?;
                 }
             }
         }

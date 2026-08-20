@@ -56,17 +56,33 @@ impl Evaluator {
 
         for (i, instr) in self.tape.instrs().iter().enumerate() {
             let v_i32 = |id: ValueId| buf[id.index()].as_i32();
+            let v_bool = |id: ValueId| buf[id.index()].as_bool();
             let v_f32 = |id: ValueId| buf[id.index()].as_f32();
 
             let result = match *instr {
                 Instr::I32Const(value) => RawValue::from_i32(value),
+                Instr::BoolConst(value) => RawValue::from_bool(value),
                 Instr::F32Const(value) => RawValue::from_f32(value),
 
                 Instr::I32Add(lhs, rhs) => RawValue::from_i32(v_i32(lhs).wrapping_add(v_i32(rhs))),
                 Instr::I32Sub(lhs, rhs) => RawValue::from_i32(v_i32(lhs).wrapping_sub(v_i32(rhs))),
                 Instr::I32Mul(lhs, rhs) => RawValue::from_i32(v_i32(lhs).wrapping_mul(v_i32(rhs))),
 
+                Instr::I32Eq(lhs, rhs) => RawValue::from_bool(v_i32(lhs) == v_i32(rhs)),
+                Instr::I32Ne(lhs, rhs) => RawValue::from_bool(v_i32(lhs) != v_i32(rhs)),
+                Instr::I32Lt(lhs, rhs) => RawValue::from_bool(v_i32(lhs) < v_i32(rhs)),
+                Instr::I32Le(lhs, rhs) => RawValue::from_bool(v_i32(lhs) <= v_i32(rhs)),
+                Instr::I32Gt(lhs, rhs) => RawValue::from_bool(v_i32(lhs) > v_i32(rhs)),
+                Instr::I32Ge(lhs, rhs) => RawValue::from_bool(v_i32(lhs) >= v_i32(rhs)),
+
+                Instr::Not(src) => RawValue::from_bool(!v_bool(src)),
+                Instr::And(lhs, rhs) => RawValue::from_bool(v_bool(lhs) & v_bool(rhs)),
+                Instr::Or(lhs, rhs) => RawValue::from_bool(v_bool(lhs) | v_bool(rhs)),
+                Instr::Xor(lhs, rhs) => RawValue::from_bool(v_bool(lhs) ^ v_bool(rhs)),
+
+                Instr::I32FromBool(src) => RawValue::from_i32(v_bool(src) as i32),
                 Instr::F32FromI32(src) => RawValue::from_f32(v_i32(src) as f32),
+                Instr::F32FromBool(src) => RawValue::from_f32(v_bool(src) as i32 as f32),
 
                 Instr::Copy(src) => buf[src.index()],
 
@@ -90,6 +106,17 @@ impl Evaluator {
                 Instr::F32Cos(src) => RawValue::from_f32(v_f32(src).cos()),
                 Instr::F32Tan(src) => RawValue::from_f32(v_f32(src).tan()),
                 Instr::F32Cot(src) => RawValue::from_f32(v_f32(src).tan().recip()),
+
+                Instr::F32Eq(lhs, rhs) => RawValue::from_bool(v_f32(lhs) == v_f32(rhs)),
+                Instr::F32Ne(lhs, rhs) => RawValue::from_bool(v_f32(lhs) != v_f32(rhs)),
+                Instr::F32Lt(lhs, rhs) => RawValue::from_bool(v_f32(lhs) < v_f32(rhs)),
+                Instr::F32Le(lhs, rhs) => RawValue::from_bool(v_f32(lhs) <= v_f32(rhs)),
+                Instr::F32Gt(lhs, rhs) => RawValue::from_bool(v_f32(lhs) > v_f32(rhs)),
+                Instr::F32Ge(lhs, rhs) => RawValue::from_bool(v_f32(lhs) >= v_f32(rhs)),
+
+                Instr::I32Sel(cond, v_true, v_false) | Instr::F32Sel(cond, v_true, v_false) => {
+                    buf[if v_bool(cond) { v_true } else { v_false }.index()]
+                }
             };
 
             buf[num_args + i] = result;
@@ -200,6 +227,50 @@ mod tests {
         assert_eq!(eval(&evaluator, &[2.0]), 1.0);
         assert_eq!(eval(&evaluator, &[0.0]), 1.0);
         assert_eq!(eval(&evaluator, &[-0.0]), -1.0);
+    }
+
+    #[test]
+    fn f32_select() {
+        // f = if 0 < x && x < y { x } else { y }
+        let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
+        let x = b.arg(0);
+        let y = b.arg(1);
+        let zero = b.instr(Instr::F32Const(0.0));
+        let lt = b.instr(Instr::F32Lt(x, y));
+        let pos = b.instr(Instr::F32Gt(x, zero));
+        let both = b.instr(Instr::And(lt, pos));
+        b.instr(Instr::F32Sel(both, x, y));
+        let tape = b.build().unwrap();
+        let evaluator = Fallback::new(tape).evaluator();
+
+        assert_eq!(eval(&evaluator, &[1.0, 2.0]), 1.0);
+        assert_eq!(eval(&evaluator, &[-1.0, 2.0]), 2.0);
+        assert_eq!(eval(&evaluator, &[3.0, 2.0]), 2.0);
+    }
+
+    #[test]
+    fn bool_i32_ops() {
+        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let x = b.arg(0);
+        let two = b.instr(Instr::I32Const(2));
+        let three = b.instr(Instr::I32Const(3));
+        let lt = b.instr(Instr::I32Lt(two, three)); // true
+        let ge = b.instr(Instr::I32Ge(two, three)); // false
+        let yes = b.instr(Instr::BoolConst(true));
+        let xor = b.instr(Instr::Xor(lt, yes)); // false
+        let any = b.instr(Instr::Or(xor, ge)); // false
+        let not = b.instr(Instr::Not(any)); // true
+        let sel = b.instr(Instr::I32Sel(not, two, three)); // 2
+        let bump = b.instr(Instr::I32FromBool(lt)); // 1
+        let sum = b.instr(Instr::I32Add(sel, bump)); // 3
+        let sum = b.instr(Instr::F32FromI32(sum));
+        let one = b.instr(Instr::F32FromBool(not)); // 1.0
+        let sum = b.instr(Instr::F32Add(sum, one)); // 4.0
+        b.instr(Instr::F32Add(sum, x));
+        let tape = b.build().unwrap();
+        let evaluator = Fallback::new(tape).evaluator();
+
+        assert_eq!(eval(&evaluator, &[0.5]), 4.5);
     }
 
     #[test]

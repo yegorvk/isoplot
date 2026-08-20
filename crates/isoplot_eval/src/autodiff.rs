@@ -122,13 +122,33 @@ impl<'a> Autodiff<'a> {
     fn propagate(&mut self, instr: Instr, w: ValueId, w_bar: ValueId) {
         match instr {
             Instr::I32Const(_)
+            | Instr::BoolConst(_)
             | Instr::F32Const(_)
             | Instr::I32Add(..)
             | Instr::I32Sub(..)
             | Instr::I32Mul(..)
+            | Instr::I32Eq(..)
+            | Instr::I32Ne(..)
+            | Instr::I32Lt(..)
+            | Instr::I32Le(..)
+            | Instr::I32Gt(..)
+            | Instr::I32Ge(..)
+            | Instr::Not(_)
+            | Instr::And(..)
+            | Instr::Or(..)
+            | Instr::Xor(..)
+            | Instr::I32FromBool(_)
             | Instr::F32FromI32(_)
+            | Instr::F32FromBool(_)
             | Instr::F32Sign(_)
-            | Instr::F32Floor(_) => {}
+            | Instr::F32Floor(_)
+            | Instr::F32Eq(..)
+            | Instr::F32Ne(..)
+            | Instr::F32Lt(..)
+            | Instr::F32Le(..)
+            | Instr::F32Gt(..)
+            | Instr::F32Ge(..)
+            | Instr::I32Sel(..) => {}
 
             Instr::Copy(src) => self.acc(src, w_bar),
 
@@ -254,6 +274,14 @@ impl<'a> Autodiff<'a> {
                 let m = self.builder.instr(Instr::F32Mul(w_bar, t));
                 let c = self.builder.instr(Instr::F32Neg(m));
                 self.acc(src, c);
+            }
+
+            Instr::F32Sel(cond, v_true, v_false) => {
+                let zero = self.c_f32(0.0);
+                let c_t = self.builder.instr(Instr::F32Sel(cond, w_bar, zero));
+                self.acc(v_true, c_t);
+                let c_f = self.builder.instr(Instr::F32Sel(cond, zero, w_bar));
+                self.acc(v_false, c_f);
             }
         }
     }
@@ -388,6 +416,21 @@ mod tests {
 
         // must be finite everywhere
         assert_eq!(gradient(&tape, &[0.0]), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn select_gradient() {
+        // f = if x < 2 { x*x } else { x }
+        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let x = b.arg(0);
+        let two = b.instr(Instr::F32Const(2.0));
+        let lt = b.instr(Instr::F32Lt(x, two));
+        let sq = b.instr(Instr::F32Mul(x, x));
+        b.instr(Instr::F32Sel(lt, sq, x));
+        let tape = b.build().unwrap();
+
+        assert_eq!(gradient(&tape, &[1.0]), [1.0, 2.0]);
+        assert_eq!(gradient(&tape, &[3.0]), [3.0, 1.0]);
     }
 
     #[test]

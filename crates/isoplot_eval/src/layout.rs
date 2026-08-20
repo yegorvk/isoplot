@@ -53,6 +53,10 @@ impl RawValue {
         Self(value as u32)
     }
 
+    pub(crate) const fn from_bool(value: bool) -> Self {
+        Self(value as u32)
+    }
+
     pub(crate) const fn from_f32(value: f32) -> Self {
         Self(value.to_bits())
     }
@@ -61,21 +65,25 @@ impl RawValue {
         self.0 as i32
     }
 
+    pub(crate) const fn as_bool(self) -> bool {
+        self.0 != 0
+    }
+
     pub(crate) const fn as_f32(self) -> f32 {
         f32::from_bits(self.0)
     }
 }
 
 /// Types that can be safely transmuted into `RawValue`.
-trait IntoValue: Pod + Zeroable {
+trait TransmuteIntoValue: Pod + Zeroable {
     const TYPE: ValueType;
 }
 
-impl IntoValue for i32 {
+impl TransmuteIntoValue for i32 {
     const TYPE: ValueType = ValueType::I32;
 }
 
-impl IntoValue for f32 {
+impl TransmuteIntoValue for f32 {
     const TYPE: ValueType = ValueType::F32;
 }
 
@@ -97,7 +105,7 @@ pub(crate) use private::Vector;
 pub trait Layout: Vector {}
 impl<T: Vector> Layout for T {}
 
-impl<T: IntoValue> Vector for T {
+impl<T: TransmuteIntoValue> Vector for T {
     type Scalar = T;
     const LEN: usize = 1;
 

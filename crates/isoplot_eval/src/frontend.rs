@@ -58,13 +58,6 @@ impl fmt::Display for ValidateError {
 
 impl Error for ValidateError {}
 
-//     if let Err(error) = parsed.validate(desc.bindings()) {
-//         diagnostics.extend(error.diagnostics);
-//     }
-
-//     (parsed, diagnostics)
-// }
-
 pub(crate) fn parse(source: &str) -> (Parsed, Vec<Diagnostic>) {
     let mut interner = Interner::default();
     let mut diagnostics = Vec::new();
@@ -133,6 +126,7 @@ impl Validated<'_> {
 
         let root = match root_ty {
             Type::I32 => builder.instr(Instr::F32FromI32(root)),
+            Type::Bool => unreachable!(),
             Type::F32 => root,
         };
 
@@ -282,6 +276,7 @@ impl Generator<'_> {
     fn promote(&mut self, (value, ty): (ValueId, Type)) -> ValueId {
         match ty {
             Type::I32 => self.builder.instr(Instr::F32FromI32(value)),
+            Type::Bool => unreachable!(),
             Type::F32 => value,
         }
     }
@@ -301,6 +296,7 @@ impl Visitor for Generator<'_> {
                     let zero = self.builder.instr(Instr::I32Const(0));
                     self.builder.instr(Instr::I32Sub(zero, operand.0))
                 }
+                Type::Bool => unreachable!(),
                 Type::F32 => {
                     let operand = self.promote(operand);
                     self.builder.instr(Instr::F32Neg(operand))
@@ -326,10 +322,11 @@ impl Visitor for Generator<'_> {
 
             (BinOp::Pow, Type::F32) => match rhs.1 {
                 Type::I32 => Instr::F32Powi(self.promote(lhs), rhs.0),
+                Type::Bool => unreachable!(),
                 Type::F32 => Instr::F32Powf(self.promote(lhs), rhs.0),
             },
 
-            (BinOp::Div | BinOp::Pow, Type::I32) => unreachable!(),
+            (BinOp::Div | BinOp::Pow, Type::I32) | (_, Type::Bool) => unreachable!(),
         };
 
         (self.builder.instr(instr), ty)
@@ -372,6 +369,7 @@ impl Visitor for Generator<'_> {
                 let value = self.consts[index.0 as usize].value();
                 self.builder.instr(match ty {
                     Type::I32 => Instr::I32Const(value.as_i32()),
+                    Type::Bool => unreachable!(),
                     Type::F32 => Instr::F32Const(value.as_f32()),
                 })
             }
