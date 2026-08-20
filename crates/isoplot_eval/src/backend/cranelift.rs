@@ -77,7 +77,7 @@ fn compile(tape: &Tape, multi: bool) -> (JITModule, *const u8) {
     let func_id = declare_eval(&mut module, &mut ctx.func.signature, multi);
 
     Translator {
-        b: FunctionBuilder::new(&mut ctx.func, &mut FunctionBuilderContext::new()),
+        builder: FunctionBuilder::new(&mut ctx.func, &mut FunctionBuilderContext::new()),
         module: &mut module,
         lib_funcs,
     }
@@ -184,24 +184,24 @@ fn declare_eval(module: &mut JITModule, sig: &mut Signature, multi: bool) -> Fun
 }
 
 struct Translator<'a> {
-    b: FunctionBuilder<'a>,
+    builder: FunctionBuilder<'a>,
     module: &'a mut JITModule,
     lib_funcs: LibFuncMap,
 }
 
 impl Translator<'_> {
     fn translate(mut self, tape: &Tape, multi: bool) {
-        let block = self.b.create_block();
-        self.b.append_block_params_for_function_params(block);
-        self.b.switch_to_block(block);
-        self.b.seal_block(block);
-        let base = self.b.block_params(block)[0];
+        let block = self.builder.create_block();
+        self.builder.append_block_params_for_function_params(block);
+        self.builder.switch_to_block(block);
+        self.builder.seal_block(block);
+        let base = self.builder.block_params(block)[0];
 
         let mut values = Vec::with_capacity(tape.num_args() + tape.instrs().len());
         for i in 0..tape.num_args() {
             let offset = i32::try_from(4 * i).unwrap();
             values.push(
-                self.b
+                self.builder
                     .ins()
                     .load(types::F32, MemFlagsData::trusted(), base, offset),
             );
@@ -213,52 +213,53 @@ impl Translator<'_> {
         }
 
         if multi {
-            let out = self.b.block_params(block)[1];
+            let out = self.builder.block_params(block)[1];
             let results = &values[values.len() - tape.num_results()..];
             for (i, &result) in results.iter().enumerate() {
                 let offset = i32::try_from(4 * i).unwrap();
-                self.b
+                self.builder
                     .ins()
                     .store(MemFlagsData::trusted(), result, out, offset);
             }
-            self.b.ins().return_(&[]);
+            self.builder.ins().return_(&[]);
         } else {
             let result = *values.last().unwrap();
-            self.b.ins().return_(&[result]);
+            self.builder.ins().return_(&[result]);
         }
 
         let config = self.module.target_config();
-        self.b.finalize(config);
+        self.builder.finalize(config);
     }
 
     fn translate_instr(&mut self, instr: Instr, values: &[Value]) -> Value {
         let v = |id: ValueId| values[id.index()];
 
         match instr {
-            Instr::I32Const(c) => self.b.ins().iconst(types::I32, c as i64),
-            Instr::F32Const(c) => self.b.ins().f32const(c),
+            Instr::I32Const(c) => self.builder.ins().iconst(types::I32, c as i64),
+            Instr::F32Const(c) => self.builder.ins().f32const(c),
 
-            Instr::I32Add(lhs, rhs) => self.b.ins().iadd(v(lhs), v(rhs)),
-            Instr::I32Sub(lhs, rhs) => self.b.ins().isub(v(lhs), v(rhs)),
-            Instr::I32Mul(lhs, rhs) => self.b.ins().imul(v(lhs), v(rhs)),
+            Instr::I32Add(lhs, rhs) => self.builder.ins().iadd(v(lhs), v(rhs)),
+            Instr::I32Sub(lhs, rhs) => self.builder.ins().isub(v(lhs), v(rhs)),
+            Instr::I32Mul(lhs, rhs) => self.builder.ins().imul(v(lhs), v(rhs)),
 
-            Instr::F32FromI32(src) => self.b.ins().fcvt_from_sint(types::F32, v(src)),
+            Instr::F32FromI32(src) => self.builder.ins().fcvt_from_sint(types::F32, v(src)),
 
             Instr::Copy(src) => v(src),
 
-            Instr::F32Neg(src) => self.b.ins().fneg(v(src)),
-            Instr::F32Abs(src) => self.b.ins().fabs(v(src)),
+            Instr::F32Neg(src) => self.builder.ins().fneg(v(src)),
+            Instr::F32Abs(src) => self.builder.ins().fabs(v(src)),
             Instr::F32Sign(src) => {
-                let one = self.b.ins().f32const(1.0);
-                self.b.ins().fcopysign(one, v(src))
+                let one = self.builder.ins().f32const(1.0);
+                self.builder.ins().fcopysign(one, v(src))
             }
-            Instr::F32Add(lhs, rhs) => self.b.ins().fadd(v(lhs), v(rhs)),
-            Instr::F32Sub(lhs, rhs) => self.b.ins().fsub(v(lhs), v(rhs)),
-            Instr::F32Mul(lhs, rhs) => self.b.ins().fmul(v(lhs), v(rhs)),
-            Instr::F32Div(lhs, rhs) => self.b.ins().fdiv(v(lhs), v(rhs)),
+            Instr::F32Floor(src) => self.builder.ins().floor(v(src)),
+            Instr::F32Add(lhs, rhs) => self.builder.ins().fadd(v(lhs), v(rhs)),
+            Instr::F32Sub(lhs, rhs) => self.builder.ins().fsub(v(lhs), v(rhs)),
+            Instr::F32Mul(lhs, rhs) => self.builder.ins().fmul(v(lhs), v(rhs)),
+            Instr::F32Div(lhs, rhs) => self.builder.ins().fdiv(v(lhs), v(rhs)),
 
-            Instr::F32Min(lhs, rhs) => self.b.ins().fmin(v(lhs), v(rhs)),
-            Instr::F32Max(lhs, rhs) => self.b.ins().fmax(v(lhs), v(rhs)),
+            Instr::F32Min(lhs, rhs) => self.builder.ins().fmin(v(lhs), v(rhs)),
+            Instr::F32Max(lhs, rhs) => self.builder.ins().fmax(v(lhs), v(rhs)),
 
             Instr::F32Powf(lhs, rhs) => self.call("powf", &[v(lhs), v(rhs)]),
             Instr::F32Powi(lhs, rhs) => self.call("powi", &[v(lhs), v(rhs)]),
@@ -275,11 +276,11 @@ impl Translator<'_> {
 
     fn call(&mut self, name: &'static str, args: &[Value]) -> Value {
         let (id, func_ref) = self.lib_funcs.get_mut(name).unwrap();
-        let func_ref =
-            *func_ref.get_or_insert_with(|| self.module.declare_func_in_func(*id, self.b.func));
+        let func_ref = *func_ref
+            .get_or_insert_with(|| self.module.declare_func_in_func(*id, self.builder.func));
 
-        let inst = self.b.ins().call(func_ref, args);
-        self.b.inst_results(inst)[0]
+        let inst = self.builder.ins().call(func_ref, args);
+        self.builder.inst_results(inst)[0]
     }
 }
 
@@ -384,6 +385,19 @@ mod tests {
         assert_eq!(eval(&inst, &[2.0]), 1.0);
         assert_eq!(eval(&inst, &[0.0]), 1.0);
         assert_eq!(eval(&inst, &[-0.0]), -1.0);
+    }
+
+    #[test]
+    fn f32_floor() {
+        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let x = b.arg(0);
+        b.instr(Instr::F32Floor(x));
+        let tape = b.build().unwrap();
+        let inst = Instance::<f32>::new(&tape);
+
+        assert_eq!(eval(&inst, &[2.7]), 2.0);
+        assert_eq!(eval(&inst, &[-2.3]), -3.0);
+        assert_eq!(eval(&inst, &[4.0]), 4.0);
     }
 
     #[test]

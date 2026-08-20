@@ -15,7 +15,8 @@ use crate::{
 
 #[derive(Copy, Clone, Debug)]
 pub(super) struct Corners {
-    p_mask: u8,
+    sign_mask: u8,
+    nan_mask: u8,
 }
 
 impl Corners {
@@ -23,24 +24,37 @@ impl Corners {
     where
         F: FnMut(Corner) -> f32,
     {
-        let p_mask = Offset::enumerate().fold(0, |mask, offset| {
-            if f(Corner::new(offset)).is_sign_positive() {
-                mask | (1u8 << offset.as_u8())
-            } else {
-                mask
-            }
-        });
+        let (mut sign_mask, mut nan_mask) = (0u8, 0u8);
 
-        Self { p_mask }
+        for offset in Offset::enumerate() {
+            let value = f(Corner::new(offset));
+            let bit = 1u8 << offset.as_u8();
+
+            if value.is_nan() {
+                nan_mask |= bit;
+            } else if value.is_sign_positive() {
+                sign_mask |= bit;
+            }
+        }
+
+        Self {
+            sign_mask,
+            nan_mask,
+        }
     }
 
     pub(crate) fn contains_sign_change(&self, edge: (Corner, Corner)) -> bool {
         let (a, b) = edge;
-        self.is_sign_positive(a) != self.is_sign_positive(b)
+        (self.is_defined(a) && self.is_defined(b))
+            && (self.is_sign_positive(a) != self.is_sign_positive(b))
     }
 
-    pub(super) fn is_sign_positive(&self, corner: Corner) -> bool {
-        self.p_mask & (1u8 << corner.offset().as_u8()) != 0
+    fn is_sign_positive(&self, corner: Corner) -> bool {
+        self.sign_mask & (1u8 << corner.offset().as_u8()) != 0
+    }
+
+    fn is_defined(&self, corner: Corner) -> bool {
+        self.nan_mask & (1u8 << corner.offset().as_u8()) == 0
     }
 }
 

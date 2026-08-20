@@ -127,7 +127,8 @@ impl<'a> Autodiff<'a> {
             | Instr::I32Sub(..)
             | Instr::I32Mul(..)
             | Instr::F32FromI32(_)
-            | Instr::F32Sign(_) => {}
+            | Instr::F32Sign(_)
+            | Instr::F32Floor(_) => {}
 
             Instr::Copy(src) => self.acc(src, w_bar),
 

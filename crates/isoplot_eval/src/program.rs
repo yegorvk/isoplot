@@ -87,11 +87,13 @@ impl<Args: Layout, Ret: Layout> Program<Args, Ret> {
             vector_types::<Args>(),
             "argument layout does not match the program"
         );
+
         assert_eq!(
             tape.result_types(),
             vector_types::<Ret>(),
             "result layout does not match the program"
         );
+
         Self {
             tape,
             _marker: PhantomData,

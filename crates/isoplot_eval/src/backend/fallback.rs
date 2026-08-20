@@ -73,6 +73,7 @@ impl Evaluator {
                 Instr::F32Neg(src) => RawValue::from_f32(-v_f32(src)),
                 Instr::F32Abs(src) => RawValue::from_f32(v_f32(src).abs()),
                 Instr::F32Sign(src) => RawValue::from_f32(1.0f32.copysign(v_f32(src))),
+                Instr::F32Floor(src) => RawValue::from_f32(v_f32(src).floor()),
                 Instr::F32Add(lhs, rhs) => RawValue::from_f32(v_f32(lhs) + v_f32(rhs)),
                 Instr::F32Sub(lhs, rhs) => RawValue::from_f32(v_f32(lhs) - v_f32(rhs)),
                 Instr::F32Mul(lhs, rhs) => RawValue::from_f32(v_f32(lhs) * v_f32(rhs)),

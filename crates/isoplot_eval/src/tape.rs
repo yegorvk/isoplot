@@ -36,6 +36,7 @@ pub(crate) enum Instr {
     F32Neg(ValueId),
     F32Abs(ValueId),
     F32Sign(ValueId),
+    F32Floor(ValueId),
     F32Add(ValueId, ValueId),
     F32Sub(ValueId, ValueId),
     F32Mul(ValueId, ValueId),
@@ -69,6 +70,7 @@ impl Instr {
             | Instr::F32Neg(_)
             | Instr::F32Abs(_)
             | Instr::F32Sign(_)
+            | Instr::F32Floor(_)
             | Instr::F32Add(..)
             | Instr::F32Sub(..)
             | Instr::F32Mul(..)
@@ -210,6 +212,7 @@ impl TapeBuilder {
                 Instr::F32Neg(src)
                 | Instr::F32Abs(src)
                 | Instr::F32Sign(src)
+                | Instr::F32Floor(src)
                 | Instr::F32Exp(src)
                 | Instr::F32Ln(src)
                 | Instr::F32Lg(src)
