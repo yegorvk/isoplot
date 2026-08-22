@@ -9,7 +9,7 @@ use std::{error::Error, fmt};
 use crate::{
     diag::Diagnostic,
     layout::{Layout, TypedValue, ValueType},
-    tape::{Instr, Tape, TapeBuilder, Type, ValueId},
+    tape::{NewId, Tape, TapeBuilder, Type},
 };
 
 use ast::{Ast, BinOp, DenseMap, ExprId, Intrinsic, SparseMap, UnOp, Value, Visitor};
@@ -122,16 +122,11 @@ impl Validated<'_> {
             builder: &mut builder,
         };
 
-        let (root, root_ty) = self.ast.fold(generator);
+        let root = self.ast.fold(generator);
+        let root = root.promote(&mut builder);
 
-        let root = match root_ty {
-            Type::I32 => builder.instr(Instr::F32FromI32(root)),
-            Type::Bool => unreachable!(),
-            Type::F32 => root,
-        };
-
-        if (0..self.arg_types.len()).any(|index| builder.arg(index) == root) {
-            builder.instr(Instr::Copy(root));
+        if root.index() < self.arg_types.len() {
+            builder.copy_f32(root);
         }
 
         builder.build().unwrap()
@@ -272,120 +267,127 @@ struct Generator<'a> {
     builder: &'a mut TapeBuilder,
 }
 
-impl Generator<'_> {
-    fn promote(&mut self, (value, ty): (ValueId, Type)) -> ValueId {
-        match ty {
-            Type::I32 => self.builder.instr(Instr::F32FromI32(value)),
-            Type::Bool => unreachable!(),
-            Type::F32 => value,
+#[derive(Copy, Clone)]
+enum Operand {
+    I32(NewId<i32>),
+    F32(NewId<f32>),
+}
+
+impl Operand {
+    fn i32(self) -> NewId<i32> {
+        match self {
+            Operand::I32(value) => value,
+            Operand::F32(_) => unreachable!("expected an i32 operand"),
+        }
+    }
+
+    fn promote(self, builder: &mut TapeBuilder) -> NewId<f32> {
+        match self {
+            Operand::I32(value) => builder.f32_from_i32(value),
+            Operand::F32(value) => value,
         }
     }
 }
 
 impl Visitor for Generator<'_> {
-    type In<'a> = (ValueId, Type);
-    type Out = (ValueId, Type);
+    type In<'a> = Operand;
+    type Out = Operand;
 
     fn un_op(&mut self, id: ExprId, op: UnOp, operand: Self::In<'_>) -> Self::Out {
-        let ty = self.ty[id];
-
-        let value = match op {
-            UnOp::Plus => operand.0,
-            UnOp::Minus => match ty {
-                Type::I32 => {
-                    let zero = self.builder.instr(Instr::I32Const(0));
-                    self.builder.instr(Instr::I32Sub(zero, operand.0))
-                }
-                Type::Bool => unreachable!(),
-                Type::F32 => {
-                    let operand = self.promote(operand);
-                    self.builder.instr(Instr::F32Neg(operand))
-                }
-            },
-        };
-
-        (value, ty)
+        match (op, self.ty[id]) {
+            (UnOp::Plus, _) => operand,
+            (UnOp::Minus, Type::I32) => {
+                let zero = self.builder.i32_const(0);
+                Operand::I32(self.builder.i32_sub(zero, operand.i32()))
+            }
+            (UnOp::Minus, Type::Bool) => unreachable!(),
+            (UnOp::Minus, Type::F32) => {
+                let operand = operand.promote(self.builder);
+                Operand::F32(self.builder.f32_neg(operand))
+            }
+        }
     }
 
     fn bin_op(&mut self, id: ExprId, op: BinOp, lhs: Self::In<'_>, rhs: Self::In<'_>) -> Self::Out {
-        let ty = self.ty[id];
+        match (op, self.ty[id]) {
+            (BinOp::Add, Type::I32) => Operand::I32(self.builder.i32_add(lhs.i32(), rhs.i32())),
+            (BinOp::Sub, Type::I32) => Operand::I32(self.builder.i32_sub(lhs.i32(), rhs.i32())),
+            (BinOp::Mul, Type::I32) => Operand::I32(self.builder.i32_mul(lhs.i32(), rhs.i32())),
 
-        let instr = match (op, ty) {
-            (BinOp::Add, Type::I32) => Instr::I32Add(lhs.0, rhs.0),
-            (BinOp::Sub, Type::I32) => Instr::I32Sub(lhs.0, rhs.0),
-            (BinOp::Mul, Type::I32) => Instr::I32Mul(lhs.0, rhs.0),
+            (BinOp::Pow, Type::F32) => {
+                let base = lhs.promote(self.builder);
+                Operand::F32(match rhs {
+                    Operand::I32(exp) => self.builder.f32_powi(base, exp),
+                    Operand::F32(exp) => self.builder.f32_powf(base, exp),
+                })
+            }
 
-            (BinOp::Add, Type::F32) => Instr::F32Add(self.promote(lhs), self.promote(rhs)),
-            (BinOp::Sub, Type::F32) => Instr::F32Sub(self.promote(lhs), self.promote(rhs)),
-            (BinOp::Mul, Type::F32) => Instr::F32Mul(self.promote(lhs), self.promote(rhs)),
-            (BinOp::Div, Type::F32) => Instr::F32Div(self.promote(lhs), self.promote(rhs)),
-
-            (BinOp::Pow, Type::F32) => match rhs.1 {
-                Type::I32 => Instr::F32Powi(self.promote(lhs), rhs.0),
-                Type::Bool => unreachable!(),
-                Type::F32 => Instr::F32Powf(self.promote(lhs), rhs.0),
-            },
+            (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, Type::F32) => {
+                let (lhs, rhs) = (lhs.promote(self.builder), rhs.promote(self.builder));
+                Operand::F32(match op {
+                    BinOp::Add => self.builder.f32_add(lhs, rhs),
+                    BinOp::Sub => self.builder.f32_sub(lhs, rhs),
+                    BinOp::Mul => self.builder.f32_mul(lhs, rhs),
+                    BinOp::Div => self.builder.f32_div(lhs, rhs),
+                    BinOp::Pow => unreachable!(),
+                })
+            }
 
             (BinOp::Div | BinOp::Pow, Type::I32) | (_, Type::Bool) => unreachable!(),
-        };
-
-        (self.builder.instr(instr), ty)
+        }
     }
 
-    fn intrinsic<'a, I>(&mut self, id: ExprId, kind: Intrinsic, mut args: I) -> Self::Out
+    fn intrinsic<'a, I>(&mut self, _id: ExprId, kind: Intrinsic, mut args: I) -> Self::Out
     where
         I: ExactSizeIterator<Item = Self::In<'a>>,
     {
-        let arg = args.next().unwrap();
-        let arg = self.promote(arg);
+        let arg = args.next().unwrap().promote(self.builder);
 
-        let instr = match kind {
-            Intrinsic::Exp => Instr::F32Exp(arg),
-            Intrinsic::Log => Instr::F32Lg(arg),
-            Intrinsic::Ln => Instr::F32Ln(arg),
-            Intrinsic::Sin => Instr::F32Sin(arg),
-            Intrinsic::Cos => Instr::F32Cos(arg),
-            Intrinsic::Tan => Instr::F32Tan(arg),
-            Intrinsic::Cot => Instr::F32Cot(arg),
-            Intrinsic::Abs => Instr::F32Abs(arg),
+        let value = match kind {
+            Intrinsic::Exp => self.builder.f32_exp(arg),
+            Intrinsic::Log => self.builder.f32_lg(arg),
+            Intrinsic::Ln => self.builder.f32_ln(arg),
+            Intrinsic::Sin => self.builder.f32_sin(arg),
+            Intrinsic::Cos => self.builder.f32_cos(arg),
+            Intrinsic::Tan => self.builder.f32_tan(arg),
+            Intrinsic::Cot => self.builder.f32_cot(arg),
+            Intrinsic::Abs => self.builder.f32_abs(arg),
             Intrinsic::Min => {
-                let rhs = args.next().unwrap();
-                let rhs = self.promote(rhs);
-                Instr::F32Min(arg, rhs)
+                let rhs = args.next().unwrap().promote(self.builder);
+                self.builder.f32_min(arg, rhs)
             }
             Intrinsic::Max => {
-                let rhs = args.next().unwrap();
-                let rhs = self.promote(rhs);
-                Instr::F32Max(arg, rhs)
+                let rhs = args.next().unwrap().promote(self.builder);
+                self.builder.f32_max(arg, rhs)
             }
         };
 
-        (self.builder.instr(instr), self.ty[id])
+        Operand::F32(value)
     }
 
     fn var(&mut self, id: ExprId, _name: Symbol) -> Self::Out {
-        let value = match *self.vars.get(id).unwrap() {
+        match *self.vars.get(id).unwrap() {
             VarSlot::Const(index, ty) => {
                 let value = self.consts[index.0 as usize].value();
-                self.builder.instr(match ty {
-                    Type::I32 => Instr::I32Const(value.as_i32()),
+                match ty {
+                    Type::I32 => Operand::I32(self.builder.i32_const(value.as_i32())),
                     Type::Bool => unreachable!(),
-                    Type::F32 => Instr::F32Const(value.as_f32()),
-                })
+                    Type::F32 => Operand::F32(self.builder.f32_const(value.as_f32())),
+                }
             }
-            VarSlot::Arg(index, _) => self.builder.arg(index.0 as usize),
-        };
-
-        (value, self.ty[id])
+            VarSlot::Arg(index, ty) => match ty {
+                Type::I32 => Operand::I32(self.builder.arg(index.0 as usize)),
+                Type::Bool => unreachable!(),
+                Type::F32 => Operand::F32(self.builder.arg(index.0 as usize)),
+            },
+        }
     }
 
-    fn lit(&mut self, id: ExprId, value: Value) -> Self::Out {
-        let instr = match value {
-            Value::I32(value) => Instr::I32Const(value),
-            Value::F32(value) => Instr::F32Const(value),
-        };
-
-        (self.builder.instr(instr), self.ty[id])
+    fn lit(&mut self, _id: ExprId, value: Value) -> Self::Out {
+        match value {
+            Value::I32(value) => Operand::I32(self.builder.i32_const(value)),
+            Value::F32(value) => Operand::F32(self.builder.f32_const(value)),
+        }
     }
 
     fn map_error(&mut self, _id: ExprId, _inner: Option<Self::In<'_>>) -> Self::Out {

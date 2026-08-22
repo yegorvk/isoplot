@@ -1,4 +1,4 @@
-use std::{collections::HashMap, marker::PhantomData, mem, sync::Arc};
+use std::{collections::HashMap, marker::PhantomData, mem, ops::Index, sync::Arc};
 
 use cranelift::codegen::ir::{
     AbiParam, FuncRef, InstBuilder, MemFlagsData, Signature, Type, Value,
@@ -13,10 +13,10 @@ use cranelift::native;
 
 use crate::{
     layout::{RawValue, Vector},
-    tape::{Instr, Tape, ValueId},
+    tape::{Instr, Tape, ValueId, ValuePrimitive},
 };
 
-type ScalarEvalFunc = extern "C" fn(*const f32) -> f32;
+type SingleEvalFunc = extern "C" fn(*const f32) -> f32;
 type MultiEvalFunc = extern "C" fn(*const f32, *mut f32);
 
 pub(super) struct Instance<Ret> {
@@ -62,7 +62,7 @@ impl<Ret: Vector> Instance<Ret> {
         debug_assert_eq!(results.len(), self.num_results);
 
         if Ret::LEN == 1 {
-            let func = unsafe { mem::transmute::<*const u8, ScalarEvalFunc>(self.code) };
+            let func = unsafe { mem::transmute::<*const u8, SingleEvalFunc>(self.code) };
             results[0] = RawValue::from_f32(func(args.as_ptr().cast()));
         } else {
             let func = unsafe { mem::transmute::<*const u8, MultiEvalFunc>(self.code) };
@@ -185,6 +185,14 @@ fn declare_eval(module: &mut JITModule, sig: &mut Signature, multi: bool) -> Fun
         .unwrap()
 }
 
+impl<T: ValuePrimitive> Index<ValueId<T>> for [Value] {
+    type Output = Value;
+
+    fn index(&self, id: ValueId<T>) -> &Value {
+        &self[id.index()]
+    }
+}
+
 struct Translator<'a> {
     builder: FunctionBuilder<'a>,
     module: &'a mut JITModule,
@@ -209,8 +217,8 @@ impl Translator<'_> {
             );
         }
 
-        for &instr in tape.instrs() {
-            let result = self.translate_instr(instr, &values);
+        for r in tape.instrs() {
+            let result = self.translate_instr(r.instr(), &values);
             values.push(result);
         }
 
@@ -234,100 +242,128 @@ impl Translator<'_> {
     }
 
     fn translate_instr(&mut self, instr: Instr, values: &[Value]) -> Value {
-        let v = |id: ValueId| values[id.index()];
-
         match instr {
             Instr::I32Const(c) => self.builder.ins().iconst(types::I32, c as i64),
             Instr::BoolConst(c) => self.builder.ins().iconst(types::I8, c as i64),
             Instr::F32Const(c) => self.builder.ins().f32const(c),
 
-            Instr::I32Add(lhs, rhs) => self.builder.ins().iadd(v(lhs), v(rhs)),
-            Instr::I32Sub(lhs, rhs) => self.builder.ins().isub(v(lhs), v(rhs)),
-            Instr::I32Mul(lhs, rhs) => self.builder.ins().imul(v(lhs), v(rhs)),
+            Instr::I32Add(lhs, rhs) => self.builder.ins().iadd(values[lhs], values[rhs]),
+            Instr::I32Sub(lhs, rhs) => self.builder.ins().isub(values[lhs], values[rhs]),
+            Instr::I32Mul(lhs, rhs) => self.builder.ins().imul(values[lhs], values[rhs]),
 
-            Instr::I32Eq(lhs, rhs) => self.builder.ins().icmp(IntCC::Equal, v(lhs), v(rhs)),
-            Instr::I32Ne(lhs, rhs) => self.builder.ins().icmp(IntCC::NotEqual, v(lhs), v(rhs)),
+            Instr::I32Eq(lhs, rhs) => {
+                self.builder
+                    .ins()
+                    .icmp(IntCC::Equal, values[lhs], values[rhs])
+            }
+            Instr::I32Ne(lhs, rhs) => {
+                self.builder
+                    .ins()
+                    .icmp(IntCC::NotEqual, values[lhs], values[rhs])
+            }
             Instr::I32Lt(lhs, rhs) => {
                 self.builder
                     .ins()
-                    .icmp(IntCC::SignedLessThan, v(lhs), v(rhs))
+                    .icmp(IntCC::SignedLessThan, values[lhs], values[rhs])
             }
             Instr::I32Le(lhs, rhs) => {
                 self.builder
                     .ins()
-                    .icmp(IntCC::SignedLessThanOrEqual, v(lhs), v(rhs))
+                    .icmp(IntCC::SignedLessThanOrEqual, values[lhs], values[rhs])
             }
             Instr::I32Gt(lhs, rhs) => {
                 self.builder
                     .ins()
-                    .icmp(IntCC::SignedGreaterThan, v(lhs), v(rhs))
+                    .icmp(IntCC::SignedGreaterThan, values[lhs], values[rhs])
             }
             Instr::I32Ge(lhs, rhs) => {
                 self.builder
                     .ins()
-                    .icmp(IntCC::SignedGreaterThanOrEqual, v(lhs), v(rhs))
+                    .icmp(IntCC::SignedGreaterThanOrEqual, values[lhs], values[rhs])
             }
 
-            Instr::Not(src) => self.builder.ins().icmp_imm_u(IntCC::Equal, v(src), 0),
-            Instr::And(lhs, rhs) => self.builder.ins().band(v(lhs), v(rhs)),
-            Instr::Or(lhs, rhs) => self.builder.ins().bor(v(lhs), v(rhs)),
-            Instr::Xor(lhs, rhs) => self.builder.ins().bxor(v(lhs), v(rhs)),
+            Instr::Not(src) => self.builder.ins().icmp_imm_u(IntCC::Equal, values[src], 0),
+            Instr::And(lhs, rhs) => self.builder.ins().band(values[lhs], values[rhs]),
+            Instr::Or(lhs, rhs) => self.builder.ins().bor(values[lhs], values[rhs]),
+            Instr::Xor(lhs, rhs) => self.builder.ins().bxor(values[lhs], values[rhs]),
 
-            Instr::I32FromBool(src) => self.builder.ins().uextend(types::I32, v(src)),
-            Instr::F32FromI32(src) => self.builder.ins().fcvt_from_sint(types::F32, v(src)),
+            Instr::I32FromBool(src) => self.builder.ins().uextend(types::I32, values[src]),
+            Instr::F32FromI32(src) => self.builder.ins().fcvt_from_sint(types::F32, values[src]),
             Instr::F32FromBool(src) => {
-                let int = self.builder.ins().uextend(types::I32, v(src));
+                let int = self.builder.ins().uextend(types::I32, values[src]);
                 self.builder.ins().fcvt_from_uint(types::F32, int)
             }
 
-            Instr::Copy(src) => v(src),
+            Instr::CopyI32(src) => values[src],
+            Instr::CopyBool(src) => values[src],
+            Instr::CopyF32(src) => values[src],
 
-            Instr::F32Neg(src) => self.builder.ins().fneg(v(src)),
-            Instr::F32Abs(src) => self.builder.ins().fabs(v(src)),
+            Instr::F32Neg(src) => self.builder.ins().fneg(values[src]),
+            Instr::F32Abs(src) => self.builder.ins().fabs(values[src]),
             Instr::F32Sign(src) => {
                 let one = self.builder.ins().f32const(1.0);
-                self.builder.ins().fcopysign(one, v(src))
+                self.builder.ins().fcopysign(one, values[src])
             }
-            Instr::F32Floor(src) => self.builder.ins().floor(v(src)),
-            Instr::F32Add(lhs, rhs) => self.builder.ins().fadd(v(lhs), v(rhs)),
-            Instr::F32Sub(lhs, rhs) => self.builder.ins().fsub(v(lhs), v(rhs)),
-            Instr::F32Mul(lhs, rhs) => self.builder.ins().fmul(v(lhs), v(rhs)),
-            Instr::F32Div(lhs, rhs) => self.builder.ins().fdiv(v(lhs), v(rhs)),
+            Instr::F32Floor(src) => self.builder.ins().floor(values[src]),
+            Instr::F32Add(lhs, rhs) => self.builder.ins().fadd(values[lhs], values[rhs]),
+            Instr::F32Sub(lhs, rhs) => self.builder.ins().fsub(values[lhs], values[rhs]),
+            Instr::F32Mul(lhs, rhs) => self.builder.ins().fmul(values[lhs], values[rhs]),
+            Instr::F32Div(lhs, rhs) => self.builder.ins().fdiv(values[lhs], values[rhs]),
 
-            Instr::F32Min(lhs, rhs) => self.builder.ins().fmin(v(lhs), v(rhs)),
-            Instr::F32Max(lhs, rhs) => self.builder.ins().fmax(v(lhs), v(rhs)),
+            Instr::F32Min(lhs, rhs) => self.builder.ins().fmin(values[lhs], values[rhs]),
+            Instr::F32Max(lhs, rhs) => self.builder.ins().fmax(values[lhs], values[rhs]),
 
-            Instr::F32Powf(lhs, rhs) => self.call("powf", &[v(lhs), v(rhs)]),
-            Instr::F32Powi(lhs, rhs) => self.call("powi", &[v(lhs), v(rhs)]),
+            Instr::F32Powf(lhs, rhs) => self.call("powf", &[values[lhs], values[rhs]]),
+            Instr::F32Powi(lhs, rhs) => self.call("powi", &[values[lhs], values[rhs]]),
 
-            Instr::F32Exp(src) => self.call("exp", &[v(src)]),
-            Instr::F32Ln(src) => self.call("ln", &[v(src)]),
-            Instr::F32Lg(src) => self.call("lg", &[v(src)]),
-            Instr::F32Sin(src) => self.call("sin", &[v(src)]),
-            Instr::F32Cos(src) => self.call("cos", &[v(src)]),
-            Instr::F32Tan(src) => self.call("tan", &[v(src)]),
-            Instr::F32Cot(src) => self.call("cot", &[v(src)]),
+            Instr::F32Exp(src) => self.call("exp", &[values[src]]),
+            Instr::F32Ln(src) => self.call("ln", &[values[src]]),
+            Instr::F32Lg(src) => self.call("lg", &[values[src]]),
+            Instr::F32Sin(src) => self.call("sin", &[values[src]]),
+            Instr::F32Cos(src) => self.call("cos", &[values[src]]),
+            Instr::F32Tan(src) => self.call("tan", &[values[src]]),
+            Instr::F32Cot(src) => self.call("cot", &[values[src]]),
 
-            Instr::F32Eq(lhs, rhs) => self.builder.ins().fcmp(FloatCC::Equal, v(lhs), v(rhs)),
-            Instr::F32Ne(lhs, rhs) => self.builder.ins().fcmp(FloatCC::NotEqual, v(lhs), v(rhs)),
-            Instr::F32Lt(lhs, rhs) => self.builder.ins().fcmp(FloatCC::LessThan, v(lhs), v(rhs)),
+            Instr::F32Eq(lhs, rhs) => {
+                self.builder
+                    .ins()
+                    .fcmp(FloatCC::Equal, values[lhs], values[rhs])
+            }
+            Instr::F32Ne(lhs, rhs) => {
+                self.builder
+                    .ins()
+                    .fcmp(FloatCC::NotEqual, values[lhs], values[rhs])
+            }
+            Instr::F32Lt(lhs, rhs) => {
+                self.builder
+                    .ins()
+                    .fcmp(FloatCC::LessThan, values[lhs], values[rhs])
+            }
             Instr::F32Le(lhs, rhs) => {
                 self.builder
                     .ins()
-                    .fcmp(FloatCC::LessThanOrEqual, v(lhs), v(rhs))
+                    .fcmp(FloatCC::LessThanOrEqual, values[lhs], values[rhs])
             }
-            Instr::F32Gt(lhs, rhs) => self
-                .builder
-                .ins()
-                .fcmp(FloatCC::GreaterThan, v(lhs), v(rhs)),
+            Instr::F32Gt(lhs, rhs) => {
+                self.builder
+                    .ins()
+                    .fcmp(FloatCC::GreaterThan, values[lhs], values[rhs])
+            }
             Instr::F32Ge(lhs, rhs) => {
                 self.builder
                     .ins()
-                    .fcmp(FloatCC::GreaterThanOrEqual, v(lhs), v(rhs))
+                    .fcmp(FloatCC::GreaterThanOrEqual, values[lhs], values[rhs])
             }
 
-            Instr::I32Sel(cond, v_true, v_false) | Instr::F32Sel(cond, v_true, v_false) => {
-                self.builder.ins().select(v(cond), v(v_true), v(v_false))
+            Instr::I32Sel(cond, v_true, v_false) => {
+                self.builder
+                    .ins()
+                    .select(values[cond], values[v_true], values[v_false])
+            }
+            Instr::F32Sel(cond, v_true, v_false) => {
+                self.builder
+                    .ins()
+                    .select(values[cond], values[v_true], values[v_false])
             }
         }
     }
@@ -358,17 +394,17 @@ mod tests {
         let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
         let x = b.arg(0);
         let y = b.arg(1);
-        let sum = b.instr(Instr::F32Add(x, y));
-        let prod = b.instr(Instr::F32Mul(sum, x));
-        let diff = b.instr(Instr::F32Sub(prod, y));
-        let quot = b.instr(Instr::F32Div(diff, y));
-        let neg = b.instr(Instr::F32Neg(quot));
-        let abs = b.instr(Instr::F32Abs(neg));
-        let abs = b.instr(Instr::Copy(abs));
-        let min = b.instr(Instr::F32Min(abs, x));
-        let max = b.instr(Instr::F32Max(min, y));
-        let c = b.instr(Instr::F32Const(0.5));
-        b.instr(Instr::F32Add(max, c));
+        let sum = b.f32_add(x, y);
+        let prod = b.f32_mul(sum, x);
+        let diff = b.f32_sub(prod, y);
+        let quot = b.f32_div(diff, y);
+        let neg = b.f32_neg(quot);
+        let abs = b.f32_abs(neg);
+        let abs = b.copy_f32(abs);
+        let min = b.f32_min(abs, x);
+        let max = b.f32_max(min, y);
+        let c = b.f32_const(0.5);
+        b.f32_add(max, c);
         let tape = b.build().unwrap();
 
         let (x, y) = (1.75f32, -0.5f32);
@@ -381,18 +417,18 @@ mod tests {
         let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
         let x = b.arg(0);
         let y = b.arg(1);
-        let sin = b.instr(Instr::F32Sin(x));
-        let cos = b.instr(Instr::F32Cos(y));
-        let tan = b.instr(Instr::F32Tan(x));
-        let cot = b.instr(Instr::F32Cot(y));
-        let exp = b.instr(Instr::F32Exp(x));
-        let ln = b.instr(Instr::F32Ln(y));
-        let lg = b.instr(Instr::F32Lg(x));
-        let pow = b.instr(Instr::F32Powf(x, y));
+        let sin = b.f32_sin(x);
+        let cos = b.f32_cos(y);
+        let tan = b.f32_tan(x);
+        let cot = b.f32_cot(y);
+        let exp = b.f32_exp(x);
+        let ln = b.f32_ln(y);
+        let lg = b.f32_lg(x);
+        let pow = b.f32_powf(x, y);
 
         let mut acc = sin;
         for v in [cos, tan, cot, exp, ln, lg, pow] {
-            acc = b.instr(Instr::F32Add(acc, v));
+            acc = b.f32_add(acc, v);
         }
 
         let tape = b.build().unwrap();
@@ -415,14 +451,14 @@ mod tests {
     fn i32_ops() {
         let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
         let x = b.arg(0);
-        let three = b.instr(Instr::I32Const(3));
-        let two = b.instr(Instr::I32Const(2));
-        let five = b.instr(Instr::I32Add(three, two));
-        let diff = b.instr(Instr::I32Sub(five, two));
-        let six = b.instr(Instr::I32Mul(diff, two));
-        let sixf = b.instr(Instr::F32FromI32(six));
-        let cube = b.instr(Instr::F32Powi(x, diff));
-        b.instr(Instr::F32Add(sixf, cube));
+        let three = b.i32_const(3);
+        let two = b.i32_const(2);
+        let five = b.i32_add(three, two);
+        let diff = b.i32_sub(five, two);
+        let six = b.i32_mul(diff, two);
+        let sixf = b.f32_from_i32(six);
+        let cube = b.f32_powi(x, diff);
+        b.f32_add(sixf, cube);
 
         let tape = b.build().unwrap();
         let inst = Instance::<f32>::new(&tape);
@@ -435,7 +471,7 @@ mod tests {
     fn f32_sign() {
         let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
         let x = b.arg(0);
-        b.instr(Instr::F32Sign(x));
+        b.f32_sign(x);
         let tape = b.build().unwrap();
         let inst = Instance::<f32>::new(&tape);
 
@@ -449,7 +485,7 @@ mod tests {
     fn f32_floor() {
         let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
         let x = b.arg(0);
-        b.instr(Instr::F32Floor(x));
+        b.f32_floor(x);
         let tape = b.build().unwrap();
         let inst = Instance::<f32>::new(&tape);
 
@@ -464,11 +500,11 @@ mod tests {
         let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
         let x = b.arg(0);
         let y = b.arg(1);
-        let zero = b.instr(Instr::F32Const(0.0));
-        let lt = b.instr(Instr::F32Lt(x, y));
-        let pos = b.instr(Instr::F32Gt(x, zero));
-        let both = b.instr(Instr::And(lt, pos));
-        b.instr(Instr::F32Sel(both, x, y));
+        let zero = b.f32_const(0.0);
+        let lt = b.f32_lt(x, y);
+        let pos = b.f32_gt(x, zero);
+        let both = b.and(lt, pos);
+        b.f32_sel(both, x, y);
         let tape = b.build().unwrap();
         let inst = Instance::<f32>::new(&tape);
 
@@ -481,21 +517,21 @@ mod tests {
     fn bool_i32_ops() {
         let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
         let x = b.arg(0);
-        let two = b.instr(Instr::I32Const(2));
-        let three = b.instr(Instr::I32Const(3));
-        let lt = b.instr(Instr::I32Lt(two, three)); // true
-        let ge = b.instr(Instr::I32Ge(two, three)); // false
-        let yes = b.instr(Instr::BoolConst(true));
-        let xor = b.instr(Instr::Xor(lt, yes)); // false
-        let any = b.instr(Instr::Or(xor, ge)); // false
-        let not = b.instr(Instr::Not(any)); // true
-        let sel = b.instr(Instr::I32Sel(not, two, three)); // 2
-        let bump = b.instr(Instr::I32FromBool(lt)); // 1
-        let sum = b.instr(Instr::I32Add(sel, bump)); // 3
-        let sum = b.instr(Instr::F32FromI32(sum));
-        let one = b.instr(Instr::F32FromBool(not)); // 1.0
-        let sum = b.instr(Instr::F32Add(sum, one)); // 4.0
-        b.instr(Instr::F32Add(sum, x));
+        let two = b.i32_const(2);
+        let three = b.i32_const(3);
+        let lt = b.i32_lt(two, three); // true
+        let ge = b.i32_ge(two, three); // false
+        let yes = b.bool_const(true);
+        let xor = b.xor(lt, yes); // false
+        let any = b.or(xor, ge); // false
+        let not = b.not(any); // true
+        let sel = b.i32_sel(not, two, three); // 2
+        let bump = b.i32_from_bool(lt); // 1
+        let sum = b.i32_add(sel, bump); // 3
+        let sum = b.f32_from_i32(sum);
+        let one = b.f32_from_bool(not); // 1.0
+        let sum = b.f32_add(sum, one); // 4.0
+        b.f32_add(sum, x);
         let tape = b.build().unwrap();
         let inst = Instance::<f32>::new(&tape);
 
@@ -507,9 +543,9 @@ mod tests {
         let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32; 3]);
         let x = b.arg(0);
         let y = b.arg(1);
-        b.instr(Instr::F32Add(x, y));
-        b.instr(Instr::F32Mul(x, y));
-        b.instr(Instr::F32Sub(x, y));
+        b.f32_add(x, y);
+        b.f32_mul(x, y);
+        b.f32_sub(x, y);
         let tape = b.build().unwrap();
 
         let (x, y) = (1.5f32, 2.25f32);
@@ -525,8 +561,8 @@ mod tests {
     fn clone_outlives_original() {
         let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
         let x = b.arg(0);
-        let c = b.instr(Instr::F32Const(1.0));
-        b.instr(Instr::F32Add(x, c));
+        let c = b.f32_const(1.0);
+        b.f32_add(x, c);
 
         let tape = b.build().unwrap();
         let inst = Instance::<f32>::new(&tape);

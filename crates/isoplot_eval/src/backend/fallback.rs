@@ -54,12 +54,12 @@ impl Evaluator {
         let mut buf = self.buf.borrow_mut();
         buf[..num_args].copy_from_slice(args);
 
-        for (i, instr) in self.tape.instrs().iter().enumerate() {
-            let v_i32 = |id: ValueId| buf[id.index()].as_i32();
-            let v_bool = |id: ValueId| buf[id.index()].as_bool();
-            let v_f32 = |id: ValueId| buf[id.index()].as_f32();
+        for r in self.tape.instrs() {
+            let v_i32 = |id: ValueId<i32>| buf[id.index()].as_i32();
+            let v_bool = |id: ValueId<bool>| buf[id.index()].as_bool();
+            let v_f32 = |id: ValueId<f32>| buf[id.index()].as_f32();
 
-            let result = match *instr {
+            let result = match r.instr() {
                 Instr::I32Const(value) => RawValue::from_i32(value),
                 Instr::BoolConst(value) => RawValue::from_bool(value),
                 Instr::F32Const(value) => RawValue::from_f32(value),
@@ -84,7 +84,9 @@ impl Evaluator {
                 Instr::F32FromI32(src) => RawValue::from_f32(v_i32(src) as f32),
                 Instr::F32FromBool(src) => RawValue::from_f32(v_bool(src) as i32 as f32),
 
-                Instr::Copy(src) => buf[src.index()],
+                Instr::CopyI32(src) => buf[src.index()],
+                Instr::CopyBool(src) => buf[src.index()],
+                Instr::CopyF32(src) => buf[src.index()],
 
                 Instr::F32Neg(src) => RawValue::from_f32(-v_f32(src)),
                 Instr::F32Abs(src) => RawValue::from_f32(v_f32(src).abs()),
@@ -114,12 +116,15 @@ impl Evaluator {
                 Instr::F32Gt(lhs, rhs) => RawValue::from_bool(v_f32(lhs) > v_f32(rhs)),
                 Instr::F32Ge(lhs, rhs) => RawValue::from_bool(v_f32(lhs) >= v_f32(rhs)),
 
-                Instr::I32Sel(cond, v_true, v_false) | Instr::F32Sel(cond, v_true, v_false) => {
+                Instr::I32Sel(cond, v_true, v_false) => {
+                    buf[if v_bool(cond) { v_true } else { v_false }.index()]
+                }
+                Instr::F32Sel(cond, v_true, v_false) => {
                     buf[if v_bool(cond) { v_true } else { v_false }.index()]
                 }
             };
 
-            buf[num_args + i] = result;
+            buf[r.index()] = result;
         }
 
         buf
@@ -142,17 +147,17 @@ mod tests {
         let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
         let x = b.arg(0);
         let y = b.arg(1);
-        let sum = b.instr(Instr::F32Add(x, y));
-        let prod = b.instr(Instr::F32Mul(sum, x));
-        let diff = b.instr(Instr::F32Sub(prod, y));
-        let quot = b.instr(Instr::F32Div(diff, y));
-        let neg = b.instr(Instr::F32Neg(quot));
-        let abs = b.instr(Instr::F32Abs(neg));
-        let abs = b.instr(Instr::Copy(abs));
-        let min = b.instr(Instr::F32Min(abs, x));
-        let max = b.instr(Instr::F32Max(min, y));
-        let c = b.instr(Instr::F32Const(0.5));
-        b.instr(Instr::F32Add(max, c));
+        let sum = b.f32_add(x, y);
+        let prod = b.f32_mul(sum, x);
+        let diff = b.f32_sub(prod, y);
+        let quot = b.f32_div(diff, y);
+        let neg = b.f32_neg(quot);
+        let abs = b.f32_abs(neg);
+        let abs = b.copy_f32(abs);
+        let min = b.f32_min(abs, x);
+        let max = b.f32_max(min, y);
+        let c = b.f32_const(0.5);
+        b.f32_add(max, c);
         let tape = b.build().unwrap();
 
         let (x, y) = (1.75f32, -0.5f32);
@@ -165,18 +170,18 @@ mod tests {
         let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
         let x = b.arg(0);
         let y = b.arg(1);
-        let sin = b.instr(Instr::F32Sin(x));
-        let cos = b.instr(Instr::F32Cos(y));
-        let tan = b.instr(Instr::F32Tan(x));
-        let cot = b.instr(Instr::F32Cot(y));
-        let exp = b.instr(Instr::F32Exp(x));
-        let ln = b.instr(Instr::F32Ln(y));
-        let lg = b.instr(Instr::F32Lg(x));
-        let pow = b.instr(Instr::F32Powf(x, y));
+        let sin = b.f32_sin(x);
+        let cos = b.f32_cos(y);
+        let tan = b.f32_tan(x);
+        let cot = b.f32_cot(y);
+        let exp = b.f32_exp(x);
+        let ln = b.f32_ln(y);
+        let lg = b.f32_lg(x);
+        let pow = b.f32_powf(x, y);
 
         let mut acc = sin;
         for v in [cos, tan, cot, exp, ln, lg, pow] {
-            acc = b.instr(Instr::F32Add(acc, v));
+            acc = b.f32_add(acc, v);
         }
 
         let tape = b.build().unwrap();
@@ -199,14 +204,14 @@ mod tests {
     fn i32_ops() {
         let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
         let x = b.arg(0);
-        let three = b.instr(Instr::I32Const(3));
-        let two = b.instr(Instr::I32Const(2));
-        let five = b.instr(Instr::I32Add(three, two));
-        let diff = b.instr(Instr::I32Sub(five, two));
-        let six = b.instr(Instr::I32Mul(diff, two));
-        let sixf = b.instr(Instr::F32FromI32(six));
-        let cube = b.instr(Instr::F32Powi(x, diff));
-        b.instr(Instr::F32Add(sixf, cube));
+        let three = b.i32_const(3);
+        let two = b.i32_const(2);
+        let five = b.i32_add(three, two);
+        let diff = b.i32_sub(five, two);
+        let six = b.i32_mul(diff, two);
+        let sixf = b.f32_from_i32(six);
+        let cube = b.f32_powi(x, diff);
+        b.f32_add(sixf, cube);
 
         let tape = b.build().unwrap();
         let evaluator = Fallback::new(tape).evaluator();
@@ -219,7 +224,7 @@ mod tests {
     fn f32_sign() {
         let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
         let x = b.arg(0);
-        b.instr(Instr::F32Sign(x));
+        b.f32_sign(x);
         let tape = b.build().unwrap();
         let evaluator = Fallback::new(tape).evaluator();
 
@@ -235,11 +240,11 @@ mod tests {
         let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
         let x = b.arg(0);
         let y = b.arg(1);
-        let zero = b.instr(Instr::F32Const(0.0));
-        let lt = b.instr(Instr::F32Lt(x, y));
-        let pos = b.instr(Instr::F32Gt(x, zero));
-        let both = b.instr(Instr::And(lt, pos));
-        b.instr(Instr::F32Sel(both, x, y));
+        let zero = b.f32_const(0.0);
+        let lt = b.f32_lt(x, y);
+        let pos = b.f32_gt(x, zero);
+        let both = b.and(lt, pos);
+        b.f32_sel(both, x, y);
         let tape = b.build().unwrap();
         let evaluator = Fallback::new(tape).evaluator();
 
@@ -252,21 +257,21 @@ mod tests {
     fn bool_i32_ops() {
         let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
         let x = b.arg(0);
-        let two = b.instr(Instr::I32Const(2));
-        let three = b.instr(Instr::I32Const(3));
-        let lt = b.instr(Instr::I32Lt(two, three)); // true
-        let ge = b.instr(Instr::I32Ge(two, three)); // false
-        let yes = b.instr(Instr::BoolConst(true));
-        let xor = b.instr(Instr::Xor(lt, yes)); // false
-        let any = b.instr(Instr::Or(xor, ge)); // false
-        let not = b.instr(Instr::Not(any)); // true
-        let sel = b.instr(Instr::I32Sel(not, two, three)); // 2
-        let bump = b.instr(Instr::I32FromBool(lt)); // 1
-        let sum = b.instr(Instr::I32Add(sel, bump)); // 3
-        let sum = b.instr(Instr::F32FromI32(sum));
-        let one = b.instr(Instr::F32FromBool(not)); // 1.0
-        let sum = b.instr(Instr::F32Add(sum, one)); // 4.0
-        b.instr(Instr::F32Add(sum, x));
+        let two = b.i32_const(2);
+        let three = b.i32_const(3);
+        let lt = b.i32_lt(two, three); // true
+        let ge = b.i32_ge(two, three); // false
+        let yes = b.bool_const(true);
+        let xor = b.xor(lt, yes); // false
+        let any = b.or(xor, ge); // false
+        let not = b.not(any); // true
+        let sel = b.i32_sel(not, two, three); // 2
+        let bump = b.i32_from_bool(lt); // 1
+        let sum = b.i32_add(sel, bump); // 3
+        let sum = b.f32_from_i32(sum);
+        let one = b.f32_from_bool(not); // 1.0
+        let sum = b.f32_add(sum, one); // 4.0
+        b.f32_add(sum, x);
         let tape = b.build().unwrap();
         let evaluator = Fallback::new(tape).evaluator();
 
@@ -278,9 +283,9 @@ mod tests {
         let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32; 3]);
         let x = b.arg(0);
         let y = b.arg(1);
-        b.instr(Instr::F32Add(x, y));
-        b.instr(Instr::F32Mul(x, y));
-        b.instr(Instr::F32Sub(x, y));
+        b.f32_add(x, y);
+        b.f32_mul(x, y);
+        b.f32_sub(x, y);
         let tape = b.build().unwrap();
 
         let (x, y) = (1.5f32, 2.25f32);

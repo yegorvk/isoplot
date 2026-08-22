@@ -5,7 +5,7 @@ use bytemuck::{Pod, Zeroable};
 use crate::{
     layout::{Layout, ValueType, Vector},
     program::Program,
-    tape::{Instr, Tape, TapeBuilder, Type, ValueId},
+    tape::{Inlined, Instr, NewId, Tape, TapeBuilder, Type, ValueId},
 };
 
 /// Value of a scalar function together with its gradient
@@ -59,13 +59,18 @@ pub(crate) fn autodiff<Args: Layout>(
 
 struct Autodiff<'a> {
     source: &'a Tape,
+    inlined: Inlined<'a>,
     builder: TapeBuilder,
-    values: Vec<ValueId>,
-    adjoints: Vec<Option<ValueId>>,
+    adjoints: Vec<Option<NewId<f32>>>,
 }
 
 impl<'a> Autodiff<'a> {
     fn new(source: &'a Tape) -> Self {
+        assert!(
+            source.arg_types().iter().all(|&ty| ty == Type::F32),
+            "autodiff arguments must be f32"
+        );
+
         assert_eq!(
             source.num_results(),
             1,
@@ -76,19 +81,12 @@ impl<'a> Autodiff<'a> {
         let num_values = num_args + source.instrs().len();
 
         let mut builder = Tape::builder(vec![Type::F32; num_args], vec![Type::F32; 1 + num_args]);
-
-        let mut values = Vec::with_capacity(num_values);
-        for i in 0..num_args {
-            values.push(builder.arg(i));
-        }
-        for &instr in source.instrs() {
-            values.push(builder.instr(instr));
-        }
+        let inlined = builder.extend(source);
 
         Self {
             source,
+            inlined,
             builder,
-            values,
             adjoints: vec![None; num_values],
         }
     }
@@ -96,30 +94,30 @@ impl<'a> Autodiff<'a> {
     fn run(mut self) -> Tape {
         let num_args = self.source.num_args();
 
-        let ret = *self.values.last().unwrap();
-        let seed = self.c_f32(1.0);
-        self.adjoints[ret.index()] = Some(seed);
+        let ret = self.inlined.result(0);
+        let seed = self.builder.f32_const(1.0);
+        *self.adjoints.last_mut().unwrap() = Some(seed);
 
-        for (i, &instr) in self.source.instrs().iter().enumerate().rev() {
-            let index = num_args + i;
-            let Some(w_bar) = self.adjoints[index] else {
+        for r in self.source.instrs().rev() {
+            let Some(w_bar) = self.adjoints[r.index()] else {
                 continue;
             };
-            self.propagate(instr, self.values[index], w_bar);
+            let w = self.inlined.convert(r.id());
+            self.propagate(r.instr(), w, w_bar);
         }
 
-        self.builder.instr(Instr::Copy(ret));
+        self.builder.copy_f32(ret);
         for i in 0..num_args {
             match self.adjoints[i] {
-                None => self.builder.instr(Instr::F32Const(0.0)),
-                Some(v) => self.builder.instr(Instr::Copy(v)),
+                None => self.builder.f32_const(0.0),
+                Some(v) => self.builder.copy_f32(v),
             };
         }
 
         self.builder.build().unwrap()
     }
 
-    fn propagate(&mut self, instr: Instr, w: ValueId, w_bar: ValueId) {
+    fn propagate(&mut self, instr: Instr, w: NewId<f32>, w_bar: NewId<f32>) {
         match instr {
             Instr::I32Const(_)
             | Instr::BoolConst(_)
@@ -148,18 +146,20 @@ impl<'a> Autodiff<'a> {
             | Instr::F32Le(..)
             | Instr::F32Gt(..)
             | Instr::F32Ge(..)
-            | Instr::I32Sel(..) => {}
+            | Instr::I32Sel(..)
+            | Instr::CopyI32(_)
+            | Instr::CopyBool(_) => {}
 
-            Instr::Copy(src) => self.acc(src, w_bar),
+            Instr::CopyF32(src) => self.acc(src, w_bar),
 
             Instr::F32Neg(src) => {
-                let c = self.builder.instr(Instr::F32Neg(w_bar));
+                let c = self.builder.f32_neg(w_bar);
                 self.acc(src, c);
             }
 
             Instr::F32Abs(src) => {
-                let sign = self.builder.instr(Instr::F32Sign(src));
-                let c = self.builder.instr(Instr::F32Mul(w_bar, sign));
+                let sign = self.builder.f32_sign(self.inlined.convert(src));
+                let c = self.builder.f32_mul(w_bar, sign);
                 self.acc(src, c);
             }
 
@@ -170,143 +170,145 @@ impl<'a> Autodiff<'a> {
 
             Instr::F32Sub(lhs, rhs) => {
                 self.acc(lhs, w_bar);
-                let c = self.builder.instr(Instr::F32Neg(w_bar));
+                let c = self.builder.f32_neg(w_bar);
                 self.acc(rhs, c);
             }
 
             Instr::F32Mul(lhs, rhs) => {
-                let c_l = self.builder.instr(Instr::F32Mul(w_bar, rhs));
+                let c_l = self.builder.f32_mul(w_bar, self.inlined.convert(rhs));
                 self.acc(lhs, c_l);
-                let c_r = self.builder.instr(Instr::F32Mul(w_bar, lhs));
+                let c_r = self.builder.f32_mul(w_bar, self.inlined.convert(lhs));
                 self.acc(rhs, c_r);
             }
 
             Instr::F32Div(lhs, rhs) => {
-                let c_l = self.builder.instr(Instr::F32Div(w_bar, rhs));
+                let y = self.inlined.convert(rhs);
+                let c_l = self.builder.f32_div(w_bar, y);
                 self.acc(lhs, c_l);
-                let t = self.builder.instr(Instr::F32Mul(w_bar, w));
-                let t = self.builder.instr(Instr::F32Div(t, rhs));
-                let c_r = self.builder.instr(Instr::F32Neg(t));
+                let t = self.builder.f32_mul(w_bar, w);
+                let t = self.builder.f32_div(t, y);
+                let c_r = self.builder.f32_neg(t);
                 self.acc(rhs, c_r);
             }
 
             Instr::F32Min(lhs, rhs) => {
-                let (lhs_low, lhs_high) = self.select_weights(lhs, rhs);
-                let c_l = self.builder.instr(Instr::F32Mul(w_bar, lhs_low));
+                let (x, y) = (self.inlined.convert(lhs), self.inlined.convert(rhs));
+                let (lhs_low, lhs_high) = self.select_weights(x, y);
+                let c_l = self.builder.f32_mul(w_bar, lhs_low);
                 self.acc(lhs, c_l);
-                let c_r = self.builder.instr(Instr::F32Mul(w_bar, lhs_high));
+                let c_r = self.builder.f32_mul(w_bar, lhs_high);
                 self.acc(rhs, c_r);
             }
 
             Instr::F32Max(lhs, rhs) => {
-                let (lhs_low, lhs_high) = self.select_weights(lhs, rhs);
-                let c_l = self.builder.instr(Instr::F32Mul(w_bar, lhs_high));
+                let (x, y) = (self.inlined.convert(lhs), self.inlined.convert(rhs));
+                let (lhs_low, lhs_high) = self.select_weights(x, y);
+                let c_l = self.builder.f32_mul(w_bar, lhs_high);
                 self.acc(lhs, c_l);
-                let c_r = self.builder.instr(Instr::F32Mul(w_bar, lhs_low));
+                let c_r = self.builder.f32_mul(w_bar, lhs_low);
                 self.acc(rhs, c_r);
             }
 
             Instr::F32Powf(lhs, rhs) => {
-                let one = self.c_f32(1.0);
-                let e = self.builder.instr(Instr::F32Sub(rhs, one));
-                let p = self.builder.instr(Instr::F32Powf(lhs, e));
-                let t = self.builder.instr(Instr::F32Mul(rhs, p));
-                let c_l = self.builder.instr(Instr::F32Mul(w_bar, t));
+                let (x, y) = (self.inlined.convert(lhs), self.inlined.convert(rhs));
+                let one = self.builder.f32_const(1.0);
+                let e = self.builder.f32_sub(y, one);
+                let p = self.builder.f32_powf(x, e);
+                let t = self.builder.f32_mul(y, p);
+                let c_l = self.builder.f32_mul(w_bar, t);
                 self.acc(lhs, c_l);
-                let ln = self.builder.instr(Instr::F32Ln(lhs));
-                let t = self.builder.instr(Instr::F32Mul(w, ln));
-                let cr = self.builder.instr(Instr::F32Mul(w_bar, t));
+                let ln = self.builder.f32_ln(x);
+                let t = self.builder.f32_mul(w, ln);
+                let cr = self.builder.f32_mul(w_bar, t);
                 self.acc(rhs, cr);
             }
 
             Instr::F32Powi(lhs, rhs) => {
-                let one = self.builder.instr(Instr::I32Const(1));
-                let e = self.builder.instr(Instr::I32Sub(rhs, one));
-                let p = self.builder.instr(Instr::F32Powi(lhs, e));
-                let n = self.builder.instr(Instr::F32FromI32(rhs));
-                let t = self.builder.instr(Instr::F32Mul(n, p));
-                let c_l = self.builder.instr(Instr::F32Mul(w_bar, t));
+                let (x, n) = (self.inlined.convert(lhs), self.inlined.convert(rhs));
+                let one = self.builder.i32_const(1);
+                let e = self.builder.i32_sub(n, one);
+                let p = self.builder.f32_powi(x, e);
+                let n = self.builder.f32_from_i32(n);
+                let t = self.builder.f32_mul(n, p);
+                let c_l = self.builder.f32_mul(w_bar, t);
                 self.acc(lhs, c_l);
             }
 
             Instr::F32Exp(src) => {
-                let c = self.builder.instr(Instr::F32Mul(w_bar, w));
+                let c = self.builder.f32_mul(w_bar, w);
                 self.acc(src, c);
             }
 
             Instr::F32Ln(src) => {
-                let c = self.builder.instr(Instr::F32Div(w_bar, src));
+                let c = self.builder.f32_div(w_bar, self.inlined.convert(src));
                 self.acc(src, c);
             }
 
             Instr::F32Lg(src) => {
-                let k = self.c_f32(std::f32::consts::LOG10_E);
-                let t = self.builder.instr(Instr::F32Div(k, src));
-                let c = self.builder.instr(Instr::F32Mul(w_bar, t));
+                let k = self.builder.f32_const(std::f32::consts::LOG10_E);
+                let t = self.builder.f32_div(k, self.inlined.convert(src));
+                let c = self.builder.f32_mul(w_bar, t);
                 self.acc(src, c);
             }
 
             Instr::F32Sin(src) => {
-                let cos = self.builder.instr(Instr::F32Cos(src));
-                let c = self.builder.instr(Instr::F32Mul(w_bar, cos));
+                let cos = self.builder.f32_cos(self.inlined.convert(src));
+                let c = self.builder.f32_mul(w_bar, cos);
                 self.acc(src, c);
             }
 
             Instr::F32Cos(src) => {
-                let sin = self.builder.instr(Instr::F32Sin(src));
-                let m = self.builder.instr(Instr::F32Mul(w_bar, sin));
-                let c = self.builder.instr(Instr::F32Neg(m));
+                let sin = self.builder.f32_sin(self.inlined.convert(src));
+                let m = self.builder.f32_mul(w_bar, sin);
+                let c = self.builder.f32_neg(m);
                 self.acc(src, c);
             }
 
             Instr::F32Tan(src) => {
-                let sq = self.builder.instr(Instr::F32Mul(w, w));
-                let one = self.c_f32(1.0);
-                let t = self.builder.instr(Instr::F32Add(sq, one));
-                let c = self.builder.instr(Instr::F32Mul(w_bar, t));
+                let sq = self.builder.f32_mul(w, w);
+                let one = self.builder.f32_const(1.0);
+                let t = self.builder.f32_add(sq, one);
+                let c = self.builder.f32_mul(w_bar, t);
                 self.acc(src, c);
             }
 
             Instr::F32Cot(src) => {
-                let sq = self.builder.instr(Instr::F32Mul(w, w));
-                let one = self.c_f32(1.0);
-                let t = self.builder.instr(Instr::F32Add(sq, one));
-                let m = self.builder.instr(Instr::F32Mul(w_bar, t));
-                let c = self.builder.instr(Instr::F32Neg(m));
+                let sq = self.builder.f32_mul(w, w);
+                let one = self.builder.f32_const(1.0);
+                let t = self.builder.f32_add(sq, one);
+                let m = self.builder.f32_mul(w_bar, t);
+                let c = self.builder.f32_neg(m);
                 self.acc(src, c);
             }
 
             Instr::F32Sel(cond, v_true, v_false) => {
-                let zero = self.c_f32(0.0);
-                let c_t = self.builder.instr(Instr::F32Sel(cond, w_bar, zero));
+                let cond = self.inlined.convert(cond);
+                let zero = self.builder.f32_const(0.0);
+                let c_t = self.builder.f32_sel(cond, w_bar, zero);
                 self.acc(v_true, c_t);
-                let c_f = self.builder.instr(Instr::F32Sel(cond, zero, w_bar));
+                let c_f = self.builder.f32_sel(cond, zero, w_bar);
                 self.acc(v_false, c_f);
             }
         }
     }
 
-    fn acc(&mut self, target: ValueId, contrib: ValueId) {
+    fn acc(&mut self, target: ValueId<f32>, contrib: NewId<f32>) {
         let slot = target.index();
         self.adjoints[slot] = Some(match self.adjoints[slot] {
             None => contrib,
-            Some(prev) => self.builder.instr(Instr::F32Add(prev, contrib)),
+            Some(prev) => self.builder.f32_add(prev, contrib),
         });
     }
 
     /// Returns (1.0, 0.0) if `lhs` <= `rhs`, or (0.0, 1.0) otherwise.
-    fn select_weights(&mut self, lhs: ValueId, rhs: ValueId) -> (ValueId, ValueId) {
-        let half = self.c_f32(0.5);
-        let diff = self.builder.instr(Instr::F32Sub(rhs, lhs));
-        let sign = self.builder.instr(Instr::F32Sign(diff));
-        let half_sign = self.builder.instr(Instr::F32Mul(sign, half));
-        let lhs_low = self.builder.instr(Instr::F32Add(half, half_sign));
-        let lhs_high = self.builder.instr(Instr::F32Sub(half, half_sign));
+    fn select_weights(&mut self, lhs: NewId<f32>, rhs: NewId<f32>) -> (NewId<f32>, NewId<f32>) {
+        let half = self.builder.f32_const(0.5);
+        let diff = self.builder.f32_sub(rhs, lhs);
+        let sign = self.builder.f32_sign(diff);
+        let half_sign = self.builder.f32_mul(sign, half);
+        let lhs_low = self.builder.f32_add(half, half_sign);
+        let lhs_high = self.builder.f32_sub(half, half_sign);
         (lhs_low, lhs_high)
-    }
-
-    fn c_f32(&mut self, value: f32) -> ValueId {
-        self.builder.instr(Instr::F32Const(value))
     }
 }
 
@@ -336,8 +338,8 @@ mod tests {
         let mut b = Tape::builder(vec![Type::F32; 2], vec![Type::F32]);
         let x = b.arg(0);
         let y = b.arg(1);
-        let xy = b.instr(Instr::F32Mul(x, y));
-        b.instr(Instr::F32Add(xy, x));
+        let xy = b.f32_mul(x, y);
+        b.f32_add(xy, x);
         let tape = b.build().unwrap();
 
         let (x, y) = (3.0f32, 5.0f32);
@@ -349,7 +351,7 @@ mod tests {
         // f = x*x
         let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
         let x = b.arg(0);
-        b.instr(Instr::F32Mul(x, x));
+        b.f32_mul(x, x);
         let tape = b.build().unwrap();
 
         let x = 1.75f32;
@@ -361,9 +363,9 @@ mod tests {
         // f = sin(x) * exp(x)
         let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
         let x = b.arg(0);
-        let sin = b.instr(Instr::F32Sin(x));
-        let exp = b.instr(Instr::F32Exp(x));
-        b.instr(Instr::F32Mul(sin, exp));
+        let sin = b.f32_sin(x);
+        let exp = b.f32_exp(x);
+        b.f32_mul(sin, exp);
         let tape = b.build().unwrap();
 
         let x = 0.7f32;
@@ -377,8 +379,8 @@ mod tests {
         let mut b = Tape::builder(vec![Type::F32; 2], vec![Type::F32]);
         let x = b.arg(0);
         let y = b.arg(1);
-        let yy = b.instr(Instr::F32Mul(y, y));
-        b.instr(Instr::F32Min(x, yy));
+        let yy = b.f32_mul(y, y);
+        b.f32_min(x, yy);
         let tape = b.build().unwrap();
 
         // x selected
@@ -396,7 +398,7 @@ mod tests {
         // f = max(x, x)
         let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
         let x = b.arg(0);
-        b.instr(Instr::F32Max(x, x));
+        b.f32_max(x, x);
         let tape = b.build().unwrap();
         assert_eq!(gradient(&tape, &[3.0]), [3.0, 1.0]);
     }
@@ -406,9 +408,9 @@ mod tests {
         // f = |x^3|
         let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
         let x = b.arg(0);
-        let n = b.instr(Instr::I32Const(3));
-        let cube = b.instr(Instr::F32Powi(x, n));
-        b.instr(Instr::F32Abs(cube));
+        let n = b.i32_const(3);
+        let cube = b.f32_powi(x, n);
+        b.f32_abs(cube);
         let tape = b.build().unwrap();
 
         assert_eq!(gradient(&tape, &[2.0]), [8.0, 12.0]);
@@ -423,10 +425,10 @@ mod tests {
         // f = if x < 2 { x*x } else { x }
         let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
         let x = b.arg(0);
-        let two = b.instr(Instr::F32Const(2.0));
-        let lt = b.instr(Instr::F32Lt(x, two));
-        let sq = b.instr(Instr::F32Mul(x, x));
-        b.instr(Instr::F32Sel(lt, sq, x));
+        let two = b.f32_const(2.0);
+        let lt = b.f32_lt(x, two);
+        let sq = b.f32_mul(x, x);
+        b.f32_sel(lt, sq, x);
         let tape = b.build().unwrap();
 
         assert_eq!(gradient(&tape, &[1.0]), [1.0, 2.0]);
@@ -438,7 +440,7 @@ mod tests {
         // f = y, x unused
         let mut b = Tape::builder(vec![Type::F32; 2], vec![Type::F32]);
         let y = b.arg(1);
-        b.instr(Instr::Copy(y));
+        b.copy_f32(y);
         let tape = b.build().unwrap();
         assert_eq!(gradient(&tape, &[3.0, 7.0]), [7.0, 0.0, 1.0]);
     }
