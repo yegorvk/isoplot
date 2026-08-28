@@ -1,7 +1,9 @@
+use std::array;
+
 use bevy::math::Vec3;
 use isoplot_eval::{
-    CompileError, DefaultBackend, Diagnostic, Evaluator, Gradient, Instance, Interval, Program,
-    ProgramDesc,
+    Bounds, CompileError, DefaultBackend, Diagnostic, Evaluator, Gradient, Instance, Interval,
+    Program, ProgramDesc,
 };
 use isoplot_mesh::{NormalField, ScalarField};
 
@@ -12,8 +14,8 @@ const MIN_NORMAL_ALIGNMENT: f32 = 0.98;
 pub struct Equation {
     field: Instance<DefaultBackend, [f32; 3], f32>,
     grad: Instance<DefaultBackend, [f32; 3], Gradient<[f32; 3]>>,
-    bounds: Instance<DefaultBackend, [Interval; 3], Interval>,
-    grad_bounds: Instance<DefaultBackend, [Interval; 3], Gradient<[Interval; 3]>>,
+    bounds: Instance<DefaultBackend, [Interval; 3], Bounds>,
+    grad_bounds: Instance<DefaultBackend, [Interval; 3], Gradient<[Bounds; 3]>>,
 }
 
 impl Equation {
@@ -47,14 +49,38 @@ impl PlotSource for Equation {
 
 struct DynamicSource {
     field: Evaluator<DefaultBackend, [f32; 3], f32>,
-    field_bounds: Evaluator<DefaultBackend, [Interval; 3], Interval>,
+    field_bounds: Evaluator<DefaultBackend, [Interval; 3], Bounds>,
     grad: Evaluator<DefaultBackend, [f32; 3], Gradient<[f32; 3]>>,
-    grad_bounds: Evaluator<DefaultBackend, [Interval; 3], Gradient<[Interval; 3]>>,
+    grad_bounds: Evaluator<DefaultBackend, [Interval; 3], Gradient<[Bounds; 3]>>,
 }
 
 impl ScalarField for DynamicSource {
     fn sample(&self, point: Vec3) -> f32 {
         self.field.evaluate(&point.to_array())
+    }
+
+    fn find_intersection(&self, start: Vec3, end: Vec3) -> Option<Vec3> {
+        const MAX_ITERS: usize = 32;
+
+        let (mut a, mut b) = (start, end);
+        let (mut v_a, mut v_b) = (self.sample(a), self.sample(b));
+
+        if 1f32.copysign(v_a) == 1f32.copysign(v_b) {
+            return None;
+        }
+
+        // Shrink the segment until its bounds are free of discontinuities.
+        for _ in 0..MAX_ITERS {
+            let segment = array::from_fn(|i| Interval::new(a[i].min(b[i]), a[i].max(b[i])));
+
+            if self.field_bounds.evaluate(&segment).get().is_some() {
+                return Some(self.bisect(a, b, v_a, v_b));
+            }
+
+            self.refine(&mut a, &mut b, &mut v_a, &mut v_b);
+        }
+
+        None
     }
 
     fn is_flat(&self, min: Vec3, size: f32) -> bool {
@@ -66,29 +92,72 @@ impl ScalarField for DynamicSource {
             Interval::new(min.z, max.z),
         ];
 
-        if !self.field_bounds.evaluate(&cell).contains_zero() {
+        let Some(bounds) = self.field_bounds.evaluate(&cell).get() else {
+            return false;
+        };
+
+        if !bounds.contains_zero() {
             return true;
         }
 
-        let [g_x, g_y, g_z] = self.grad_bounds.evaluate(&cell).gradient;
-        let center = Vec3::new(g_x.center(), g_y.center(), g_z.center()).normalize_or_zero();
+        let [x, y, z] = self.grad_bounds.evaluate(&cell).gradient.map(|x| x.get());
+
+        let (Some(x), Some(y), Some(z)) = (x, y, z) else {
+            return false;
+        };
+
+        let g = [x, y, z];
+
+        if g.iter().all(|x| x.contains_zero()) {
+            return false;
+        }
+
+        let c_n = Vec3::from_array(g.map(|x| x.center())).normalize_or_zero();
 
         (0..8u8).all(|i| {
-            let pick = |range: Interval, bit: u8| {
-                if i & bit != 0 {
-                    range.max()
-                } else {
-                    range.min()
-                }
+            let pick = |x: Interval, bit: u8| {
+                if i & bit != 0 { x.max() } else { x.min() }
             };
 
-            let vertex = Vec3::new(pick(g_x, 1), pick(g_y, 2), pick(g_z, 4));
-            vertex.normalize_or_zero().dot(center) > MIN_NORMAL_ALIGNMENT
+            let vertex = Vec3::from_array(array::from_fn(|i| pick(g[i], 1 << i)));
+
+            if !vertex.is_finite() {
+                return false;
+            }
+
+            vertex.normalize_or_zero().dot(c_n) > MIN_NORMAL_ALIGNMENT
         })
     }
 }
 
 impl DynamicSource {
+    fn refine(&self, a: &mut Vec3, b: &mut Vec3, v_a: &mut f32, v_b: &mut f32) {
+        let m = a.lerp(*b, 0.5);
+        let v_m = self.sample(m);
+
+        if (v_m < 0.0) == (*v_a < 0.0) {
+            (*a, *v_a) = (m, v_m);
+        } else {
+            (*b, *v_b) = (m, v_m);
+        }
+    }
+
+    fn bisect(&self, mut a: Vec3, mut b: Vec3, mut v_a: f32, mut v_b: f32) -> Vec3 {
+        const ITERS: usize = 3;
+
+        for _ in 0..ITERS {
+            self.refine(&mut a, &mut b, &mut v_a, &mut v_b);
+        }
+
+        let t = if (v_a - v_b).abs() > f32::EPSILON {
+            (v_a / (v_a - v_b)).clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+
+        a.lerp(b, t)
+    }
+
     fn sample_with_gradient(&self, point: Vec3) -> (f32, Vec3) {
         let gradient = self.grad.evaluate(&point.to_array());
         (gradient.value, Vec3::from(gradient.gradient))

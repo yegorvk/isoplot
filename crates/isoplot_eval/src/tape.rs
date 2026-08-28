@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::{fmt, marker::PhantomData};
 
 mod private {
     #[doc(hidden)]
@@ -33,7 +33,7 @@ impl ValuePrimitive for f32 {
 }
 
 /// A value id (e.g., a temporary value)
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[derive(Copy, Clone, Eq, PartialEq)]
 pub(crate) struct ValueId<T> {
     raw_id: u16,
     _marker: PhantomData<fn() -> T>,
@@ -54,6 +54,49 @@ impl<T: ValuePrimitive> ValueId<T> {
     /// Returns the corresponding instruction index in the tape.
     pub(crate) fn index(self) -> usize {
         self.raw_id as usize
+    }
+
+    pub(crate) fn erased(self) -> AnyValueId {
+        AnyValueId {
+            raw_id: self.raw_id,
+            ty: T::TYPE,
+        }
+    }
+}
+
+impl fmt::Debug for ValueId<i32> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ValueId<i32>({})", self.raw_id)
+    }
+}
+
+impl fmt::Debug for ValueId<bool> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ValueId<bool>({})", self.raw_id)
+    }
+}
+
+impl fmt::Debug for ValueId<f32> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ValueId<f32>({})", self.raw_id)
+    }
+}
+
+/// A value id whose type is only known at runtime
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub(crate) struct AnyValueId {
+    raw_id: u16,
+    ty: Type,
+}
+
+impl AnyValueId {
+    /// Returns the corresponding instruction index in the tape.
+    pub(crate) fn index(self) -> usize {
+        self.raw_id as usize
+    }
+
+    pub(crate) fn typed<T: ValuePrimitive>(self) -> Option<ValueId<T>> {
+        (self.ty == T::TYPE).then(|| ValueId::new(self.raw_id))
     }
 }
 
@@ -94,9 +137,11 @@ impl InstrRef {
         self.instr
     }
 
-    pub(crate) fn id<T: ValuePrimitive>(&self) -> ValueId<T> {
-        assert_eq!(self.instr.result_type(), T::TYPE);
-        ValueId::new(self.raw_id)
+    pub(crate) fn id(&self) -> AnyValueId {
+        AnyValueId {
+            raw_id: self.raw_id,
+            ty: self.instr.result_type(),
+        }
     }
 
     pub(crate) fn index(&self) -> usize {
@@ -234,6 +279,75 @@ impl Instr {
         }
     }
 
+    pub(crate) fn sources(self) -> impl Iterator<Item = AnyValueId> {
+        let ids: [Option<AnyValueId>; 3] = match self {
+            Instr::I32Const(_) | Instr::BoolConst(_) | Instr::F32Const(_) => [None; 3],
+
+            Instr::CopyI32(src) | Instr::F32FromI32(src) => [Some(src.erased()), None, None],
+
+            Instr::CopyBool(src)
+            | Instr::Not(src)
+            | Instr::I32FromBool(src)
+            | Instr::F32FromBool(src) => [Some(src.erased()), None, None],
+
+            Instr::CopyF32(src)
+            | Instr::F32Neg(src)
+            | Instr::F32Abs(src)
+            | Instr::F32Sign(src)
+            | Instr::F32Floor(src)
+            | Instr::F32Exp(src)
+            | Instr::F32Ln(src)
+            | Instr::F32Lg(src)
+            | Instr::F32Sin(src)
+            | Instr::F32Cos(src)
+            | Instr::F32Tan(src)
+            | Instr::F32Cot(src) => [Some(src.erased()), None, None],
+
+            Instr::I32Add(lhs, rhs)
+            | Instr::I32Sub(lhs, rhs)
+            | Instr::I32Mul(lhs, rhs)
+            | Instr::I32Eq(lhs, rhs)
+            | Instr::I32Ne(lhs, rhs)
+            | Instr::I32Lt(lhs, rhs)
+            | Instr::I32Le(lhs, rhs)
+            | Instr::I32Gt(lhs, rhs)
+            | Instr::I32Ge(lhs, rhs) => [Some(lhs.erased()), Some(rhs.erased()), None],
+
+            Instr::And(lhs, rhs) | Instr::Or(lhs, rhs) | Instr::Xor(lhs, rhs) => {
+                [Some(lhs.erased()), Some(rhs.erased()), None]
+            }
+
+            Instr::F32Add(lhs, rhs)
+            | Instr::F32Sub(lhs, rhs)
+            | Instr::F32Mul(lhs, rhs)
+            | Instr::F32Div(lhs, rhs)
+            | Instr::F32Min(lhs, rhs)
+            | Instr::F32Max(lhs, rhs)
+            | Instr::F32Powf(lhs, rhs)
+            | Instr::F32Eq(lhs, rhs)
+            | Instr::F32Ne(lhs, rhs)
+            | Instr::F32Lt(lhs, rhs)
+            | Instr::F32Le(lhs, rhs)
+            | Instr::F32Gt(lhs, rhs)
+            | Instr::F32Ge(lhs, rhs) => [Some(lhs.erased()), Some(rhs.erased()), None],
+
+            Instr::F32Powi(lhs, rhs) => [Some(lhs.erased()), Some(rhs.erased()), None],
+
+            Instr::I32Sel(cond, v_true, v_false) => [
+                Some(cond.erased()),
+                Some(v_true.erased()),
+                Some(v_false.erased()),
+            ],
+            Instr::F32Sel(cond, v_true, v_false) => [
+                Some(cond.erased()),
+                Some(v_true.erased()),
+                Some(v_false.erased()),
+            ],
+        };
+
+        ids.into_iter().flatten()
+    }
+
     fn shift_ids(self, delta: u16) -> Self {
         match self {
             Instr::I32Const(_) | Instr::BoolConst(_) | Instr::F32Const(_) => self,
@@ -304,6 +418,7 @@ impl Instr {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct Tape {
     args: Vec<Type>,
     results: Vec<Type>,
@@ -376,7 +491,8 @@ impl Inlined<'_> {
 
     pub(crate) fn result<T: ValuePrimitive>(&self, index: usize) -> NewId<T> {
         let from_back = self.tape.results.len() - 1 - index;
-        self.convert(self.tape.instrs().nth_back(from_back).unwrap().id())
+        let id = self.tape.instrs().nth_back(from_back).unwrap().id();
+        self.convert(id.typed().expect("result type mismatch"))
     }
 }
 

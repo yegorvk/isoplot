@@ -1,11 +1,12 @@
 use std::{
     f32::consts::{FRAC_PI_2, PI},
-    iter,
+    fmt, iter,
 };
 
 use bytemuck::{Pod, Zeroable};
 
 use crate::{
+    MIN_F32_MAGNITUDE,
     autodiff::Gradient,
     layout::{ValueType, Vector},
     program::Program,
@@ -13,11 +14,17 @@ use crate::{
 };
 
 /// A closed and bounded `f32` interval
-#[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable)]
+#[derive(Copy, Clone, PartialEq, Pod, Zeroable)]
 #[repr(C)]
 pub struct Interval {
     lo: f32,
     hi: f32,
+}
+
+impl fmt::Debug for Interval {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Interval({}, {})", self.lo, self.hi)
+    }
 }
 
 impl Interval {
@@ -52,31 +59,73 @@ impl Vector for Interval {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Pod, Zeroable)]
+#[repr(C)]
+pub struct Bounds {
+    interval: Interval,
+    poison: i32,
+}
+
+impl fmt::Debug for Bounds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Bounds({}, {}, poisoned: {})",
+            self.interval.lo,
+            self.interval.hi,
+            self.poison != 0
+        )
+    }
+}
+
+impl Bounds {
+    /// Returns the enclosed interval unless it may have crossed a discontinuity.
+    pub const fn get(&self) -> Option<Interval> {
+        if self.poison == 0 {
+            Some(self.interval)
+        } else {
+            None
+        }
+    }
+}
+
+impl Vector for Bounds {
+    type Scalar = Bounds;
+    const LEN: usize = 3;
+
+    fn types() -> impl Iterator<Item = ValueType> {
+        [ValueType::F32, ValueType::F32, ValueType::I32].into_iter()
+    }
+}
+
 mod private {
     use crate::layout::Layout;
 
     #[doc(hidden)]
     pub trait IntervalType: Layout {
-        type Interval: Layout;
+        type Arg: Layout;
+        type Ret: Layout;
     }
 }
 
 pub(crate) use private::IntervalType;
 
 impl IntervalType for f32 {
-    type Interval = Interval;
+    type Arg = Interval;
+    type Ret = Bounds;
 }
 
 impl<T: IntervalType, const N: usize> IntervalType for [T; N] {
-    type Interval = [T::Interval; N];
+    type Arg = [T::Arg; N];
+    type Ret = [T::Ret; N];
 }
 
 impl<V: IntervalType> IntervalType for Gradient<V> {
-    type Interval = Gradient<V::Interval>;
+    type Arg = Gradient<V::Arg>;
+    type Ret = Gradient<V::Ret>;
 }
 
-type IntervalProgram<Args, Ret> =
-    Program<<Args as IntervalType>::Interval, <Ret as IntervalType>::Interval>;
+type IntervalProgram<Args, Ret> = Program<<Args as IntervalType>::Arg, <Ret as IntervalType>::Ret>;
 
 pub(crate) fn interval<Args, Ret>(program: &Program<Args, Ret>) -> IntervalProgram<Args, Ret>
 where
@@ -159,6 +208,8 @@ struct Translator<'a> {
     source: &'a Tape,
     builder: TapeBuilder,
     values: Vec<Value>,
+    poison: Vec<NewId<bool>>,
+    clean: NewId<bool>,
 }
 
 impl<'a> Translator<'a> {
@@ -174,42 +225,152 @@ impl<'a> Translator<'a> {
         );
 
         let num_args = source.num_args();
-        let builder = Tape::builder(
-            vec![Type::F32; 2 * num_args],
-            vec![Type::F32; 2 * source.num_results()],
-        );
+
+        let result_types = (0..source.num_results())
+            .flat_map(|_| [Type::F32, Type::F32, Type::I32])
+            .collect();
+
+        let mut builder = Tape::builder(vec![Type::F32; 2 * num_args], result_types);
 
         let values = (0..num_args)
             .map(|i| Value::F32(F32Range::new(builder.arg(2 * i), builder.arg(2 * i + 1))))
             .collect();
 
+        let clean = builder.bool_const(false);
+
         Self {
             source,
             builder,
             values,
+            poison: vec![clean; num_args],
+            clean,
         }
     }
 
     fn run(mut self) -> Tape {
         for r in self.source.instrs() {
-            let value = self.translate(r.instr());
+            let instr = r.instr();
+            let mut inherited = self.clean;
+            for source in instr.sources() {
+                inherited = self.builder.or(inherited, self.poison[source.index()]);
+            }
+
+            let (value, poison) = self.translate(instr, inherited);
             self.values.push(value);
+            self.poison.push(poison);
         }
 
         let num_results = self.source.num_results();
-        for &value in &self.values[self.values.len() - num_results..] {
-            let Value::F32(range) = value else {
+        let first = self.values.len() - num_results;
+
+        for i in first..(first + num_results) {
+            let Value::F32(range) = self.values[i] else {
                 unreachable!("interval results must be f32");
             };
+
             self.builder.copy_f32(range.lo);
             self.builder.copy_f32(range.hi);
+            self.builder.i32_from_bool(self.poison[i]);
         }
 
         self.builder.build().unwrap()
     }
 
-    fn translate(&mut self, instr: Instr) -> Value {
-        match instr {
+    fn translate(&mut self, instr: Instr, inherited: NewId<bool>) -> (Value, NewId<bool>) {
+        let value = match instr {
+            Instr::F32Div(lhs, rhs) => {
+                let (x, y) = (self.f32(lhs), self.f32(rhs));
+                let pole = self.contains_zero(y);
+                let recip = self.recip(y);
+                let range = self.mul_range(x, recip);
+                return (range.into(), self.builder.or(inherited, pole));
+            }
+
+            Instr::F32Powf(lhs, rhs) => {
+                // lhs^rhs = exp(rhs * ln(lhs)), valid for positive bases only
+                let (x, y) = (self.f32(lhs), self.f32(rhs));
+                let ln = x.map(|v| self.builder.f32_ln(v));
+                let exponent = self.mul_range(ln, y);
+                let range = exponent.map(|v| self.builder.f32_exp(v));
+                let clamped = self.below_min_magnitude(x);
+                return (range.into(), self.builder.or(inherited, clamped));
+            }
+
+            Instr::F32Powi(lhs, rhs) => {
+                let x = self.f32(lhs);
+                let n = self.i32(rhs);
+                let [a, b] = x.values().map(|v| self.builder.f32_powi(v, n));
+                let range = self.f32_hull(a, b);
+
+                // `range` might miss zero for even powers, e.g. [-1, 2]^2 = [1, 4].
+                let zero_in_base = self.contains_zero(x);
+                let range = self.include_zero_if(range, zero_in_base);
+
+                // Negative powers blow up around zero.
+                let zero = self.builder.i32_const(0);
+                let negative_power = self.builder.i32_lt(n, zero);
+                let pole = self.builder.and(zero_in_base, negative_power);
+                return (range.into(), self.builder.or(inherited, pole));
+            }
+
+            Instr::F32Ln(src) => {
+                let x = self.f32(src);
+                let range = x.map(|v| self.builder.f32_ln(v));
+                let clamped = self.below_min_magnitude(x);
+                return (range.into(), self.builder.or(inherited, clamped));
+            }
+
+            Instr::F32Lg(src) => {
+                let x = self.f32(src);
+                let range = x.map(|v| self.builder.f32_lg(v));
+                let clamped = self.below_min_magnitude(x);
+                return (range.into(), self.builder.or(inherited, clamped));
+            }
+
+            Instr::F32Tan(src) => {
+                let x = self.f32(src);
+                let [a, b] = x.values().map(|v| self.builder.f32_tan(v));
+                let range = self.f32_hull(a, b);
+                let pole = self.contains_modulo(x, FRAC_PI_2, PI);
+                return (range.into(), self.builder.or(inherited, pole));
+            }
+
+            Instr::F32Cot(src) => {
+                let x = self.f32(src);
+                let [a, b] = x.values().map(|v| self.builder.f32_cot(v));
+                let range = self.f32_hull(a, b);
+                let pole = self.contains_modulo(x, 0.0, PI);
+                return (range.into(), self.builder.or(inherited, pole));
+            }
+
+            Instr::F32Sel(cond_id, v_true, v_false) => {
+                let cond = self.bool(cond_id);
+                let (t, f) = (self.f32(v_true), self.f32(v_false));
+
+                // Only branches that may be taken can poison the result.
+                let (p_t, p_f) = (self.poison[v_true.index()], self.poison[v_false.index()]);
+                let never_true = self.builder.not(cond.all);
+                let taken_t = self.builder.and(cond.any, p_t);
+                let taken_f = self.builder.and(never_true, p_f);
+                let taken = self.builder.or(taken_t, taken_f);
+                let poison = self.builder.or(self.poison[cond_id.index()], taken);
+
+                let range = match cond.definite() {
+                    Some(cond) => self.select_range(cond, t, f),
+                    None => {
+                        // An undecided condition yields the hull of both branches.
+                        let merged = F32Range::new(
+                            self.builder.f32_min(t.lo, f.lo),
+                            self.builder.f32_max(t.hi, f.hi),
+                        );
+                        let unless_true = self.select_range(cond.any, merged, f);
+                        self.select_range(cond.all, t, unless_true)
+                    }
+                };
+
+                return (range.into(), poison);
+            }
+
             Instr::I32Const(c) => Value::I32(self.builder.i32_const(c)),
             Instr::BoolConst(c) => BoolRange::point(self.builder.bool_const(c)).into(),
             Instr::F32Const(c) => F32Range::point(self.builder.f32_const(c)).into(),
@@ -384,12 +545,6 @@ impl<'a> Translator<'a> {
                 self.mul_range(x, y).into()
             }
 
-            Instr::F32Div(lhs, rhs) => {
-                let (x, y) = (self.f32(lhs), self.f32(rhs));
-                let recip = self.recip(y);
-                self.mul_range(x, recip).into()
-            }
-
             Instr::F32Min(lhs, rhs) => {
                 let (x, y) = (self.f32(lhs), self.f32(rhs));
                 F32Range::new(
@@ -408,48 +563,9 @@ impl<'a> Translator<'a> {
                 .into()
             }
 
-            Instr::F32Powf(lhs, rhs) => {
-                // lhs^rhs = exp(rhs * ln(lhs))
-                let (x, y) = (self.f32(lhs), self.f32(rhs));
-                let clamped = self.ensure_positive_safe(x);
-                let ln = clamped.map(|v| self.builder.f32_ln(v));
-                let exponent = self.mul_range(ln, y);
-                exponent.map(|v| self.builder.f32_exp(v)).into()
-            }
-
-            Instr::F32Powi(lhs, rhs) => {
-                let x = self.f32(lhs);
-                let n = self.i32(rhs);
-                let nonzero = self.ensure_nonzero(x);
-                let [a, b] = nonzero.values().map(|v| self.builder.f32_powi(v, n));
-                let range = self.f32_hull(a, b);
-
-                // `range` might miss zero for even powers, e.g. [-1, 2]^2 = [1, 4].
-                let zero_in_base = self.contains_zero(x);
-                let range = self.include_zero_if(range, zero_in_base);
-
-                // Negative powers blow up around zero.
-                let zero = self.builder.i32_const(0);
-                let negative_power = self.builder.i32_lt(n, zero);
-                let pole = self.builder.and(zero_in_base, negative_power);
-                self.widen_if(range, pole).into()
-            }
-
             Instr::F32Exp(src) => {
                 let x = self.f32(src);
                 x.map(|v| self.builder.f32_exp(v)).into()
-            }
-
-            Instr::F32Ln(src) => {
-                let x = self.f32(src);
-                let clamped = self.ensure_positive_safe(x);
-                clamped.map(|v| self.builder.f32_ln(v)).into()
-            }
-
-            Instr::F32Lg(src) => {
-                let x = self.f32(src);
-                let clamped = self.ensure_positive_safe(x);
-                clamped.map(|v| self.builder.f32_lg(v)).into()
             }
 
             Instr::F32Sin(src) => {
@@ -465,20 +581,6 @@ impl<'a> Translator<'a> {
                 let [a, b] = x.values().map(|v| self.builder.f32_cos(v));
                 let range = self.f32_hull(a, b);
                 self.normalized_periodic_wave(x, range, 0.0, PI).into()
-            }
-
-            Instr::F32Tan(src) => {
-                let x = self.f32(src);
-                let [a, b] = x.values().map(|v| self.builder.f32_tan(v));
-                let range = self.f32_hull(a, b);
-                self.periodic_monotone(x, range, FRAC_PI_2, PI).into()
-            }
-
-            Instr::F32Cot(src) => {
-                let x = self.f32(src);
-                let [a, b] = x.values().map(|v| self.builder.f32_cot(v));
-                let range = self.f32_hull(a, b);
-                self.periodic_monotone(x, range, 0.0, PI).into()
             }
 
             Instr::F32Eq(lhs, rhs) => {
@@ -521,24 +623,9 @@ impl<'a> Translator<'a> {
                 let (t, f) = (self.i32(v_true), self.i32(v_false));
                 Value::I32(self.builder.i32_sel(cond, t, f))
             }
+        };
 
-            Instr::F32Sel(cond, v_true, v_false) => {
-                let cond = self.bool(cond);
-                let (t, f) = (self.f32(v_true), self.f32(v_false));
-                match cond.definite() {
-                    Some(cond) => self.select_range(cond, t, f).into(),
-                    None => {
-                        // An undecided condition yields the hull of both branches.
-                        let merged = F32Range::new(
-                            self.builder.f32_min(t.lo, f.lo),
-                            self.builder.f32_max(t.hi, f.hi),
-                        );
-                        let unless_true = self.select_range(cond.any, merged, f);
-                        self.select_range(cond.all, t, unless_true).into()
-                    }
-                }
-            }
-        }
+        (value, inherited)
     }
 
     fn i32(&self, id: ValueId<i32>) -> NewId<i32> {
@@ -613,8 +700,15 @@ impl<'a> Translator<'a> {
     }
 
     fn contains_zero(&mut self, x: F32Range) -> NewId<bool> {
-        let signs = x.map(|v| self.builder.f32_sign(v));
-        self.builder.f32_lt(signs.lo, signs.hi)
+        let zero = self.builder.f32_const(0.0);
+        let lo = self.builder.f32_le(x.lo, zero);
+        let hi = self.builder.f32_ge(x.hi, zero);
+        self.builder.and(lo, hi)
+    }
+
+    fn below_min_magnitude(&mut self, x: F32Range) -> NewId<bool> {
+        let min = self.builder.f32_const(MIN_F32_MAGNITUDE);
+        self.builder.f32_lt(x.lo, min)
     }
 
     fn include_zero_if(&mut self, x: F32Range, cond: NewId<bool>) -> F32Range {
@@ -624,14 +718,6 @@ impl<'a> Translator<'a> {
             self.builder.f32_max(x.hi, zero),
         );
         self.select_range(cond, extended, x)
-    }
-
-    fn widen_if(&mut self, x: F32Range, cond: NewId<bool>) -> F32Range {
-        let wide = F32Range::new(
-            self.builder.f32_const(-f32::MAX),
-            self.builder.f32_const(f32::MAX),
-        );
-        self.select_range(cond, wide, x)
     }
 
     fn mul_range(&mut self, x: F32Range, y: F32Range) -> F32Range {
@@ -644,30 +730,11 @@ impl<'a> Translator<'a> {
         F32Range::new(self.min_of(products), self.max_of(products))
     }
 
-    fn ensure_magnitude(&mut self, v: NewId<f32>, min: NewId<f32>) -> NewId<f32> {
-        let sign = self.builder.f32_sign(v);
-        let magnitude = self.builder.f32_abs(v);
-        let clamped = self.builder.f32_max(magnitude, min);
-        self.builder.f32_mul(sign, clamped)
-    }
-
-    fn ensure_nonzero(&mut self, x: F32Range) -> F32Range {
-        let tiny = self.builder.f32_const(f32::MIN_POSITIVE);
-        x.map(|v| self.ensure_magnitude(v, tiny))
-    }
-
+    // Sound only when `x` excludes zero; the caller poisons the result otherwise.
     fn recip(&mut self, x: F32Range) -> F32Range {
         let one = self.builder.f32_const(1.0);
-        let nonzero = self.ensure_nonzero(x);
-        let [a, b] = nonzero.values().map(|v| self.builder.f32_div(one, v));
-        let range = self.f32_hull(a, b);
-        let pole = self.contains_zero(x);
-        self.widen_if(range, pole)
-    }
-
-    fn ensure_positive_safe(&mut self, x: F32Range) -> F32Range {
-        let tiny = self.builder.f32_const(f32::MIN_POSITIVE);
-        x.map(|v| self.builder.f32_max(v, tiny))
+        let [a, b] = x.values().map(|v| self.builder.f32_div(one, v));
+        self.f32_hull(a, b)
     }
 
     fn select_range(
@@ -715,12 +782,6 @@ impl<'a> Translator<'a> {
         let lo = self.builder.f32_sel(has_min, neg_one, im.lo);
         F32Range::new(lo, hi)
     }
-
-    // Periodic functions monotone between consecutive poles, at `pole` modulo `period`
-    fn periodic_monotone(&mut self, x: F32Range, im: F32Range, pole: f32, period: f32) -> F32Range {
-        let has_pole = self.contains_modulo(x, pole, period);
-        self.widen_if(im, has_pole)
-    }
 }
 
 #[cfg(test)]
@@ -728,14 +789,23 @@ mod tests {
     use super::*;
     use crate::backend::{Fallback, Instance};
 
-    fn eval<const N: usize>(tape: &Tape, args: &[Interval; N]) -> Interval {
+    fn bounds<const N: usize>(tape: &Tape, args: &[Interval; N]) -> Bounds {
         let tape = translate(tape);
         assert_eq!(tape.num_args(), 2 * N);
-        assert_eq!(tape.num_results(), 2);
+        assert_eq!(tape.num_results(), 3);
 
-        Instance::<Fallback, [Interval; N], Interval>::new(tape)
+        Instance::<Fallback, [Interval; N], Bounds>::new(tape)
             .evaluator()
             .evaluate(args)
+    }
+
+    fn eval<const N: usize>(tape: &Tape, args: &[Interval; N]) -> Interval {
+        let bounds = bounds(tape, args);
+        bounds.get().unwrap_or_else(|| panic!("{bounds:?}"))
+    }
+
+    fn poisoned<const N: usize>(tape: &Tape, args: &[Interval; N]) -> bool {
+        bounds(tape, args).get().is_none()
     }
 
     fn interval(min: f32, max: f32) -> Interval {
@@ -769,10 +839,6 @@ mod tests {
             (actual.lo - expected.lo).abs() < 1e-5 && (actual.hi - expected.hi).abs() < 1e-5,
             "expected {expected:?}, got {actual:?}"
         );
-    }
-
-    fn assert_wide(actual: Interval) {
-        assert!(actual.lo <= -1e30 && actual.hi >= 1e30, "{actual:?}");
     }
 
     #[test]
@@ -836,7 +902,9 @@ mod tests {
             eval(&tape, &[interval(1.0, 2.0), interval(-4.0, -2.0)]),
             interval(-1.0, -0.25)
         );
-        assert_wide(eval(&tape, &[interval(1.0, 2.0), interval(-1.0, 1.0)]));
+        assert!(poisoned(&tape, &[interval(1.0, 2.0), interval(-1.0, 1.0)]));
+        assert!(poisoned(&tape, &[interval(1.0, 2.0), interval(0.0, 1.0)]));
+        assert!(poisoned(&tape, &[interval(1.0, 2.0), interval(-1.0, 0.0)]));
     }
 
     #[test]
@@ -851,13 +919,9 @@ mod tests {
 
         let inverse = powi(-1);
         assert_eq!(eval(&inverse, &[interval(1.0, 2.0)]), interval(0.5, 1.0));
-        assert_wide(eval(&inverse, &[interval(-1.0, 2.0)]));
-
-        let touching = eval(&inverse, &[interval(0.0, 2.0)]);
-        assert!(
-            touching.lo == 0.5 && touching.hi >= 1e30 && touching.hi.is_finite(),
-            "{touching:?}"
-        );
+        assert!(poisoned(&inverse, &[interval(-1.0, 2.0)]));
+        assert!(poisoned(&inverse, &[interval(0.0, 2.0)]));
+        assert!(!poisoned(&square, &[interval(-1.0, 2.0)]));
     }
 
     #[test]
@@ -871,6 +935,8 @@ mod tests {
             eval(&tape, &[interval(2.0, 4.0), interval(-1.0, 0.5)]),
             interval(0.25, 2.0),
         );
+        assert!(poisoned(&tape, &[interval(-1.0, 4.0), interval(2.0, 3.0)]));
+        assert!(poisoned(&tape, &[interval(0.0, 4.0), interval(2.0, 3.0)]));
     }
 
     #[test]
@@ -888,15 +954,17 @@ mod tests {
             interval(0.0, 2.0),
         );
 
-        let lowest = f32::MIN_POSITIVE.ln();
-        assert_close(
-            eval(&unary(TapeBuilder::f32_ln), &[interval(-1.0, 4.0)]),
-            interval(lowest, 4f32.ln()),
-        );
-        assert_close(
-            eval(&unary(TapeBuilder::f32_ln), &[interval(-2.0, -1.0)]),
-            interval(lowest, lowest),
-        );
+        let lowest = MIN_F32_MAGNITUDE.ln();
+
+        let ln = bounds(&unary(TapeBuilder::f32_ln), &[interval(-1.0, 4.0)]);
+        assert!(ln.get().is_none());
+        assert_close(ln.interval, interval(lowest, 4f32.ln()));
+
+        let ln = bounds(&unary(TapeBuilder::f32_ln), &[interval(-2.0, -1.0)]);
+        assert!(ln.get().is_none());
+        assert_close(ln.interval, interval(lowest, lowest));
+
+        assert!(poisoned(&unary(TapeBuilder::f32_lg), &[interval(0.0, 1.0)]));
 
         let sin = unary(TapeBuilder::f32_sin);
         assert_close(
@@ -930,15 +998,87 @@ mod tests {
             eval(&tan, &[interval(-1.0, -0.5)]),
             interval((-1f32).tan(), (-0.5f32).tan()),
         );
-        assert_wide(eval(&tan, &[interval(1.0, 2.0)]));
-        assert_wide(eval(&tan, &[interval(0.0, 4.0)]));
+        assert!(poisoned(&tan, &[interval(1.0, 2.0)]));
+        assert!(poisoned(&tan, &[interval(0.0, 4.0)]));
 
         let cot = unary(TapeBuilder::f32_cot);
         assert_close(
             eval(&cot, &[interval(0.5, 1.0)]),
             interval(1f32.tan().recip(), 0.5f32.tan().recip()),
         );
-        assert_wide(eval(&cot, &[interval(-0.5, 0.5)]));
+        assert!(poisoned(&cot, &[interval(-0.5, 0.5)]));
+    }
+
+    #[test]
+    fn results_are_trailing_instructions() {
+        // Two results: nothing but copies and flag conversions may trail them.
+        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32; 2]);
+        let x = b.arg(0);
+        let one = b.f32_const(1.0);
+        let a = b.f32_add(x, one);
+        b.f32_add(a, one);
+        let tape = translate(&b.build().unwrap());
+
+        let tail: Vec<_> = tape.instrs().rev().take(6).map(|r| r.instr()).collect();
+        for chunk in tail.chunks(3) {
+            assert!(matches!(chunk[0], Instr::I32FromBool(_)), "{tail:?}");
+            assert!(matches!(chunk[1], Instr::CopyF32(_)), "{tail:?}");
+            assert!(matches!(chunk[2], Instr::CopyF32(_)), "{tail:?}");
+        }
+    }
+
+    #[test]
+    fn poison_propagates() {
+        // f = 1 / x + 1
+        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let x = b.arg(0);
+        let one = b.f32_const(1.0);
+        let recip = b.f32_div(one, x);
+        b.f32_add(recip, one);
+        let tape = b.build().unwrap();
+
+        assert_eq!(eval(&tape, &[interval(1.0, 2.0)]), interval(1.5, 2.0));
+        assert!(poisoned(&tape, &[interval(-1.0, 1.0)]));
+    }
+
+    #[test]
+    fn poison_follows_decided_branch() {
+        // f = if x < 0 { 1 / x } else { x }
+        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let x = b.arg(0);
+        let zero = b.f32_const(0.0);
+        let one = b.f32_const(1.0);
+        let negative = b.f32_lt(x, zero);
+        let recip = b.f32_div(one, x);
+        b.f32_sel(negative, recip, x);
+        let tape = b.build().unwrap();
+
+        // The untaken branch is poisoned by the pole at zero, but it is untaken.
+        assert_eq!(eval(&tape, &[interval(0.0, 2.0)]), interval(0.0, 2.0));
+        assert_eq!(eval(&tape, &[interval(-2.0, -1.0)]), interval(-1.0, -0.5));
+        assert!(poisoned(&tape, &[interval(-1.0, 1.0)]));
+    }
+
+    #[test]
+    fn poison_through_gradient() {
+        // f = 1 / x
+        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let x = b.arg(0);
+        let one = b.f32_const(1.0);
+        b.f32_div(one, x);
+        let tape = b.build().unwrap();
+
+        let program = Program::<f32, f32>::new(tape).autodiff().interval();
+        let evaluator = program.instantiate::<Fallback>().evaluator();
+
+        let clean = evaluator.evaluate(&interval(1.0, 2.0));
+        assert!(clean.value.get().is_some());
+        assert!(clean.gradient.get().is_some());
+        assert_eq!(clean.value.get(), Some(interval(0.5, 1.0)));
+
+        let poisoned = evaluator.evaluate(&interval(-1.0, 2.0));
+        assert!(poisoned.value.get().is_none());
+        assert!(poisoned.gradient.get().is_none());
     }
 
     #[test]

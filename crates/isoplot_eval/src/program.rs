@@ -54,6 +54,7 @@ impl<'a, Args: Layout> ProgramDesc<'a, Args> {
     }
 }
 
+#[derive(Debug)]
 pub struct Program<Args, Ret> {
     tape: Tape,
     _marker: PhantomData<fn() -> (Args, Ret)>,
@@ -131,7 +132,7 @@ where
     Args: interval::IntervalType,
     Ret: interval::IntervalType,
 {
-    pub fn interval(&self) -> Program<Args::Interval, Ret::Interval> {
+    pub fn interval(&self) -> Program<Args::Arg, Ret::Ret> {
         interval::interval(self)
     }
 }

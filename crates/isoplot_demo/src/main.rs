@@ -19,7 +19,7 @@ use crate::{
     plot::{Plot, PlotPlugin},
 };
 
-const DEFAULT_EQUATION: &str = "max(y - (x^2 + z^2), x^2+y^2+z^2 - 10)";
+const DEFAULT_EQUATION: &str = "y - ln(-(x^2 - z^3))";
 
 #[derive(Resource)]
 struct ActivePlot {
@@ -178,7 +178,7 @@ fn submit_equation(
 }
 
 fn create_plot(equation: Equation) -> Plot {
-    Plot::new(equation, 5, 7)
+    Plot::new(equation, 4, 5)
 }
 
 fn toggle_focus(

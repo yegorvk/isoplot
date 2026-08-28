@@ -4,9 +4,18 @@ use std::{
 };
 
 use crate::{
+    MIN_F32_MAGNITUDE,
     layout::RawValue,
     tape::{Instr, Tape, ValueId},
 };
+
+fn ensure_magnitude(x: f32) -> f32 {
+    x.abs().max(MIN_F32_MAGNITUDE).copysign(x)
+}
+
+fn ensure_positive(x: f32) -> f32 {
+    x.max(MIN_F32_MAGNITUDE)
+}
 
 pub(super) struct Fallback {
     tape: Arc<Tape>,
@@ -95,15 +104,22 @@ impl Evaluator {
                 Instr::F32Add(lhs, rhs) => RawValue::from_f32(v_f32(lhs) + v_f32(rhs)),
                 Instr::F32Sub(lhs, rhs) => RawValue::from_f32(v_f32(lhs) - v_f32(rhs)),
                 Instr::F32Mul(lhs, rhs) => RawValue::from_f32(v_f32(lhs) * v_f32(rhs)),
-                Instr::F32Div(lhs, rhs) => RawValue::from_f32(v_f32(lhs) / v_f32(rhs)),
+                Instr::F32Div(lhs, rhs) => {
+                    let divisor = ensure_magnitude(v_f32(rhs));
+                    RawValue::from_f32(v_f32(lhs) / divisor)
+                }
                 Instr::F32Min(lhs, rhs) => RawValue::from_f32(v_f32(lhs).min(v_f32(rhs))),
                 Instr::F32Max(lhs, rhs) => RawValue::from_f32(v_f32(lhs).max(v_f32(rhs))),
-                Instr::F32Powf(lhs, rhs) => RawValue::from_f32(v_f32(lhs).powf(v_f32(rhs))),
-                Instr::F32Powi(lhs, rhs) => RawValue::from_f32(v_f32(lhs).powi(v_i32(rhs))),
+                Instr::F32Powf(lhs, rhs) => {
+                    RawValue::from_f32(ensure_magnitude(v_f32(lhs)).powf(v_f32(rhs)))
+                }
+                Instr::F32Powi(lhs, rhs) => {
+                    RawValue::from_f32(ensure_magnitude(v_f32(lhs)).powi(v_i32(rhs)))
+                }
 
                 Instr::F32Exp(src) => RawValue::from_f32(v_f32(src).exp()),
-                Instr::F32Ln(src) => RawValue::from_f32(v_f32(src).ln()),
-                Instr::F32Lg(src) => RawValue::from_f32(v_f32(src).log10()),
+                Instr::F32Ln(src) => RawValue::from_f32(ensure_positive(v_f32(src)).ln()),
+                Instr::F32Lg(src) => RawValue::from_f32(ensure_positive(v_f32(src)).log10()),
                 Instr::F32Sin(src) => RawValue::from_f32(v_f32(src).sin()),
                 Instr::F32Cos(src) => RawValue::from_f32(v_f32(src).cos()),
                 Instr::F32Tan(src) => RawValue::from_f32(v_f32(src).tan()),
@@ -218,6 +234,22 @@ mod tests {
 
         let x = 1.5f32;
         assert_eq!(eval(&evaluator, &[x]), 6.0 + x.powi(3));
+    }
+
+    #[test]
+    fn f32_div_clamped() {
+        let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
+        let x = b.arg(0);
+        let y = b.arg(1);
+        b.f32_div(x, y);
+        let tape = b.build().unwrap();
+        let evaluator = Fallback::new(tape).evaluator();
+
+        let peak = 1.0 / MIN_F32_MAGNITUDE;
+        assert_eq!(eval(&evaluator, &[3.0, -2.0]), -1.5);
+        assert_eq!(eval(&evaluator, &[1.0, 0.0]), peak);
+        assert_eq!(eval(&evaluator, &[1.0, -0.0]), -peak);
+        assert_eq!(eval(&evaluator, &[2.0, 1.0e-40]), 2.0 * peak);
     }
 
     #[test]

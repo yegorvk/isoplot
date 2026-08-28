@@ -50,10 +50,6 @@ impl Offset {
         }
     }
 
-    pub(crate) fn enumerate() -> impl Iterator<Item = Offset> {
-        (0..8).map(Offset)
-    }
-
     const fn from_components(x: bool, y: bool, z: bool) -> Self {
         Self(x as u8 | (y as u8 * 2) | (z as u8 * 4))
     }

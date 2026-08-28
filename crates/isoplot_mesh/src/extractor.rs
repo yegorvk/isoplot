@@ -1,5 +1,7 @@
 mod grid;
 
+use std::array;
+
 use glam::Vec3;
 
 use crate::{
@@ -10,7 +12,7 @@ use crate::{
     quant::Quant,
     source::{NormalField, ScalarField, Translate},
 };
-use grid::{AdaptiveGrid, Corners, EdgeSeam, FaceSeam};
+use grid::{AdaptiveGrid, EdgeSeam, FaceSeam};
 
 #[derive(Debug)]
 pub struct Chunk(AdaptiveGrid);
@@ -59,11 +61,14 @@ where
     where
         P: PopulateMesh,
     {
-        let grid = AdaptiveGrid::build(&self.scalar_field, self.max_level, |cell, corners| {
-            place_feature(&self.scalar_field, cell, corners)
+        let grid = AdaptiveGrid::build(&self.scalar_field, self.max_level, |cell| {
+            place_feature(&self.scalar_field, cell)
         });
 
-        grid.for_each_quad(|vertices| self.add_quad(vertices, &mut sink));
+        grid.for_each_quad(&self.scalar_field, |vertices| {
+            self.add_quad(vertices, &mut sink)
+        });
+
         Ok(Chunk(grid))
     }
 
@@ -79,7 +84,9 @@ where
         let ChunkFace { kind, face } = face;
         let grids = Face(face.0.each_ref().map(|chunk| &chunk.borrow_chunk().0));
 
-        FaceSeam::new(kind, grids).for_each_quad(|vertices| self.add_quad(vertices, &mut sink));
+        FaceSeam::new(kind, grids).for_each_quad(&self.scalar_field, |vertices| {
+            self.add_quad(vertices, &mut sink)
+        });
 
         Ok(())
     }
@@ -96,25 +103,27 @@ where
         let ChunkEdge { kind, edge } = edge;
         let grids = Edge(edge.0.each_ref().map(|chunk| &chunk.borrow_chunk().0));
 
-        EdgeSeam::new(kind, grids).for_each_quad(|vertices| self.add_quad(vertices, &mut sink));
+        EdgeSeam::new(kind, grids).for_each_quad(&self.scalar_field, |vertices| {
+            self.add_quad(vertices, &mut sink)
+        });
 
         Ok(())
     }
 
-    fn add_quad<P>(&self, mut vertices: [Vec3; 4], sink: &mut P)
+    fn add_quad<P>(&self, vertices: [Vec3; 4], sink: &mut P)
     where
         P: PopulateMesh,
     {
-        if vertices[0] == vertices[1] {
-            vertices[1] = vertices[3];
-            vertices[3] = vertices[2];
+        let [a, mut b, mut c, mut d] = vertices;
+
+        if a == b {
+            b = d;
+            d = c;
         }
 
-        if vertices[1] == vertices[2] {
-            vertices[2] = vertices[3];
+        if b == c {
+            c = d;
         }
-
-        let [a, b, c, d] = vertices;
 
         let mut emit_face = |face: [Vec3; 3]| {
             let c = face.iter().sum::<Vec3>() / 3.0;
@@ -199,19 +208,13 @@ impl<T> ChunkEdge<T> {
 #[derive(Debug)]
 pub struct ExtractError;
 
-fn place_feature<S: NormalField>(field: &S, cell: Quant, corners: Corners) -> Vec3 {
+fn place_feature<S: NormalField>(field: &S, cell: Quant) -> Option<Vec3> {
     const ITERS: usize = 25;
 
     let (min_corner, size) = cell.min_point_size();
 
-    let mut positions = [Vec3::ZERO; 8];
-    let mut values = [0f32; 8];
-
-    for i in 0..8 {
-        let corner = Corner::new(Offset::ALL[i]);
-        positions[i] = min_corner + size * corner.offset().as_vec3();
-        values[i] = field.sample(positions[i]);
-    }
+    let positions: [Vec3; 8] =
+        array::from_fn(|i| min_corner + size * Corner::new(Offset::ALL[i]).offset().as_vec3());
 
     let mut points = [Vec3::ZERO; 12];
     let mut normals = [Vec3::ZERO; 12];
@@ -227,13 +230,9 @@ fn place_feature<S: NormalField>(field: &S, cell: Quant, corners: Corners) -> Ve
 
             let (a, b) = (i as usize, j as usize);
 
-            if !corners
-                .contains_sign_change((Corner::new(Offset::ALL[a]), Corner::new(Offset::ALL[b])))
-            {
+            let Some(point) = field.find_intersection(positions[a], positions[b]) else {
                 continue;
-            }
-
-            let point = bisect(field, positions[a], positions[b], values[a], values[b]);
+            };
 
             points[count] = point;
             normals[count] = field.sample_normal(point);
@@ -242,7 +241,7 @@ fn place_feature<S: NormalField>(field: &S, cell: Quant, corners: Corners) -> Ve
     }
 
     if count == 0 {
-        return cell.center_point();
+        return None;
     }
 
     let mut x = Vec3::ZERO;
@@ -264,34 +263,5 @@ fn place_feature<S: NormalField>(field: &S, cell: Quant, corners: Corners) -> Ve
         x = (x + force / count as f32).clamp(min_corner, max_corner);
     }
 
-    x
-}
-
-fn bisect<S>(field: &S, a: Vec3, b: Vec3, v_a: f32, v_b: f32) -> Vec3
-where
-    S: ScalarField,
-{
-    const ITERS: usize = 3;
-
-    let (mut t_0, mut t_1) = (0.0f32, 1.0f32);
-    let (mut v_0, mut v_1) = (v_a, v_b);
-
-    for _ in 0..ITERS {
-        let t_m = 0.5 * (t_0 + t_1);
-        let v_m = field.sample(a.lerp(b, t_m));
-
-        if (v_m < 0.0) == (v_0 < 0.0) {
-            (t_0, v_0) = (t_m, v_m);
-        } else {
-            (t_1, v_1) = (t_m, v_m);
-        }
-    }
-
-    let t = if (v_0 - v_1).abs() > f32::EPSILON {
-        (t_0 + (t_1 - t_0) * v_0 / (v_0 - v_1)).clamp(t_0, t_1)
-    } else {
-        0.5 * (t_0 + t_1)
-    };
-
-    a.lerp(b, t)
+    x.is_finite().then_some(x)
 }

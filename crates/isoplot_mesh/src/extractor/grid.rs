@@ -13,51 +13,6 @@ use crate::{
     utils::array_transpose,
 };
 
-#[derive(Copy, Clone, Debug)]
-pub(super) struct Corners {
-    sign_mask: u8,
-    nan_mask: u8,
-}
-
-impl Corners {
-    fn from_fn<F>(mut f: F) -> Self
-    where
-        F: FnMut(Corner) -> f32,
-    {
-        let (mut sign_mask, mut nan_mask) = (0u8, 0u8);
-
-        for offset in Offset::enumerate() {
-            let value = f(Corner::new(offset));
-            let bit = 1u8 << offset.as_u8();
-
-            if value.is_nan() {
-                nan_mask |= bit;
-            } else if value.is_sign_positive() {
-                sign_mask |= bit;
-            }
-        }
-
-        Self {
-            sign_mask,
-            nan_mask,
-        }
-    }
-
-    pub(crate) fn contains_sign_change(&self, edge: (Corner, Corner)) -> bool {
-        let (a, b) = edge;
-        (self.is_defined(a) && self.is_defined(b))
-            && (self.is_sign_positive(a) != self.is_sign_positive(b))
-    }
-
-    fn is_sign_positive(&self, corner: Corner) -> bool {
-        self.sign_mask & (1u8 << corner.offset().as_u8()) != 0
-    }
-
-    fn is_defined(&self, corner: Corner) -> bool {
-        self.nan_mask & (1u8 << corner.offset().as_u8()) == 0
-    }
-}
-
 struct OctreeSource<S, P> {
     scalar_field: S,
     max_level: u8,
@@ -67,7 +22,7 @@ struct OctreeSource<S, P> {
 impl<S, P> BuildOctree<Feature> for OctreeSource<S, P>
 where
     S: ScalarField,
-    P: Fn(Quant, Corners) -> Vec3,
+    P: Fn(Quant) -> Option<Vec3>,
 {
     type Tag = Quant;
 
@@ -91,16 +46,11 @@ where
     fn place_leaf(&mut self, tag: Self::Tag) -> Feature {
         let (min_corner, size) = tag.min_point_size();
 
-        let corners = Corners::from_fn(|corner| {
-            let position = min_corner + size * corner.offset().as_vec3();
-            self.scalar_field.sample(position)
-        });
+        let vertex = (self.place_feature)(tag)
+            .unwrap_or_else(|| tag.center_point())
+            .clamp(min_corner, min_corner + size);
 
-        Feature {
-            vertex: (self.place_feature)(tag, corners),
-            quant: tag,
-            corners,
-        }
+        Feature { vertex, quant: tag }
     }
 }
 
@@ -108,7 +58,6 @@ where
 struct Feature {
     vertex: Vec3,
     quant: Quant,
-    corners: Corners,
 }
 
 #[derive(Debug)]
@@ -120,7 +69,7 @@ impl AdaptiveGrid {
     pub(crate) fn build<S, P>(field: S, max_level: u8, place_feature: P) -> Self
     where
         S: ScalarField,
-        P: Fn(Quant, Corners) -> Vec3,
+        P: Fn(Quant) -> Option<Vec3>,
     {
         let mut source = OctreeSource {
             scalar_field: field,
@@ -133,8 +82,9 @@ impl AdaptiveGrid {
         }
     }
 
-    pub(crate) fn for_each_quad<F>(&self, mut f: F)
+    pub(crate) fn for_each_quad<S, F>(&self, field: S, mut f: F)
     where
+        S: ScalarField,
         F: FnMut([Vec3; 4]),
     {
         let mut faces = Faces::default();
@@ -176,8 +126,9 @@ impl AdaptiveGrid {
             refine_node,
             |kind, keys| {
                 let features = keys.0.map(|key| self.get_feature(key).unwrap());
+                let cells = features.map(|feature| (feature, Vec3::ZERO));
 
-                if contains_sign_change(kind, features) {
+                if contains_intersection(&field, kind, cells) {
                     f(features.map(|feature| feature.vertex));
                 }
             },
@@ -199,8 +150,9 @@ impl<'a> FaceSeam<'a> {
         Self { kind, face }
     }
 
-    pub(crate) fn for_each_quad<F>(&self, mut f: F)
+    pub(crate) fn for_each_quad<S, F>(&self, field: S, mut f: F)
     where
+        S: ScalarField,
         F: FnMut([Vec3; 4]),
     {
         let mut faces = Faces::default();
@@ -217,7 +169,7 @@ impl<'a> FaceSeam<'a> {
                 (self.face.0[slot.as_usize()], self.kind.slot_offset(slot))
             });
 
-            emit_seam_quad(kind, cells, keys, &mut f);
+            emit_seam_quad(&field, kind, cells, keys, &mut f);
         });
     }
 }
@@ -232,8 +184,9 @@ impl<'a> EdgeSeam<'a> {
         Self { kind, face }
     }
 
-    pub(crate) fn for_each_quad<F>(&self, mut f: F)
+    pub(crate) fn for_each_quad<S, F>(&self, field: S, mut f: F)
     where
+        S: ScalarField,
         F: FnMut([Vec3; 4]),
     {
         let mut edges = Edges::default();
@@ -245,7 +198,7 @@ impl<'a> EdgeSeam<'a> {
             let cells = EdgeSlot::ALL
                 .map(|slot| (self.face.0[slot.as_usize()], self.kind.slot_offset(slot)));
 
-            emit_seam_quad(kind, cells, keys, &mut f);
+            emit_seam_quad(&field, kind, cells, keys, &mut f);
         });
     }
 }
@@ -333,25 +286,43 @@ fn refine_key(grid: &AdaptiveGrid, key: &Key, which: Corner) -> Option<Key> {
     }
 }
 
-fn emit_seam_quad<F>(kind: EdgeKind, cells: [(&AdaptiveGrid, Offset); 4], keys: [Key; 4], f: &mut F)
-where
+fn emit_seam_quad<S, F>(
+    field: S,
+    kind: EdgeKind,
+    cells: [(&AdaptiveGrid, Offset); 4],
+    keys: [Key; 4],
+    f: &mut F,
+) where
+    S: ScalarField,
     F: FnMut([Vec3; 4]),
 {
     let features: [&Feature; 4] = array::from_fn(|i| cells[i].0.get_feature(keys[i]).unwrap());
+    let cell_offsets = cells.map(|(_, offset)| offset.as_uvec3().as_vec3());
 
-    if contains_sign_change(kind, features) {
-        f(array::from_fn(|i| {
-            features[i].vertex + cells[i].1.as_uvec3().as_vec3()
-        }));
+    if contains_intersection(
+        field,
+        kind,
+        array::from_fn(|i| (features[i], cell_offsets[i])),
+    ) {
+        f(array::from_fn(|i| features[i].vertex + cell_offsets[i]));
     }
 }
 
-fn contains_sign_change(kind: EdgeKind, features: [&Feature; 4]) -> bool {
-    let (max_feature, [a, b]) = edge_corners(kind, |_, corner| corner)
-        .max_by_key(|(slot, _)| features[slot.as_usize()].quant.level())
+fn contains_intersection<S>(field: S, kind: EdgeKind, cells: [(&Feature, Vec3); 4]) -> bool
+where
+    S: ScalarField,
+{
+    let (slot, [a, b]) = edge_corners(kind, |_, corner| corner)
+        .max_by_key(|(slot, _)| cells[slot.as_usize()].0.quant.level())
         .unwrap();
 
-    features[max_feature.as_usize()]
-        .corners
-        .contains_sign_change((a, b))
+    let (feature, cell_offset) = cells[slot.as_usize()];
+    let (min_point, size) = feature.quant.min_point_size();
+
+    let [start, end] = [a, b].map(|corner| {
+        let corner_offset = size * corner.offset().as_vec3();
+        min_point + corner_offset + cell_offset
+    });
+
+    field.find_intersection(start, end).is_some()
 }

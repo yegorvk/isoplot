@@ -102,7 +102,9 @@ impl<'a> Autodiff<'a> {
             let Some(w_bar) = self.adjoints[r.index()] else {
                 continue;
             };
-            let w = self.inlined.convert(r.id());
+            let w = self
+                .inlined
+                .convert(r.id().typed().expect("adjoint of a non-f32 value"));
             self.propagate(r.instr(), w, w_bar);
         }
 
@@ -193,19 +195,21 @@ impl<'a> Autodiff<'a> {
 
             Instr::F32Min(lhs, rhs) => {
                 let (x, y) = (self.inlined.convert(lhs), self.inlined.convert(rhs));
-                let (lhs_low, lhs_high) = self.select_weights(x, y);
-                let c_l = self.builder.f32_mul(w_bar, lhs_low);
+                let le = self.builder.f32_le(x, y);
+                let zero = self.builder.f32_const(0.0);
+                let c_l = self.builder.f32_sel(le, w_bar, zero);
                 self.acc(lhs, c_l);
-                let c_r = self.builder.f32_mul(w_bar, lhs_high);
+                let c_r = self.builder.f32_sel(le, zero, w_bar);
                 self.acc(rhs, c_r);
             }
 
             Instr::F32Max(lhs, rhs) => {
                 let (x, y) = (self.inlined.convert(lhs), self.inlined.convert(rhs));
-                let (lhs_low, lhs_high) = self.select_weights(x, y);
-                let c_l = self.builder.f32_mul(w_bar, lhs_high);
+                let le = self.builder.f32_le(x, y);
+                let zero = self.builder.f32_const(0.0);
+                let c_l = self.builder.f32_sel(le, zero, w_bar);
                 self.acc(lhs, c_l);
-                let c_r = self.builder.f32_mul(w_bar, lhs_low);
+                let c_r = self.builder.f32_sel(le, w_bar, zero);
                 self.acc(rhs, c_r);
             }
 
@@ -298,17 +302,6 @@ impl<'a> Autodiff<'a> {
             None => contrib,
             Some(prev) => self.builder.f32_add(prev, contrib),
         });
-    }
-
-    /// Returns (1.0, 0.0) if `lhs` <= `rhs`, or (0.0, 1.0) otherwise.
-    fn select_weights(&mut self, lhs: NewId<f32>, rhs: NewId<f32>) -> (NewId<f32>, NewId<f32>) {
-        let half = self.builder.f32_const(0.5);
-        let diff = self.builder.f32_sub(rhs, lhs);
-        let sign = self.builder.f32_sign(diff);
-        let half_sign = self.builder.f32_mul(sign, half);
-        let lhs_low = self.builder.f32_add(half, half_sign);
-        let lhs_high = self.builder.f32_sub(half, half_sign);
-        (lhs_low, lhs_high)
     }
 }
 
@@ -416,8 +409,9 @@ mod tests {
         assert_eq!(gradient(&tape, &[2.0]), [8.0, 12.0]);
         assert_eq!(gradient(&tape, &[-2.0]), [8.0, -12.0]);
 
-        // must be finite everywhere
-        assert_eq!(gradient(&tape, &[0.0]), [0.0, 0.0]);
+        // the base is clamped at zero, so the result is tiny but finite
+        let m = crate::MIN_F32_MAGNITUDE;
+        assert_eq!(gradient(&tape, &[0.0]), [m.powi(3), 3.0 * m.powi(2)]);
     }
 
     #[test]

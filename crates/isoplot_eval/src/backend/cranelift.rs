@@ -12,9 +12,18 @@ use cranelift::module::{FuncId, Linkage, Module, default_libcall_names};
 use cranelift::native;
 
 use crate::{
+    MIN_F32_MAGNITUDE,
     layout::{RawValue, Vector},
     tape::{Instr, Tape, ValueId, ValuePrimitive},
 };
+
+fn ensure_magnitude(x: f32) -> f32 {
+    x.abs().max(MIN_F32_MAGNITUDE).copysign(x)
+}
+
+fn ensure_positive(x: f32) -> f32 {
+    x.max(MIN_F32_MAGNITUDE)
+}
 
 type SingleEvalFunc = extern "C" fn(*const f32) -> f32;
 type MultiEvalFunc = extern "C" fn(*const f32, *mut f32);
@@ -308,7 +317,13 @@ impl Translator<'_> {
             Instr::F32Add(lhs, rhs) => self.builder.ins().fadd(values[lhs], values[rhs]),
             Instr::F32Sub(lhs, rhs) => self.builder.ins().fsub(values[lhs], values[rhs]),
             Instr::F32Mul(lhs, rhs) => self.builder.ins().fmul(values[lhs], values[rhs]),
-            Instr::F32Div(lhs, rhs) => self.builder.ins().fdiv(values[lhs], values[rhs]),
+            Instr::F32Div(lhs, rhs) => {
+                let min = self.builder.ins().f32const(MIN_F32_MAGNITUDE);
+                let magnitude = self.builder.ins().fabs(values[rhs]);
+                let clamped = self.builder.ins().fmax(magnitude, min);
+                let divisor = self.builder.ins().fcopysign(clamped, values[rhs]);
+                self.builder.ins().fdiv(values[lhs], divisor)
+            }
 
             Instr::F32Min(lhs, rhs) => self.builder.ins().fmin(values[lhs], values[rhs]),
             Instr::F32Max(lhs, rhs) => self.builder.ins().fmax(values[lhs], values[rhs]),
@@ -448,6 +463,22 @@ mod tests {
     }
 
     #[test]
+    fn f32_div_clamped() {
+        let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
+        let x = b.arg(0);
+        let y = b.arg(1);
+        b.f32_div(x, y);
+        let tape = b.build().unwrap();
+        let inst = Instance::<f32>::new(&tape);
+
+        let peak = 1.0 / MIN_F32_MAGNITUDE;
+        assert_eq!(eval(&inst, &[3.0, -2.0]), -1.5);
+        assert_eq!(eval(&inst, &[1.0, 0.0]), peak);
+        assert_eq!(eval(&inst, &[1.0, -0.0]), -peak);
+        assert_eq!(eval(&inst, &[2.0, 1.0e-40]), 2.0 * peak);
+    }
+
+    #[test]
     fn i32_ops() {
         let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
         let x = b.arg(0);
@@ -574,11 +605,11 @@ mod tests {
 }
 
 extern "C" fn powf(x: f32, y: f32) -> f32 {
-    x.powf(y)
+    ensure_magnitude(x).powf(y)
 }
 
 extern "C" fn powi(x: f32, n: i32) -> f32 {
-    x.powi(n)
+    ensure_magnitude(x).powi(n)
 }
 
 extern "C" fn exp(x: f32) -> f32 {
@@ -586,11 +617,11 @@ extern "C" fn exp(x: f32) -> f32 {
 }
 
 extern "C" fn ln(x: f32) -> f32 {
-    x.ln()
+    ensure_positive(x).ln()
 }
 
 extern "C" fn lg(x: f32) -> f32 {
-    x.log10()
+    ensure_positive(x).log10()
 }
 
 extern "C" fn sin(x: f32) -> f32 {
