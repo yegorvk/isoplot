@@ -9,4 +9,5 @@ license.workspace = true
 arrayvec.workspace = true
 bilge.workspace = true
 derive-where.workspace = true
+fearless_simd.workspace = true
 glam.workspace = true

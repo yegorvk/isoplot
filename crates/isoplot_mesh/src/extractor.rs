@@ -2,12 +2,11 @@ mod grid;
 
 use std::array;
 
-use glam::Vec3;
-
 use crate::{
     lattice::{
         Corner, Edge, EdgeKey, EdgeKind, EdgeSlot, Face, FaceKey, FaceKind, FaceSlot, Offset,
     },
+    math::Vec3,
     mesh::{PopulateMesh, Vertex},
     quant::Quant,
     source::{NormalField, ScalarField, Translate},
@@ -48,7 +47,7 @@ impl<S> Extractor<S> {
 }
 
 impl<S: ScalarField> Extractor<Translate<S>> {
-    pub fn with_offset(scalar_field: S, offset: Vec3, max_level: u8) -> Self {
+    pub fn with_offset(scalar_field: S, offset: Vec3<f32>, max_level: u8) -> Self {
         Self::new(scalar_field.translated(offset), max_level)
     }
 }
@@ -110,7 +109,7 @@ where
         Ok(())
     }
 
-    fn add_quad<P>(&self, vertices: [Vec3; 4], sink: &mut P)
+    fn add_quad<P>(&self, vertices: [Vec3<f32>; 4], sink: &mut P)
     where
         P: PopulateMesh,
     {
@@ -125,8 +124,8 @@ where
             c = d;
         }
 
-        let mut emit_face = |face: [Vec3; 3]| {
-            let c = face.iter().sum::<Vec3>() / 3.0;
+        let mut emit_face = |face: [Vec3<f32>; 3]| {
+            let c = face.iter().copied().sum::<Vec3<f32>>() / 3.0;
             let n_c = self.scalar_field.sample_normal(c);
             sink.add_triangle(face.map(|position| Vertex::new(position, n_c)));
         };
@@ -208,13 +207,14 @@ impl<T> ChunkEdge<T> {
 #[derive(Debug)]
 pub struct ExtractError;
 
-fn place_feature<S: NormalField>(field: &S, cell: Quant) -> Option<Vec3> {
+fn place_feature<S: NormalField>(field: &S, cell: Quant) -> Option<Vec3<f32>> {
     const ITERS: usize = 25;
 
     let (min_corner, size) = cell.min_point_size();
 
-    let positions: [Vec3; 8] =
-        array::from_fn(|i| min_corner + size * Corner::new(Offset::ALL[i]).offset().as_vec3());
+    let positions: [Vec3<f32>; 8] = array::from_fn(|i| {
+        min_corner + size * Corner::new(Offset::ALL[i]).offset().as_vec3().cast()
+    });
 
     let mut points = [Vec3::ZERO; 12];
     let mut normals = [Vec3::ZERO; 12];
@@ -263,5 +263,5 @@ fn place_feature<S: NormalField>(field: &S, cell: Quant) -> Option<Vec3> {
         x = (x + force / count as f32).clamp(min_corner, max_corner);
     }
 
-    x.is_finite().then_some(x)
+    x.all(f32::is_finite).then_some(x)
 }

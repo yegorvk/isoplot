@@ -1,7 +1,9 @@
 use bilge::prelude::*;
-use glam::{U16Vec3, Vec3, u16vec3, vec3};
 
-use crate::octree::{ChildIndex, Payload};
+use crate::{
+    math::Vec3,
+    octree::{ChildIndex, Payload},
+};
 
 /// A quantized point in a unit cube
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
@@ -24,17 +26,17 @@ impl Quant {
         self.0.child(which.0).map(Quant)
     }
 
-    pub(crate) fn min_point_size(self) -> (Vec3, f32) {
+    pub(crate) fn min_point_size(self) -> (Vec3<f32>, f32) {
         let (parts, level) = self.0.parts_level();
 
         let x = fract_u32_to_f32(parts.x as u32, level as u32);
         let y = fract_u32_to_f32(parts.y as u32, level as u32);
         let z = fract_u32_to_f32(parts.z as u32, level as u32);
 
-        (vec3(x, y, z), f32_exp2_small(-(level as i8)))
+        (Vec3::new(x, y, z), f32_exp2_small(-(level as i8)))
     }
 
-    pub(crate) fn center_point(self) -> Vec3 {
+    pub(crate) fn center_point(self) -> Vec3<f32> {
         let (min_point, size) = self.min_point_size();
         min_point + size * 0.5
     }
@@ -88,9 +90,9 @@ impl RawQuant {
         Some(Self::from_raw_parts(raw_x, y, z))
     }
 
-    fn parts_level(self) -> (U16Vec3, u8) {
+    fn parts_level(self) -> (Vec3<u16>, u8) {
         let ((raw_x, y, z), level) = self.raw_parts_level();
-        (u16vec3(raw_x ^ (1u16 << level), y, z), level)
+        (Vec3::new(raw_x ^ (1u16 << level), y, z), level)
     }
 
     fn raw_parts_level(self) -> ((u16, u16, u16), u8) {
@@ -201,7 +203,7 @@ mod tests {
                 .child(ChildIndex::new(5))
                 .unwrap()
                 .min_point_size(),
-            (vec3(0.5, 0.0, 0.5), 0.5)
+            (Vec3::new(0.5, 0.0, 0.5), 0.5)
         );
 
         assert_eq!(
@@ -209,7 +211,7 @@ mod tests {
                 .child(ChildIndex::new(3))
                 .unwrap()
                 .min_point_size(),
-            (vec3(0.5, 0.5, 0.0), 0.5)
+            (Vec3::new(0.5, 0.5, 0.0), 0.5)
         );
 
         assert_eq!(
@@ -219,7 +221,7 @@ mod tests {
                 .child(ChildIndex::new(6))
                 .unwrap()
                 .min_point_size(),
-            (vec3(0.5, 0.75, 0.25), 0.25)
+            (Vec3::new(0.5, 0.75, 0.25), 0.25)
         );
     }
 }

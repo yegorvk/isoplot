@@ -1,10 +1,9 @@
 use std::ops::BitOr;
 
-use glam::{UVec3, Vec3, uvec3};
-
 mod tables;
 mod traverse;
 
+use crate::math::Vec3;
 pub(crate) use tables::{
     Corner, Edge, EdgeKey, EdgeKind, EdgeSlot, Face, FaceKey, FaceKind, FaceSlot, edge_corners,
     face_edge_slot, for_each_cell_edge, for_each_cell_face,
@@ -54,15 +53,12 @@ impl Offset {
         Self(x as u8 | (y as u8 * 2) | (z as u8 * 4))
     }
 
-    pub const fn as_uvec3(self) -> UVec3 {
-        let x = (self.0 & Self::X.0 != 0) as u32;
-        let y = (self.0 & Self::Y.0 != 0) as u32;
-        let z = (self.0 & Self::Z.0 != 0) as u32;
-        uvec3(x, y, z)
-    }
-
-    pub(crate) fn as_vec3(self) -> Vec3 {
-        self.as_uvec3().as_vec3()
+    pub const fn as_vec3(self) -> Vec3<bool> {
+        Vec3::new(
+            self.0 & Self::X.0 != 0,
+            self.0 & Self::Y.0 != 0,
+            self.0 & Self::Z.0 != 0,
+        )
     }
 
     pub(crate) const fn as_u8(self) -> u8 {

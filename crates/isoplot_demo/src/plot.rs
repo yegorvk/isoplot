@@ -2,7 +2,6 @@ use std::{collections::HashMap, sync::Arc};
 
 use bytemuck::cast_vec;
 use dashmap::{DashMap, DashSet};
-use glam::IVec3;
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -92,7 +91,8 @@ where
         let mut out = Vec::new();
         let mut sink = SeparateNormals::default();
 
-        let dc = Extractor::with_offset(&field, coords.as_vec3(), self.max_level);
+        let offset = coords.as_vec3().to_array().into();
+        let dc = Extractor::with_offset(&field, offset, self.max_level);
 
         let Ok(chunk) = dc.extract_chunk(&mut sink) else {
             return out;
@@ -105,14 +105,14 @@ where
 
         for kind in SharedFaceKind::ALL {
             for offset in kind.slot_offsets() {
-                let anchor = coords - offset.as_uvec3().as_ivec3();
+                let anchor = coords - offset_to_ivec3(offset);
                 self.try_extract_face_seam(&field, kind, anchor, &mut out);
             }
         }
 
         for kind in SharedEdgeKind::ALL {
             for offset in kind.slot_offsets() {
-                let anchor = coords - offset.as_uvec3().as_ivec3();
+                let anchor = coords - offset_to_ivec3(offset);
                 self.try_extract_edge_seam(&field, kind, anchor, &mut out);
             }
         }
@@ -126,7 +126,7 @@ impl<F> ChunkExtractor<F> {
         &self,
         anchor: IVec3,
     ) -> impl FnMut(&mut ChunkGuard, Offset) -> Option<ChunkGuard> {
-        move |_, offset| self.world.get(anchor + offset.as_uvec3().as_ivec3())
+        move |_, offset| self.world.get(anchor + offset_to_ivec3(offset))
     }
 
     fn try_extract_face_seam<S: NormalField>(
@@ -148,7 +148,8 @@ impl<F> ChunkExtractor<F> {
             return;
         }
 
-        let dc = Extractor::with_offset(source, anchor.as_vec3(), self.max_level);
+        let offset = anchor.as_vec3().to_array().into();
+        let dc = Extractor::with_offset(source, offset, self.max_level);
         let mut sink = SeparateNormals::default();
 
         if dc.extract_face_seam(face, &mut sink).is_ok() {
@@ -176,7 +177,8 @@ impl<F> ChunkExtractor<F> {
             return;
         }
 
-        let dc = Extractor::with_offset(source, anchor.as_vec3(), self.max_level);
+        let offset = anchor.as_vec3().to_array().into();
+        let dc = Extractor::with_offset(source, offset, self.max_level);
         let mut sink = SeparateNormals::default();
 
         if dc.extract_edge_seam(edge, &mut sink).is_ok() {
@@ -399,4 +401,8 @@ impl BorrowChunk for ChunkGuard {
     fn borrow_chunk(&self) -> &Chunk {
         &self.0
     }
+}
+
+fn offset_to_ivec3(offset: Offset) -> IVec3 {
+    offset.as_vec3().cast().to_array().into()
 }

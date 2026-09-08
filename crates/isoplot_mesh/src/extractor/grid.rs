@@ -1,4 +1,3 @@
-use glam::Vec3;
 use std::array;
 
 use crate::{
@@ -7,6 +6,7 @@ use crate::{
         Offset, TraverseOctree, edge_corners, face_edge_slot, for_each_cell_edge,
         for_each_cell_face,
     },
+    math::Vec3,
     octree::{BuildOctree, ChildIndex, Key, Node, Octree},
     quant::Quant,
     source::ScalarField,
@@ -22,7 +22,7 @@ struct OctreeSource<S, P> {
 impl<S, P> BuildOctree<Feature> for OctreeSource<S, P>
 where
     S: ScalarField,
-    P: Fn(Quant) -> Option<Vec3>,
+    P: Fn(Quant) -> Option<Vec3<f32>>,
 {
     type Tag = Quant;
 
@@ -56,7 +56,7 @@ where
 
 #[derive(Copy, Clone, Debug)]
 struct Feature {
-    vertex: Vec3,
+    vertex: Vec3<f32>,
     quant: Quant,
 }
 
@@ -69,7 +69,7 @@ impl AdaptiveGrid {
     pub(crate) fn build<S, P>(field: S, max_level: u8, place_feature: P) -> Self
     where
         S: ScalarField,
-        P: Fn(Quant) -> Option<Vec3>,
+        P: Fn(Quant) -> Option<Vec3<f32>>,
     {
         let mut source = OctreeSource {
             scalar_field: field,
@@ -85,7 +85,7 @@ impl AdaptiveGrid {
     pub(crate) fn for_each_quad<S, F>(&self, field: S, mut f: F)
     where
         S: ScalarField,
-        F: FnMut([Vec3; 4]),
+        F: FnMut([Vec3<f32>; 4]),
     {
         let mut faces = Faces::default();
         let mut edges = Edges::default();
@@ -153,7 +153,7 @@ impl<'a> FaceSeam<'a> {
     pub(crate) fn for_each_quad<S, F>(&self, field: S, mut f: F)
     where
         S: ScalarField,
-        F: FnMut([Vec3; 4]),
+        F: FnMut([Vec3<f32>; 4]),
     {
         let mut faces = Faces::default();
         faces.insert(self.kind, [Key::ROOT; 2]);
@@ -187,7 +187,7 @@ impl<'a> EdgeSeam<'a> {
     pub(crate) fn for_each_quad<S, F>(&self, field: S, mut f: F)
     where
         S: ScalarField,
-        F: FnMut([Vec3; 4]),
+        F: FnMut([Vec3<f32>; 4]),
     {
         let mut edges = Edges::default();
         edges.insert(self.kind, [Key::ROOT; 4]);
@@ -294,10 +294,10 @@ fn emit_seam_quad<S, F>(
     f: &mut F,
 ) where
     S: ScalarField,
-    F: FnMut([Vec3; 4]),
+    F: FnMut([Vec3<f32>; 4]),
 {
     let features: [&Feature; 4] = array::from_fn(|i| cells[i].0.get_feature(keys[i]).unwrap());
-    let cell_offsets = cells.map(|(_, offset)| offset.as_uvec3().as_vec3());
+    let cell_offsets = cells.map(|(_, offset)| offset.as_vec3().cast());
 
     if contains_intersection(
         field,
@@ -308,7 +308,7 @@ fn emit_seam_quad<S, F>(
     }
 }
 
-fn contains_intersection<S>(field: S, kind: EdgeKind, cells: [(&Feature, Vec3); 4]) -> bool
+fn contains_intersection<S>(field: S, kind: EdgeKind, cells: [(&Feature, Vec3<f32>); 4]) -> bool
 where
     S: ScalarField,
 {
@@ -320,7 +320,7 @@ where
     let (min_point, size) = feature.quant.min_point_size();
 
     let [start, end] = [a, b].map(|corner| {
-        let corner_offset = size * corner.offset().as_vec3();
+        let corner_offset = size * corner.offset().as_vec3().cast();
         min_point + corner_offset + cell_offset
     });
 

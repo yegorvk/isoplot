@@ -1,18 +1,24 @@
-use glam::Vec3;
+use crate::math::Vec3;
 
 #[derive(Copy, Clone, Debug)]
 pub struct Vertex {
-    pub position: Vec3,
-    pub normal: Vec3,
+    pub position: Vec3<f32>,
+    pub normal: Vec3<f32>,
 }
 
 impl Vertex {
-    pub fn new(position: Vec3, normal: Vec3) -> Self {
-        Self { position, normal }
+    pub fn new(position: impl Into<Vec3<f32>>, normal: impl Into<Vec3<f32>>) -> Self {
+        Self {
+            position: position.into(),
+            normal: normal.into(),
+        }
     }
 
-    pub fn translated(self, offset: Vec3) -> Self {
-        Self::new(self.position + offset, self.normal)
+    fn translated(self, offset: Vec3<f32>) -> Self {
+        Self {
+            position: self.position + offset,
+            normal: self.normal,
+        }
     }
 }
 
@@ -62,11 +68,11 @@ impl<T: PopulateMesh> PopulateMesh for &mut T {
 
 pub struct TranslateMesh<P> {
     extractor: P,
-    offset: Vec3,
+    offset: Vec3<f32>,
 }
 
 impl<P> TranslateMesh<P> {
-    pub fn new(extractor: P, offset: Vec3) -> Self {
+    pub fn new(extractor: P, offset: Vec3<f32>) -> Self {
         Self { extractor, offset }
     }
 }
@@ -112,12 +118,12 @@ pub struct SeparateNormals {
 impl SeparateNormals {
     pub fn normalize_mesh(&mut self, order: WindingOrder) {
         for face in &mut self.indices {
-            let p = face.map(|i| Vec3::from(self.positions[i as usize]));
+            let p = face.map(|i| self.positions[i as usize].into());
 
             let n = face
                 .iter()
                 .map(|&i| Vec3::from(self.normals[i as usize]))
-                .sum::<Vec3>();
+                .sum();
 
             if is_face_ccw(p, n) != (order == WindingOrder::Ccw) {
                 face.reverse();
@@ -130,8 +136,8 @@ impl PopulateMesh for SeparateNormals {
     type Index = u32;
 
     fn add_vertex(&mut self, vertex: Vertex) -> Self::Index {
-        self.positions.push(vertex.position.to_array());
-        self.normals.push(vertex.normal.to_array());
+        self.positions.push(vertex.position.into());
+        self.normals.push(vertex.normal.into());
         (self.positions.len() - 1) as u32
     }
 
@@ -140,6 +146,6 @@ impl PopulateMesh for SeparateNormals {
     }
 }
 
-fn is_face_ccw(p: [Vec3; 3], n: Vec3) -> bool {
+fn is_face_ccw(p: [Vec3<f32>; 3], n: Vec3<f32>) -> bool {
     (p[1] - p[0]).cross(p[2] - p[0]).dot(n) >= 0.0
 }

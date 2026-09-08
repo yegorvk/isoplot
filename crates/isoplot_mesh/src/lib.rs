@@ -1,5 +1,6 @@
 mod extractor;
 mod lattice;
+mod math;
 mod mesh;
 mod octree;
 mod quant;
@@ -13,3 +14,5 @@ pub use extractor::{
 pub use lattice::{AxisKind, Offset};
 pub use mesh::{PopulateMesh, SeparateNormals, TranslateMesh, Vertex, WindingOrder};
 pub use source::{CentralDifference, NormalField, ScalarField, Translate};
+
+pub use crate::math::Vec3;
