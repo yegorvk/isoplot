@@ -130,13 +130,13 @@ where
             sink.add_triangle(face.map(|position| Vertex::new(position, n_c)));
         };
 
-        if c != d {
-            for face in [[a, b, c], [a, c, d]] {
-                emit_face(face);
-            }
-        } else {
+        if c == d {
             emit_face([a, b, c]);
+            return;
         }
+
+        emit_face([a, c, b]);
+        emit_face([a, d, c]);
     }
 }
 
@@ -213,7 +213,7 @@ fn place_feature<S: NormalField>(field: &S, cell: Quant) -> Option<Vec3<f32>> {
     let (min_corner, size) = cell.min_point_size();
 
     let positions: [Vec3<f32>; 8] = array::from_fn(|i| {
-        min_corner + size * Corner::new(Offset::ALL[i]).offset().as_vec3().cast()
+        min_corner + Corner::new(Offset::ALL[i]).offset().as_vec3().cast() * size
     });
 
     let mut points = [Vec3::ZERO; 12];

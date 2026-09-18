@@ -19,7 +19,8 @@ use crate::{
     plot::{Plot, PlotPlugin},
 };
 
-const DEFAULT_EQUATION: &str = "y - ln(-(x^2 - z^3))";
+// const DEFAULT_EQUATION: &str = "max(x^2 + y^2 - z^3 - 8, y - (x^2 + z^2))";
+const DEFAULT_EQUATION: &str = "y - sin(x^2 + z^2)";
 
 #[derive(Resource)]
 struct ActivePlot {
@@ -31,6 +32,7 @@ fn main() {
     App::new()
         .add_systems(Startup, setup)
         .add_systems(Update, (toggle_focus, submit_equation))
+        .insert_resource(ClearColor(LinearRgba::RED.into()))
         .add_plugins((
             DefaultPlugins.set(TaskPoolPlugin {
                 task_pool_options: TaskPoolOptions {
@@ -178,7 +180,7 @@ fn submit_equation(
 }
 
 fn create_plot(equation: Equation) -> Plot {
-    Plot::new(equation, 4, 5)
+    Plot::new(equation, 4, 6)
 }
 
 fn toggle_focus(

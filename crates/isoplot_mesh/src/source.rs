@@ -8,15 +8,24 @@ pub trait ScalarField {
     /// Finds a point where the 0-level set intersects the given segment, if any.
     fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> Option<Vec3<f32>>;
 
+    /// Returns `true` *only if* the given region is empty.
+    #[inline]
+    fn is_empty(&self, min: Vec3<f32>, size: f32) -> bool {
+        _ = (min, size);
+        false
+    }
+
     /// Returns `true` *only if* the given region is flat.
     ///
     /// A region is considered flat when it does not need to be further
     /// subdivided. Note that this method is always allowed to return `false`.
+    #[inline]
     fn is_flat(&self, min: Vec3<f32>, size: f32) -> bool {
         _ = (min, size);
         false
     }
 
+    #[inline]
     fn translated(self, offset: Vec3<f32>) -> Translate<Self>
     where
         Self: Sized,
@@ -26,14 +35,17 @@ pub trait ScalarField {
 }
 
 impl<S: ?Sized + ScalarField> ScalarField for &S {
+    #[inline]
     fn sample(&self, point: Vec3<f32>) -> f32 {
         <S as ScalarField>::sample(self, point)
     }
 
+    #[inline]
     fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> Option<Vec3<f32>> {
         <S as ScalarField>::find_intersection(self, start, end)
     }
 
+    #[inline]
     fn is_flat(&self, min: Vec3<f32>, size: f32) -> bool {
         <S as ScalarField>::is_flat(self, min, size)
     }
@@ -46,6 +58,7 @@ pub trait NormalField: ScalarField {
 }
 
 impl<S: ?Sized + NormalField> NormalField for &S {
+    #[inline]
     fn sample_normal(&self, point: Vec3<f32>) -> Vec3<f32> {
         <S as NormalField>::sample_normal(self, point)
     }
@@ -63,22 +76,26 @@ impl<S> Translate<S> {
 }
 
 impl<S: ScalarField> ScalarField for Translate<S> {
+    #[inline]
     fn sample(&self, point: Vec3<f32>) -> f32 {
         self.source.sample(point + self.offset)
     }
 
+    #[inline]
     fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> Option<Vec3<f32>> {
         self.source
             .find_intersection(start + self.offset, end + self.offset)
             .map(|point| point - self.offset)
     }
 
+    #[inline]
     fn is_flat(&self, min: Vec3<f32>, size: f32) -> bool {
         self.source.is_flat(min + self.offset, size)
     }
 }
 
 impl<S: NormalField> NormalField for Translate<S> {
+    #[inline]
     fn sample_normal(&self, point: Vec3<f32>) -> Vec3<f32> {
         self.source.sample_normal(point + self.offset)
     }
@@ -96,20 +113,24 @@ impl<S: ScalarField> CentralDifference<S> {
 }
 
 impl<S: ScalarField> ScalarField for CentralDifference<S> {
+    #[inline]
     fn sample(&self, point: Vec3<f32>) -> f32 {
         self.source.sample(point)
     }
 
+    #[inline]
     fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> Option<Vec3<f32>> {
         self.source.find_intersection(start, end)
     }
 
+    #[inline]
     fn is_flat(&self, min: Vec3<f32>, size: f32) -> bool {
         self.source.is_flat(min, size)
     }
 }
 
 impl<S: ScalarField> NormalField for CentralDifference<S> {
+    #[inline]
     fn sample_normal(&self, point: Vec3<f32>) -> Vec3<f32> {
         let (p, e) = (point, self.delta);
         let f = |p: Vec3<f32>| self.source.sample(p);

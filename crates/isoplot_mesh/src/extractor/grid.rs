@@ -24,13 +24,14 @@ where
     S: ScalarField,
     P: Fn(Quant) -> Option<Vec3<f32>>,
 {
-    type Tag = Quant;
-
-    fn root(&mut self) -> Self::Tag {
-        Quant::root()
+    #[inline]
+    fn is_empty(&mut self, tag: Quant) -> bool {
+        let (min_p, size) = tag.min_point_size();
+        self.scalar_field.is_empty(min_p, size)
     }
 
-    fn is_leaf(&mut self, tag: Self::Tag) -> bool {
+    #[inline]
+    fn is_leaf(&mut self, tag: Quant) -> bool {
         if tag.level() >= self.max_level {
             return true;
         }
@@ -39,11 +40,8 @@ where
         self.scalar_field.is_flat(min_p, size)
     }
 
-    fn refine(&mut self, tag: Self::Tag, which: ChildIndex) -> Option<Self::Tag> {
-        Some(tag.child(which).unwrap())
-    }
-
-    fn place_leaf(&mut self, tag: Self::Tag) -> Feature {
+    #[inline]
+    fn place_leaf(&mut self, tag: Quant) -> Feature {
         let (min_corner, size) = tag.min_point_size();
 
         let vertex = (self.place_feature)(tag)
@@ -135,6 +133,7 @@ impl AdaptiveGrid {
         );
     }
 
+    #[inline]
     fn get_feature(&self, key: Key) -> Option<&Feature> {
         self.octree.get(key).and_then(|key| key.as_leaf().copied())
     }
@@ -320,7 +319,7 @@ where
     let (min_point, size) = feature.quant.min_point_size();
 
     let [start, end] = [a, b].map(|corner| {
-        let corner_offset = size * corner.offset().as_vec3().cast();
+        let corner_offset = corner.offset().as_vec3().cast() * size;
         min_point + corner_offset + cell_offset
     });
 

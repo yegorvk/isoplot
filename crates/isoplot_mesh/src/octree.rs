@@ -1,6 +1,8 @@
 use bilge::prelude::*;
 use derive_where::derive_where;
-use std::{marker::PhantomData, mem, ops::Index};
+use std::{iter, marker::PhantomData, mem, ops::Index};
+
+use crate::quant::Quant;
 
 /// Maximum number of levels in an octree
 ///
@@ -9,20 +11,14 @@ use std::{marker::PhantomData, mem, ops::Index};
 pub(crate) const MAX_LEVELS: u8 = 10;
 
 pub(crate) trait BuildOctree<T> {
-    /// A unique identifier for an octree node
-    type Tag: Copy;
-
-    /// Returns the tag of the root node.
-    fn root(&mut self) -> Self::Tag;
+    /// Returns `true` if the specified node is empty.
+    fn is_empty(&mut self, tag: Quant) -> bool;
 
     /// Returns `true` if the specified node is a leaf.
-    fn is_leaf(&mut self, tag: Self::Tag) -> bool;
-
-    /// Returns the tag of the specified child, or `None` if that child is empty.
-    fn refine(&mut self, tag: Self::Tag, which: ChildIndex) -> Option<Self::Tag>;
+    fn is_leaf(&mut self, tag: Quant) -> bool;
 
     /// Returns the leaf payload associated with the specified tag.
-    fn place_leaf(&mut self, tag: Self::Tag) -> T;
+    fn place_leaf(&mut self, tag: Quant) -> T;
 }
 
 #[derive(Debug)]
@@ -31,6 +27,7 @@ pub(crate) struct InlineOctree<T> {
 }
 
 impl<T> InlineOctree<T> {
+    #[inline]
     pub(crate) fn get(&self, key: Key) -> Option<&InlineNode<T>> {
         self.nodes.get(key.0.as_usize())
     }
@@ -41,32 +38,99 @@ impl<T: Payload> InlineOctree<T> {
     where
         B: ?Sized + BuildOctree<T>,
     {
-        let mut nodes = Vec::new();
+        let mut nodes = vec![];
 
-        let mut this_tags = Vec::new();
-        let mut next_tags = vec![source.root()];
+        let mut this_tags = vec![];
+        let mut next_tags = vec![Quant::root()];
+
+        let mut anchors = vec![];
+
+        let mut pending_branches = vec![];
+        let mut pending_leaves = vec![];
+        let mut pending_tags = vec![];
 
         let mut next_offset = next_tags.len() as u32;
 
         for _ in 0..MAX_LEVELS {
-            for tag in next_tags.iter().copied() {
-                if source.is_leaf(tag) {
+            nodes.reserve(next_tags.len());
+
+            for (i, tag) in next_tags.iter().copied().enumerate() {
+                let is_leaf_bit = source.is_leaf(tag) as u8;
+                nodes.push(InlineNode::new_branch(Branch::new(is_leaf_bit, i as u32)));
+            }
+
+            let total_nodes = nodes.len();
+            let new_nodes = &mut nodes[(total_nodes - next_tags.len())..];
+
+            anchors.extend(iter::zip(
+                new_nodes.iter().copied(),
+                next_tags.iter().copied(),
+            ));
+
+            anchors.sort_unstable_by_key(|(node, _)| node.is_leaf());
+
+            let num_leaves = anchors
+                .iter()
+                .filter(|(anchor, _)| {
+                    let fake_branch = anchor.as_branch().unwrap();
+                    fake_branch.mask() != 0
+                })
+                .count();
+
+            let num_branches = anchors.len() - num_leaves;
+
+            pending_branches.reserve(num_branches);
+            pending_tags.reserve(num_branches);
+
+            pending_leaves.reserve(anchors.len());
+
+            for (anchor, tag) in anchors.drain(..) {
+                let fake_branch = anchor.as_branch().unwrap();
+
+                let is_leaf = fake_branch.mask() != 0;
+                let index = fake_branch.base_offset() as usize;
+
+                if is_leaf {
                     let payload = source.place_leaf(tag);
-                    nodes.push(InlineLeaf::new(payload).into());
+                    pending_leaves.push((index, InlineLeaf::new(payload)));
                     continue;
                 }
 
                 let mut mask = 0u8;
 
-                for index in ChildIndex::enumerate() {
-                    if let Some(child) = source.refine(tag, index) {
-                        mask |= 1u8 << index.0.value();
+                for child_index in ChildIndex::enumerate() {
+                    let child = tag.child(child_index).unwrap();
+                    mask |= (!source.is_empty(child) as u8) << child_index.0.value();
+                    this_tags.reserve(mask.count_ones() as usize);
+                    pending_tags.push((tag, mask));
+
+                    if mask & (1u8 << child_index.0.value()) != 0 {
                         this_tags.push(child);
                     }
                 }
 
-                nodes.push(Branch::new(mask, next_offset).into());
+                pending_branches.push((index, Branch::new(mask, next_offset)));
                 next_offset += mask.count_ones();
+            }
+
+            {
+                pending_branches.sort_unstable_by_key(|(i, _)| *i);
+
+                for (index, branch) in pending_branches.drain(..) {
+                    new_nodes[index] = branch.into();
+                }
+
+                pending_branches.clear();
+            }
+
+            {
+                pending_leaves.sort_unstable_by_key(|(i, _)| *i);
+
+                for (index, leaf) in pending_leaves.drain(..) {
+                    new_nodes[index] = leaf.into();
+                }
+
+                pending_leaves.clear();
             }
 
             mem::swap(&mut this_tags, &mut next_tags);
@@ -82,6 +146,7 @@ impl<T: Payload> InlineOctree<T> {
         Self { nodes }
     }
 
+    #[inline]
     pub(crate) fn for_each_branch<F>(&self, mut f: F)
     where
         F: FnMut(Branch),
@@ -97,6 +162,7 @@ impl<T: Payload> InlineOctree<T> {
 impl<T> Index<Key> for InlineOctree<T> {
     type Output = InlineNode<T>;
 
+    #[inline]
     fn index(&self, index: Key) -> &Self::Output {
         self.get(index).unwrap()
     }
@@ -114,21 +180,18 @@ impl<T, I> BuildOctree<u31> for Collector<'_, T, I>
 where
     I: BuildOctree<T>,
 {
-    type Tag = I::Tag;
-
-    fn root(&mut self) -> Self::Tag {
-        I::root(self.source)
+    #[inline]
+    fn is_empty(&mut self, tag: Quant) -> bool {
+        I::is_empty(self.source, tag)
     }
 
-    fn is_leaf(&mut self, tag: Self::Tag) -> bool {
+    #[inline]
+    fn is_leaf(&mut self, tag: Quant) -> bool {
         I::is_leaf(self.source, tag)
     }
 
-    fn refine(&mut self, tag: Self::Tag, which: ChildIndex) -> Option<Self::Tag> {
-        I::refine(self.source, tag, which)
-    }
-
-    fn place_leaf(&mut self, tag: Self::Tag) -> u31 {
+    #[inline]
+    fn place_leaf(&mut self, tag: Quant) -> u31 {
         self.leaves.push(I::place_leaf(self.source, tag));
         u31::new(self.leaves.len() as u32 - 1)
     }
@@ -158,6 +221,7 @@ impl<T> Octree<T> {
         }
     }
 
+    #[inline]
     pub(crate) fn for_each_branch<F>(&self, f: F)
     where
         F: FnMut(Branch),
@@ -165,6 +229,7 @@ impl<T> Octree<T> {
         self.octree.for_each_branch(f);
     }
 
+    #[inline]
     pub(crate) fn get(&self, key: Key) -> Option<Node<&T>> {
         self.octree.get(key).map(|inline| {
             let node = inline.as_node();
@@ -172,6 +237,7 @@ impl<T> Octree<T> {
         })
     }
 
+    #[inline]
     pub(crate) fn is_leaf(&self, key: Key) -> bool {
         self.get(key).unwrap().is_leaf()
     }
@@ -193,10 +259,12 @@ pub(crate) enum Node<T> {
 }
 
 impl<T> Node<T> {
+    #[inline]
     pub(crate) fn is_leaf(&self) -> bool {
         matches!(self, Node::Leaf(_))
     }
 
+    #[inline]
     pub(crate) fn as_leaf(&self) -> Option<&T> {
         match self {
             Node::Leaf(leaf) => Some(leaf),
@@ -204,6 +272,7 @@ impl<T> Node<T> {
         }
     }
 
+    #[inline]
     fn map_leaf<B, F>(self, f: F) -> Node<B>
     where
         F: FnOnce(T) -> B,
@@ -223,6 +292,7 @@ pub(crate) struct InlineNode<T> {
 }
 
 impl<T: Payload> InlineNode<T> {
+    #[inline]
     fn new_branch(branch: Branch) -> Self {
         Self {
             inner: RawNode::new_branch(branch),
@@ -230,6 +300,7 @@ impl<T: Payload> InlineNode<T> {
         }
     }
 
+    #[inline]
     fn new_leaf(leaf: InlineLeaf<T>) -> Self {
         Self {
             inner: RawNode::new_leaf(leaf),
@@ -237,14 +308,17 @@ impl<T: Payload> InlineNode<T> {
         }
     }
 
+    #[inline]
     pub(crate) fn is_leaf(self) -> bool {
         matches!(self.inner.kind(), NodeKind::Leaf)
     }
 
+    #[inline]
     pub(crate) fn is_branch(self) -> bool {
         matches!(self.inner.kind(), NodeKind::Branch)
     }
 
+    #[inline]
     pub(crate) fn as_leaf(self) -> Option<InlineLeaf<T>> {
         if self.is_leaf() {
             Some(unsafe { InlineLeaf::from_bits(self.inner.data()) })
@@ -253,6 +327,7 @@ impl<T: Payload> InlineNode<T> {
         }
     }
 
+    #[inline]
     pub(crate) fn as_branch(self) -> Option<Branch> {
         if self.is_branch() {
             Some(unsafe { Branch::from_bits(self.inner.data()) })
@@ -261,6 +336,7 @@ impl<T: Payload> InlineNode<T> {
         }
     }
 
+    #[inline]
     fn as_node(self) -> Node<T> {
         if let Some(branch) = self.as_branch() {
             Node::Branch(branch)
@@ -271,12 +347,14 @@ impl<T: Payload> InlineNode<T> {
 }
 
 impl<T: Payload> From<Branch> for InlineNode<T> {
+    #[inline]
     fn from(value: Branch) -> Self {
         Self::new_branch(value)
     }
 }
 
 impl<T: Payload> From<InlineLeaf<T>> for InlineNode<T> {
+    #[inline]
     fn from(value: InlineLeaf<T>) -> Self {
         Self::new_leaf(value)
     }
@@ -290,11 +368,13 @@ struct RawNode {
 }
 
 impl RawNode {
+    #[inline]
     fn new_branch(branch: Branch) -> Self {
         let data = branch.into_u31();
         Self::new(NodeKind::Branch, data)
     }
 
+    #[inline]
     fn new_leaf<T>(leaf: InlineLeaf<T>) -> Self {
         let data = leaf.payload;
         Self::new(NodeKind::Leaf, data)
@@ -313,14 +393,17 @@ enum NodeKind {
 pub(crate) struct Branch(RawBranch);
 
 impl Branch {
+    #[inline]
     fn new(mask: u8, offset: u32) -> Self {
         Self(RawBranch::new(mask, u23::new(offset)))
     }
 
+    #[inline]
     unsafe fn from_bits(bits: u31) -> Self {
         Self(RawBranch { value: bits })
     }
 
+    #[inline]
     fn mask(self) -> u8 {
         self.0.mask()
     }
@@ -329,6 +412,7 @@ impl Branch {
         self.0.value
     }
 
+    #[inline]
     pub(crate) fn child(&self, which: ChildIndex) -> Option<Key> {
         if self.has_child(which) {
             Some(Key(u23::new(self.child_offset(which))))
@@ -337,25 +421,34 @@ impl Branch {
         }
     }
 
+    #[inline]
     fn has_child(self, which: ChildIndex) -> bool {
         self.mask() & (1u8 << which.0.value()) != 0
     }
 
+    #[inline]
+    fn base_offset(self) -> u32 {
+        self.0.offset().value()
+    }
+
+    #[inline]
     fn child_offset(self, which: ChildIndex) -> u32 {
         let pref = (1u8 << which.0.value()) - 1;
-        self.0.offset().value() + (self.mask() & pref).count_ones()
+        self.base_offset() + (self.mask() & pref).count_ones()
     }
 }
 
 #[derive(Copy, Clone, Debug)]
 #[repr(transparent)]
-pub(crate) struct ChildIndex(pub u3);
+pub(crate) struct ChildIndex(pub(crate) u3);
 
 impl ChildIndex {
+    #[inline]
     pub(crate) const fn new(index: u8) -> Self {
         Self(u3::new(index))
     }
 
+    #[inline]
     pub(crate) fn enumerate() -> impl Iterator<Item = Self> {
         (0..8u8).map(|i| ChildIndex(u3::new(i)))
     }
@@ -382,6 +475,7 @@ pub(crate) struct InlineLeaf<T> {
 }
 
 impl<T: Payload> InlineLeaf<T> {
+    #[inline]
     fn new(data: T) -> Self {
         Self {
             payload: data.into_bits(),
@@ -389,6 +483,7 @@ impl<T: Payload> InlineLeaf<T> {
         }
     }
 
+    #[inline]
     unsafe fn from_bits(bits: u31) -> Self {
         Self {
             payload: bits,
@@ -396,6 +491,7 @@ impl<T: Payload> InlineLeaf<T> {
         }
     }
 
+    #[inline]
     pub(crate) fn get(self) -> T {
         unsafe { T::from_bits(self.payload) }
     }
@@ -413,10 +509,12 @@ pub(crate) trait Payload: Copy {
 }
 
 impl Payload for u31 {
+    #[inline]
     fn into_bits(self) -> u31 {
         self
     }
 
+    #[inline]
     unsafe fn from_bits(bits: u31) -> Self {
         bits
     }
@@ -445,22 +543,16 @@ mod tests {
         struct Degenerate;
 
         impl BuildOctree<Dummy> for Degenerate {
-            type Tag = u32;
-
-            fn root(&mut self) -> Self::Tag {
-                11
-            }
-
-            fn is_leaf(&mut self, _: Self::Tag) -> bool {
+            fn is_empty(&mut self, _tag: Quant) -> bool {
                 true
             }
 
-            fn refine(&mut self, _: Self::Tag, _: ChildIndex) -> Option<Self::Tag> {
-                None
+            fn is_leaf(&mut self, _: Quant) -> bool {
+                true
             }
 
-            fn place_leaf(&mut self, tag: Self::Tag) -> Dummy {
-                assert_eq!(tag, 11);
+            fn place_leaf(&mut self, tag: Quant) -> Dummy {
+                assert_eq!(tag, Quant::root());
                 Dummy
             }
         }
@@ -477,21 +569,15 @@ mod tests {
         struct Uniform;
 
         impl BuildOctree<Quant> for Uniform {
-            type Tag = Quant;
-
-            fn root(&mut self) -> Self::Tag {
-                Quant::root()
+            fn is_empty(&mut self, _tag: Quant) -> bool {
+                false
             }
 
-            fn is_leaf(&mut self, tag: Self::Tag) -> bool {
+            fn is_leaf(&mut self, tag: Quant) -> bool {
                 tag.level() == 4
             }
 
-            fn refine(&mut self, tag: Self::Tag, which: ChildIndex) -> Option<Self::Tag> {
-                Some(tag.child(which).unwrap())
-            }
-
-            fn place_leaf(&mut self, tag: Self::Tag) -> Quant {
+            fn place_leaf(&mut self, tag: Quant) -> Quant {
                 tag
             }
         }
@@ -519,21 +605,15 @@ mod tests {
         struct Uniform;
 
         impl BuildOctree<Quant> for Uniform {
-            type Tag = Quant;
-
-            fn root(&mut self) -> Self::Tag {
-                Quant::root()
+            fn is_empty(&mut self, _tag: Quant) -> bool {
+                false
             }
 
-            fn is_leaf(&mut self, tag: Self::Tag) -> bool {
+            fn is_leaf(&mut self, tag: Quant) -> bool {
                 tag.level() == 1
             }
 
-            fn refine(&mut self, tag: Self::Tag, which: ChildIndex) -> Option<Self::Tag> {
-                Some(tag.child(which).unwrap())
-            }
-
-            fn place_leaf(&mut self, tag: Self::Tag) -> Quant {
+            fn place_leaf(&mut self, tag: Quant) -> Quant {
                 tag
             }
         }

@@ -54,10 +54,12 @@ struct DynamicSource {
 }
 
 impl ScalarField for DynamicSource {
+    #[inline]
     fn sample(&self, point: Vec3<f32>) -> f32 {
         self.field.evaluate(&point.into())
     }
 
+    #[inline]
     fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> Option<Vec3<f32>> {
         const MAX_ITERS: usize = 32;
 
@@ -82,7 +84,8 @@ impl ScalarField for DynamicSource {
         None
     }
 
-    fn is_flat(&self, min: Vec3<f32>, size: f32) -> bool {
+    #[inline]
+    fn is_empty(&self, min: Vec3<f32>, size: f32) -> bool {
         let max = min + Vec3::splat(size);
 
         let cell = [
@@ -95,9 +98,18 @@ impl ScalarField for DynamicSource {
             return false;
         };
 
-        if !bounds.contains_zero() {
-            return true;
-        }
+        !bounds.contains_zero()
+    }
+
+    #[inline]
+    fn is_flat(&self, min: Vec3<f32>, size: f32) -> bool {
+        let max = min + Vec3::splat(size);
+
+        let cell = [
+            Interval::new(min.x, max.x),
+            Interval::new(min.y, max.y),
+            Interval::new(min.z, max.z),
+        ];
 
         let [x, y, z] = self.grad_bounds.evaluate(&cell).gradient.map(|x| x.get());
 
@@ -130,6 +142,7 @@ impl ScalarField for DynamicSource {
 }
 
 impl DynamicSource {
+    #[inline]
     fn refine(&self, a: &mut Vec3<f32>, b: &mut Vec3<f32>, v_a: &mut f32, v_b: &mut f32) {
         let m = (*a + *b) * 0.5;
         let v_m = self.sample(m);
@@ -141,6 +154,7 @@ impl DynamicSource {
         }
     }
 
+    #[inline]
     fn bisect(&self, mut a: Vec3<f32>, mut b: Vec3<f32>, mut v_a: f32, mut v_b: f32) -> Vec3<f32> {
         const ITERS: usize = 3;
 
@@ -157,6 +171,7 @@ impl DynamicSource {
         a + (b - a) * t
     }
 
+    #[inline]
     fn sample_with_gradient(&self, point: Vec3<f32>) -> (f32, Vec3<f32>) {
         let gradient = self.grad.evaluate(&point.into());
         (gradient.value, gradient.gradient.into())
@@ -164,6 +179,7 @@ impl DynamicSource {
 }
 
 impl NormalField for DynamicSource {
+    #[inline]
     fn sample_normal(&self, point: Vec3<f32>) -> Vec3<f32> {
         self.sample_with_gradient(point).1.normalize_or_zero()
     }

@@ -1,10 +1,9 @@
 //! A small SIMD-agnostic math "library"
 
-use fearless_simd::{
-    Simd, SimdBase, SimdFloat, f32x4, f32x8, f32x16, f64x2, f64x4, f64x8, mask32x4, mask32x8,
-    mask32x16, mask64x2, mask64x4, mask64x8,
-};
+use fearless_simd::{Simd, SimdFrom, SimdInto};
 use std::{f64, iter, marker::PhantomData, ops};
+
+use crate::simd::{f32s, i32s, mask32s, u32s};
 
 mod seal {
     #[doc(hidden)]
@@ -13,44 +12,25 @@ mod seal {
 
 use seal::Seal;
 
-impl Seal for bool {}
+macro_rules! scalar_seal_impls {
+    ($($ty:ty),* $(,)?) => {
+        $( impl Seal for $ty {} )*
+    };
+}
 
-impl Seal for u8 {}
-impl Seal for u16 {}
-impl Seal for u32 {}
-impl Seal for u64 {}
-impl Seal for usize {}
-impl Seal for i8 {}
-impl Seal for i16 {}
-impl Seal for i32 {}
-impl Seal for i64 {}
-impl Seal for isize {}
-impl Seal for f32 {}
-impl Seal for f64 {}
+scalar_seal_impls!(
+    bool, u8, u16, u32, u64, usize, i8, i16, i32, i64, isize, f32, f64,
+);
 
-impl Seal for Axis {}
+macro_rules! simd_seal_impls {
+    ($($ty:ident),* $(,)?) => {
+        $(
+            impl<S: Simd> Seal for $ty<S> {}
+        )*
+    };
+}
 
-impl<S: Simd> Seal for mask32x4<S> {}
-impl<S: Simd> Seal for mask32x8<S> {}
-impl<S: Simd> Seal for mask32x16<S> {}
-
-impl<S: Simd> Seal for mask64x2<S> {}
-impl<S: Simd> Seal for mask64x4<S> {}
-impl<S: Simd> Seal for mask64x8<S> {}
-
-impl<S: Simd> Seal for f32x4<S> {}
-impl<S: Simd> Seal for f32x8<S> {}
-impl<S: Simd> Seal for f32x16<S> {}
-
-impl<S: Simd> Seal for f64x2<S> {}
-impl<S: Simd> Seal for f64x4<S> {}
-impl<S: Simd> Seal for f64x8<S> {}
-
-impl Seal for R<f32> {}
-impl Seal for R<f64> {}
-
-impl<S: Simd> Seal for RxS<S, f32> {}
-impl<S: Simd> Seal for RxS<S, f64> {}
+simd_seal_impls!(mask32s, u32s, i32s, f32s);
 
 pub trait Mask:
     Seal
@@ -66,14 +46,7 @@ pub trait Mask:
 }
 
 impl Mask for bool {}
-
-impl<S: Simd> Mask for mask32x4<S> {}
-impl<S: Simd> Mask for mask32x8<S> {}
-impl<S: Simd> Mask for mask32x16<S> {}
-
-impl<S: Simd> Mask for mask64x2<S> {}
-impl<S: Simd> Mask for mask64x4<S> {}
-impl<S: Simd> Mask for mask64x8<S> {}
+impl<S: Simd> Mask for mask32s<S> {}
 
 pub trait Number:
     Seal
@@ -87,6 +60,12 @@ pub trait Number:
 {
     /// Boolean mask type
     type Mask: Mask;
+
+    /// Factory type that produced this number
+    type Factory: NumberFactory<Self>;
+
+    /// Returns the corresponding factory instance.
+    fn factory(self) -> Self::Factory;
 
     /// Returns if `self` is equal to `rhs`.
     fn eq(self, rhs: Self) -> Self::Mask;
@@ -114,12 +93,12 @@ pub trait Number:
 
     /// Selects between two numbers using `mask`.
     fn select(mask: Self::Mask, if_true: Self, if_false: Self) -> Self;
-
-    /// Returns `self / rhs` when `rhs` is not zero; zero otherwise.
-    fn div_or_zero(self, rhs: Self) -> Self;
 }
 
 pub trait Real: Seal + Number + ops::Div<Output = Self> + ops::DivAssign {
+    // /// Returns `self / rhs` when `rhs` is not zero; zero otherwise.
+    // fn div_or_zero(self, rhs: Self) -> Self;
+
     /// Returns the square root of this element.
     fn sqrt(self) -> Self;
 }
@@ -128,25 +107,25 @@ pub trait ConstZero: Seal + Number {
     const ZERO: Self;
 }
 
-impl ConstZero for f32 {
-    const ZERO: Self = 0f32;
-}
-
-impl ConstZero for f64 {
-    const ZERO: Self = 0f64;
-}
-
 pub trait ConstOne: Seal + Number {
     const ONE: Self;
 }
 
-impl ConstOne for f32 {
-    const ONE: Self = 1f32;
+macro_rules! const_zero_one_impls {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl ConstZero for $ty {
+                const ZERO: Self = 0 as $ty;
+            }
+
+            impl ConstOne for $ty {
+                const ONE: Self = 1 as $ty;
+            }
+        )*
+    };
 }
 
-impl ConstOne for f64 {
-    const ONE: Self = 1f64;
-}
+const_zero_one_impls!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize, f32, f64);
 
 pub trait Cast<T>: Seal {
     fn cast(self) -> T;
@@ -204,22 +183,44 @@ where
     }
 }
 
-pub(crate) trait NumberField: Seal + Copy {
-    /// Field element type
-    type Element: Number;
-
+pub trait NumberFactory<T>: Seal + Copy {
     /// Return the `0` element.
-    fn zero(self) -> Self::Element;
+    fn zero(self) -> T;
 
     /// Return the `1` element.
-    fn one(self) -> Self::Element;
+    fn one(self) -> T;
+}
+
+#[derive(Copy, Clone)]
+pub struct ConstFactory;
+
+impl Seal for ConstFactory {}
+
+impl<T> NumberFactory<T> for ConstFactory
+where
+    T: ConstZero + ConstOne,
+{
+    #[inline(always)]
+    fn zero(self) -> T {
+        T::ZERO
+    }
+
+    #[inline(always)]
+    fn one(self) -> T {
+        T::ONE
+    }
 }
 
 macro_rules! scalar_number_impls {
     ($($ty:ty),* $(,)?) => {
         $(
             impl Number for $ty {
+                type Factory = ConstFactory;
                 type Mask = bool;
+
+                fn factory(self) -> Self::Factory {
+                    ConstFactory
+                }
 
                 #[inline(always)]
                 fn eq(self, rhs: Self) -> Self::Mask {
@@ -265,11 +266,6 @@ macro_rules! scalar_number_impls {
                 fn select(mask: Self::Mask, if_true: Self, if_false: Self) -> Self {
                     std::hint::select_unpredictable(mask, if_true, if_false)
                 }
-
-                #[inline(always)]
-                fn div_or_zero(self, rhs: Self) -> Self {
-                    ScalarDispatch::<$ty>::div_or_zero(self, rhs)
-                }
             }
         )*
     };
@@ -291,11 +287,6 @@ macro_rules! scalar_dispatch_int {
                 fn max(a: $ty, b: $ty) -> $ty {
                     std::cmp::max(a, b)
                 }
-
-                #[inline(always)]
-                fn div_or_zero(a: $ty, b: $ty) -> $ty {
-                    a.checked_div(b).unwrap_or(0)
-                }
             }
         )*
     };
@@ -313,12 +304,6 @@ impl ScalarDispatch<f32> {
     fn max(a: f32, b: f32) -> f32 {
         a.max(b)
     }
-
-    #[inline(always)]
-    fn div_or_zero(a: f32, b: f32) -> f32 {
-        let c = a / b;
-        f32::select(c.is_finite(), c, 0.0)
-    }
 }
 
 impl ScalarDispatch<f64> {
@@ -330,12 +315,6 @@ impl ScalarDispatch<f64> {
     #[inline(always)]
     fn max(a: f64, b: f64) -> f64 {
         a.max(b)
-    }
-
-    #[inline(always)]
-    fn div_or_zero(a: f64, b: f64) -> f64 {
-        let c = a / b;
-        f64::select(c.is_finite(), c, 0.0)
     }
 }
 
@@ -352,203 +331,134 @@ macro_rules! scalar_real_impls {
     };
 }
 
-scalar_number_impls!(u8, u16, u32, u64, f32, f64);
+scalar_number_impls!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize, f32, f64);
 scalar_real_impls!(f32, f64);
 
+#[derive(Copy, Clone)]
+pub struct SimdFactory<S: Simd>(S);
+
+impl<S: Simd> SimdFactory<S> {
+    pub const fn new(simd: S) -> Self {
+        Self(simd)
+    }
+}
+
+impl<S: Simd> From<S> for SimdFactory<S> {
+    #[inline(always)]
+    fn from(value: S) -> Self {
+        Self::new(value)
+    }
+}
+
+impl<S: Simd> Seal for SimdFactory<S> {}
+
+impl<S: Simd> NumberFactory<u32s<S>> for SimdFactory<S> {
+    #[inline(always)]
+    fn zero(self) -> u32s<S> {
+        u32s::splat(self.0, 0)
+    }
+
+    #[inline(always)]
+    fn one(self) -> u32s<S> {
+        u32s::splat(self.0, 1)
+    }
+}
+
+impl<S: Simd> NumberFactory<i32s<S>> for SimdFactory<S> {
+    #[inline(always)]
+    fn zero(self) -> i32s<S> {
+        i32s::splat(self.0, 0)
+    }
+
+    #[inline(always)]
+    fn one(self) -> i32s<S> {
+        i32s::splat(self.0, 1)
+    }
+}
+
+impl<S: Simd> NumberFactory<f32s<S>> for SimdFactory<S> {
+    #[inline(always)]
+    fn zero(self) -> f32s<S> {
+        f32s::splat(self.0, 0f32)
+    }
+
+    #[inline(always)]
+    fn one(self) -> f32s<S> {
+        f32s::splat(self.0, 1f32)
+    }
+}
+
 macro_rules! simd_number_impls {
-    ($([$simd_ty:ident, $mask_ty:ident]),* $(,)?) => {
+    ($(($simd_ty:ident, $lane_ty:ty, $mask_ty:ident)),* $(,)?) => {
         $(
             impl<S: Simd> Number for $simd_ty<S> {
+                type Factory = SimdFactory<S>;
                 type Mask = $mask_ty<S>;
 
                 #[inline(always)]
+                fn factory(self) -> Self::Factory {
+                    self.witness().into()
+                }
+
+                #[inline(always)]
                 fn eq(self, rhs: Self) -> Self::Mask {
-                    SimdBase::simd_eq(self, rhs)
+                    <$simd_ty<S>>::simd_eq(self, rhs)
                 }
 
                 #[inline(always)]
                 fn ne(self, rhs: Self) -> Self::Mask {
-                    !SimdBase::simd_eq(self, rhs)
+                    <$simd_ty<S>>::simd_ne(self, rhs)
                 }
 
                 #[inline(always)]
                 fn lt(self, rhs: Self) -> Self::Mask {
-                    SimdBase::simd_lt(self, rhs)
+                    <$simd_ty<S>>::simd_lt(self, rhs)
                 }
 
                 #[inline(always)]
                 fn le(self, rhs: Self) -> Self::Mask {
-                    SimdBase::simd_le(self, rhs)
+                    <$simd_ty<S>>::simd_le(self, rhs)
                 }
 
                 #[inline(always)]
                 fn gt(self, rhs: Self) -> Self::Mask {
-                    SimdBase::simd_gt(self, rhs)
+                    <$simd_ty<S>>::simd_gt(self, rhs)
                 }
 
                 #[inline(always)]
                 fn ge(self, rhs: Self) -> Self::Mask {
-                    SimdBase::simd_ge(self, rhs)
+                    <$simd_ty<S>>::simd_ge(self, rhs)
                 }
 
                 #[inline(always)]
                 fn min(self, rhs: Self) -> Self {
-                    SimdBase::min(self, rhs)
+                    <$simd_ty<S>>::min(self, rhs)
                 }
 
                 #[inline(always)]
                 fn max(self, rhs: Self) -> Self {
-                    SimdBase::max(self, rhs)
+                    <$simd_ty<S>>::max(self, rhs)
                 }
 
                 #[inline(always)]
                 fn select(mask: Self::Mask, if_true: Self, if_false: Self) -> Self {
-                    use fearless_simd::Select;
-                    <$mask_ty<S>>::select(mask, if_true, if_false)
-                }
-
-                #[inline(always)]
-                fn div_or_zero(self, rhs: Self) -> Self {
-                    let zero = SimdBase::splat(rhs.simd, 0 as <$simd_ty<S> as SimdBase<S>>::Element);
-                    Self::select(rhs.ne(zero), self / rhs, zero)
+                    <$simd_ty<S>>::select(mask, if_true, if_false)
                 }
             }
         )*
     };
 }
 
-macro_rules! simd_real_impls {
-    ($($simd_ty:ident),* $(,)?) => {
-        $(
-            impl<S: Simd> Real for $simd_ty<S> {
-                #[inline(always)]
-                fn sqrt(self) -> Self {
-                    SimdFloat::sqrt(self)
-                }
-            }
-        )*
-    };
-}
+simd_number_impls!(
+    (u32s, u32, mask32s),
+    (i32s, i32, mask32s),
+    (f32s, f32, mask32s)
+);
 
-simd_number_impls! {
-    // `f32`
-    [f32x4, mask32x4],
-    [f32x8, mask32x8],
-    [f32x16, mask32x16],
-
-    // `f64`
-    [f64x2, mask64x2],
-    [f64x4, mask64x4],
-    [f64x8, mask64x8],
-}
-
-simd_real_impls! {
-    // `f32`
-    f32x4, f32x8, f32x16,
-    // `f64`
-    f64x2, f64x4, f64x8,
-}
-
-pub(crate) struct R<T>(PhantomData<fn() -> T>);
-
-impl<T> R<T>
-where
-    Self: NumberField,
-{
+impl<S: Simd> Real for f32s<S> {
     #[inline(always)]
-    pub(crate) const fn new() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<T> NumberField for R<T>
-where
-    Self: Seal,
-    T: Real + ConstZero + ConstOne,
-{
-    type Element = T;
-
-    #[inline(always)]
-    fn zero(self) -> Self::Element {
-        T::ZERO
-    }
-
-    #[inline(always)]
-    fn one(self) -> Self::Element {
-        T::ONE
-    }
-}
-
-impl<T> Clone for R<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T> Copy for R<T> {}
-
-pub(crate) struct RxS<S, T> {
-    simd: S,
-    _marker: PhantomData<fn() -> T>,
-}
-
-impl<S: Simd> NumberField for RxS<S, f32>
-where
-    S::f32s: Real,
-{
-    type Element = S::f32s;
-
-    #[inline(always)]
-    fn zero(self) -> Self::Element {
-        SimdBase::splat(self.simd, 0f32)
-    }
-
-    #[inline(always)]
-    fn one(self) -> Self::Element {
-        SimdBase::splat(self.simd, 1f32)
-    }
-}
-
-impl<S: Simd> NumberField for RxS<S, f64>
-where
-    S::f64s: Real,
-{
-    type Element = S::f64s;
-
-    #[inline(always)]
-    fn zero(self) -> Self::Element {
-        SimdBase::splat(self.simd, 0f64)
-    }
-
-    #[inline(always)]
-    fn one(self) -> Self::Element {
-        SimdBase::splat(self.simd, 1f64)
-    }
-}
-
-impl<S: Copy, T> Clone for RxS<S, T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<S: Copy, T> Copy for RxS<S, T> {}
-
-#[derive(Copy, Clone, Eq, PartialEq)]
-#[repr(u8)]
-pub(crate) enum Axis {
-    X = 0,
-    Y = 1,
-    Z = 2,
-}
-
-impl<T> Cast<T> for Axis
-where
-    u8: Cast<T>,
-{
-    #[inline(always)]
-    fn cast(self) -> T {
-        (self as u8).cast()
+    fn sqrt(self) -> Self {
+        <f32s<S>>::sqrt(self)
     }
 }
 
@@ -614,6 +524,28 @@ impl<T> Vec3<T> {
     }
 }
 
+impl<T> Vec3<T> {
+    #[inline(always)]
+    pub(crate) fn simd_new<S: Simd, U>(simd: S, x: U, y: U, z: U) -> Self
+    where
+        U: SimdInto<T, S>,
+    {
+        Self {
+            x: x.simd_into(simd),
+            y: y.simd_into(simd),
+            z: z.simd_into(simd),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn simd_splat<S: Simd, U>(simd: S, value: U) -> Self
+    where
+        U: Copy + SimdInto<T, S>,
+    {
+        Self::simd_new(simd, value, value, value)
+    }
+}
+
 impl<T> From<[T; 3]> for Vec3<T> {
     #[inline(always)]
     fn from(value: [T; 3]) -> Self {
@@ -670,45 +602,115 @@ impl<T: ConstZero + ConstOne> Vec3<T> {
     pub const Z: Self = Self::new(T::ZERO, T::ZERO, T::ONE);
 }
 
+impl<T: Mask> Vec3<T> {
+    #[inline(always)]
+    pub fn fold_and(self) -> T {
+        self.x & self.y & self.z
+    }
+
+    #[inline(always)]
+    pub fn fold_or(self) -> T {
+        self.x | self.y | self.z
+    }
+}
+
 impl<T: Number> Vec3<T> {
     #[inline(always)]
-    pub(crate) fn zero<F>(field: F) -> Self
+    pub(crate) fn zero<Factory>(field: Factory) -> Self
     where
-        F: NumberField<Element = T>,
+        Factory: NumberFactory<T>,
     {
-        Self::splat(F::zero(field))
+        Self::splat(Factory::zero(field))
     }
 
     #[inline(always)]
-    pub(crate) fn one<F>(field: F) -> Self
+    pub(crate) fn one<Factory>(field: Factory) -> Self
     where
-        F: NumberField<Element = T>,
+        Factory: NumberFactory<T>,
     {
-        Self::splat(F::one(field))
+        Self::splat(Factory::one(field))
     }
 
     #[inline(always)]
-    pub(crate) fn x<F>(field: F) -> Self
+    pub(crate) fn x<Factory>(field: Factory) -> Self
     where
-        F: NumberField<Element = T>,
+        Factory: NumberFactory<T>,
     {
-        Self::new(F::one(field), F::zero(field), F::zero(field))
+        Self::new(
+            Factory::one(field),
+            Factory::zero(field),
+            Factory::zero(field),
+        )
     }
 
     #[inline(always)]
-    pub(crate) fn y<F>(field: F) -> Self
+    pub(crate) fn y<F>(factory: F) -> Self
     where
-        F: NumberField<Element = T>,
+        F: NumberFactory<T>,
     {
-        Self::new(F::zero(field), F::one(field), F::zero(field))
+        Self::new(F::zero(factory), F::one(factory), F::zero(factory))
     }
 
     #[inline(always)]
-    pub(crate) fn z<F>(field: F) -> Self
+    pub(crate) fn z<F>(factory: F) -> Self
     where
-        F: NumberField<Element = T>,
+        F: NumberFactory<T>,
     {
-        Self::new(F::zero(field), F::zero(field), F::one(field))
+        Self::new(F::zero(factory), F::zero(factory), F::one(factory))
+    }
+
+    #[inline(always)]
+    pub fn eq_mask(self, rhs: Self) -> Vec3<T::Mask> {
+        Vec3 {
+            x: self.x.eq(rhs.x),
+            y: self.y.eq(rhs.y),
+            z: self.z.eq(rhs.z),
+        }
+    }
+
+    #[inline(always)]
+    pub fn ne_mask(self, rhs: Self) -> Vec3<T::Mask> {
+        Vec3 {
+            x: self.x.ne(rhs.x),
+            y: self.y.ne(rhs.y),
+            z: self.z.ne(rhs.z),
+        }
+    }
+
+    #[inline(always)]
+    pub fn lt_mask(self, rhs: Self) -> Vec3<T::Mask> {
+        Vec3 {
+            x: self.x.lt(rhs.x),
+            y: self.y.lt(rhs.y),
+            z: self.z.lt(rhs.z),
+        }
+    }
+
+    #[inline(always)]
+    pub fn le_mask(self, rhs: Self) -> Vec3<T::Mask> {
+        Vec3 {
+            x: self.x.le(rhs.x),
+            y: self.y.le(rhs.y),
+            z: self.z.le(rhs.z),
+        }
+    }
+
+    #[inline(always)]
+    pub fn gt_mask(self, rhs: Self) -> Vec3<T::Mask> {
+        Vec3 {
+            x: self.x.gt(rhs.x),
+            y: self.y.gt(rhs.y),
+            z: self.z.gt(rhs.z),
+        }
+    }
+
+    #[inline(always)]
+    pub fn ge_mask(self, rhs: Self) -> Vec3<T::Mask> {
+        Vec3 {
+            x: self.x.ge(rhs.x),
+            y: self.y.ge(rhs.y),
+            z: self.z.ge(rhs.z),
+        }
     }
 
     #[inline(always)]
@@ -772,7 +774,10 @@ impl<T: Real> Vec3<T> {
     #[inline(always)]
     pub fn normalize_or_zero(self) -> Self {
         let norm = self.norm();
-        self.map(|v| v.div_or_zero(norm))
+        self.map(|v| {
+            let zero = v.factory().zero();
+            T::select(norm.eq(zero), zero, v / norm)
+        })
     }
 }
 
@@ -841,55 +846,4 @@ imm_binop_impls!((Add, add), (Sub, sub), (Mul, mul), (Div, div));
 mut_binop_impls! {
     (AddAssign, add_assign), (SubAssign, sub_assign),
     (MulAssign, mul_assign), (DivAssign, div_assign)
-}
-
-macro_rules! scalar_rev_binop_impls {
-    ($($ty:ty => [$(($trait:ident, $method:ident)),* $(,)?]),* $(,)?) => {
-        $(
-            $(
-                impl ops::$trait<Vec3<$ty>> for $ty {
-                    type Output = Vec3<$ty>;
-
-                    #[inline(always)]
-                    fn $method(self, rhs: Vec3<$ty>) -> Self::Output {
-                        <Vec3<$ty> as ops::$trait<$ty>>::$method(rhs, self)
-                    }
-                }
-            )*
-        )*
-    };
-}
-
-macro_rules! simd_rev_binop_impls {
-    ($($ty:ident => [$(($trait:ident, $method:ident, $op:tt)),* $(,)?]),* $(,)?) => {
-        $(
-            $(
-                impl<S: Simd> ops::$trait<Vec3<$ty<S>>> for $ty<S> {
-                    type Output = Vec3<$ty<S>>;
-
-                    #[inline(always)]
-                    fn $method(self, rhs: Vec3<$ty<S>>) -> Self::Output {
-                        <Vec3<$ty<S>> as ops::$trait<$ty<S>>>::$method(rhs, self)
-                    }
-                }
-            )*
-        )*
-    };
-}
-
-scalar_rev_binop_impls! {
-    f32 => [(Add, add), (Sub, sub), (Mul, mul), (Div, div)],
-    f64 => [(Add, add), (Sub, sub), (Mul, mul), (Div, div)],
-}
-
-simd_rev_binop_impls! {
-    // `f32`
-    f32x4 => [(Add, add, +), (Sub, sub, -), (Mul, mul, *), (Div, div, /)],
-    f32x8 => [(Add, add, +), (Sub, sub, -), (Mul, mul, *), (Div, div, /)],
-    f32x16 => [(Add, add, +), (Sub, sub, -), (Mul, mul, *), (Div, div, /)],
-
-    // `f64`
-    f64x2 => [(Add, add, +), (Sub, sub, -), (Mul, mul, *), (Div, div, /)],
-    f64x4 => [(Add, add, +), (Sub, sub, -), (Mul, mul, *), (Div, div, /)],
-    f64x8 => [(Add, add, +), (Sub, sub, -), (Mul, mul, *), (Div, div, /)],
 }
