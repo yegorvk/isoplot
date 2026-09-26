@@ -6,7 +6,7 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
-logos = "0.16.1"
+logos = "0.16"
 thiserror.workspace = true
 
 [dependencies.bytemuck]
@@ -14,7 +14,7 @@ workspace = true
 features = ["derive", "min_const_generics", "must_cast"]
 
 [dependencies.cranelift]
-version = "0.134.2"
+version = "0.134"
 optional = true
 features = ["jit", "module", "native"]
 

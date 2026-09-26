@@ -14,16 +14,18 @@ isoplot-eval = { path = "crates/isoplot_eval", version = "0.1.0" }
 isoplot-mesh = { path = "crates/isoplot_mesh", version = "0.1.0" }
 
 # External
-anyhow = "1.0"
-arrayvec = "0.7.6"
-bilge = "0.3.0"
-bytemuck = "1.25.2"
-bumpalo = "3.20.3"
-dashmap = "6.2.1"
-derive-where = "1.6.1"
-fearless_simd = "0.7.0"
-glam = "0.32.1"
-thiserror = "2.0.19"
+anyhow = "1"
+arrayvec = "0.7"
+bilge = "0.3"
+bytemuck = "1"
+bumpalo = "3"
+dashmap = "6"
+derive-where = "1"
+fearless_simd = "1"
+fearless_simd_macros = "0.1"
+glam = "0.32"
+itertools = "0.15"
+thiserror = "2"
 
 [profile.dev.package.isoplot-demo]
 opt-level = 1

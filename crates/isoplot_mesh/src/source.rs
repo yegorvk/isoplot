@@ -1,9 +1,19 @@
 use crate::math::Vec3;
+use std::iter;
 
 /// A scalar field source for isosurface extraction
 pub trait ScalarField {
     /// Samples the scalar field at the specified point.
     fn sample(&self, point: Vec3<f32>) -> f32;
+
+    fn sample_batch<const N: usize>(&self, point: &[Vec3<[f32; N]>], out: &mut [[f32; N]]) {
+        for (tile, out) in iter::zip(point, out) {
+            #[allow(clippy::needless_range_loop)]
+            for i in 0..N {
+                out[i] = self.sample(Vec3::new(tile.x[i], tile.y[i], tile.z[i]));
+            }
+        }
+    }
 
     /// Finds a point where the 0-level set intersects the given segment, if any.
     fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> Option<Vec3<f32>>;

@@ -10,4 +10,10 @@ arrayvec.workspace = true
 bilge.workspace = true
 derive-where.workspace = true
 fearless_simd.workspace = true
+fearless_simd_macros.workspace = true
 glam.workspace = true
+itertools.workspace = true
+
+[dependencies.bytemuck]
+workspace = true
+features = ["min_const_generics", "must_cast"]
