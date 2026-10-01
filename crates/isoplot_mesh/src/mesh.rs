@@ -1,4 +1,4 @@
-use crate::math::Vec3;
+use isoplot_math::Vec3;
 
 #[derive(Copy, Clone, Debug)]
 pub struct Vertex {

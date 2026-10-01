@@ -1,21 +1,16 @@
 [package]
-name = "isoplot-mesh"
+name = "isoplot-math"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
 license.workspace = true
 
 [dependencies]
-isoplot-math.workspace = true
-arrayvec.workspace = true
-bilge.workspace = true
 derive-where.workspace = true
 fearless_simd.workspace = true
 fearless_simd_macros.workspace = true
-glam.workspace = true
 itertools.workspace = true
-sealed.workspace = true
 
 [dependencies.bytemuck]
 workspace = true
-features = ["min_const_generics", "must_cast"]
+features = ["derive", "min_const_generics", "must_cast"]

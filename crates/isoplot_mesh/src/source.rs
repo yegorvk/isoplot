@@ -1,4 +1,4 @@
-use crate::math::Vec3;
+use isoplot_math::{Finite, MaskedVec3, Vec3};
 use std::iter;
 
 /// A scalar field source for isosurface extraction
@@ -16,7 +16,7 @@ pub trait ScalarField {
     }
 
     /// Finds a point where the 0-level set intersects the given segment, if any.
-    fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> Option<Vec3<f32>>;
+    fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> MaskedVec3<Finite<f32>>;
 
     /// Returns `true` *only if* the given region is empty.
     #[inline]
@@ -51,7 +51,7 @@ impl<S: ?Sized + ScalarField> ScalarField for &S {
     }
 
     #[inline]
-    fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> Option<Vec3<f32>> {
+    fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> MaskedVec3<Finite<f32>> {
         <S as ScalarField>::find_intersection(self, start, end)
     }
 
@@ -92,10 +92,10 @@ impl<S: ScalarField> ScalarField for Translate<S> {
     }
 
     #[inline]
-    fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> Option<Vec3<f32>> {
+    fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> MaskedVec3<Finite<f32>> {
         self.source
             .find_intersection(start + self.offset, end + self.offset)
-            .map(|point| point - self.offset)
+            .filter_map(|point| point - self.offset)
     }
 
     #[inline]
@@ -129,7 +129,7 @@ impl<S: ScalarField> ScalarField for CentralDifference<S> {
     }
 
     #[inline]
-    fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> Option<Vec3<f32>> {
+    fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> MaskedVec3<Finite<f32>> {
         self.source.find_intersection(start, end)
     }
 

@@ -1,9 +1,9 @@
+use isoplot_math::Vec3;
 use std::ops::BitOr;
 
 mod tables;
 mod traverse;
 
-use crate::math::Vec3;
 pub(crate) use tables::{
     Corner, Edge, EdgeKey, EdgeKind, EdgeSlot, Face, FaceKey, FaceKind, FaceSlot, edge_corners,
     face_edge_slot, for_each_cell_edge, for_each_cell_face,

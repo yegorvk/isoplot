@@ -1,3 +1,4 @@
+use isoplot_math::Vec3;
 use std::array;
 
 use crate::{
@@ -6,7 +7,6 @@ use crate::{
         Offset, TraverseOctree, edge_corners, face_edge_slot, for_each_cell_edge,
         for_each_cell_face,
     },
-    math::Vec3,
     octree::{BuildOctree, ChildIndex, Key, Node, Octree},
     quant::Quant,
     source::ScalarField,
@@ -323,5 +323,5 @@ where
         min_point + corner_offset + cell_offset
     });
 
-    field.find_intersection(start, end).is_some()
+    field.find_intersection(start, end).get().is_some()
 }

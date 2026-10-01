@@ -4,7 +4,8 @@ use isoplot_eval::{
     Bounds, CompileError, DefaultBackend, Diagnostic, Evaluator, Gradient, Instance, Interval,
     Program, ProgramDesc,
 };
-use isoplot_mesh::{NormalField, ScalarField, Vec3};
+use isoplot_math::{Finite, MaskedVec3, Vec3};
+use isoplot_mesh::{NormalField, ScalarField};
 
 use crate::plot::PlotSource;
 
@@ -60,14 +61,14 @@ impl ScalarField for DynamicSource {
     }
 
     #[inline]
-    fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> Option<Vec3<f32>> {
+    fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> MaskedVec3<Finite<f32>> {
         const MAX_ITERS: usize = 32;
 
         let (mut a, mut b) = (start, end);
         let (mut v_a, mut v_b) = (self.sample(a), self.sample(b));
 
         if 1f32.copysign(v_a) == 1f32.copysign(v_b) {
-            return None;
+            return None.into();
         }
 
         // Shrink the segment until its bounds are free of discontinuities.
@@ -75,13 +76,13 @@ impl ScalarField for DynamicSource {
             let segment = array::from_fn(|i| Interval::new(a[i].min(b[i]), a[i].max(b[i])));
 
             if self.field_bounds.evaluate(&segment).get().is_some() {
-                return Some(self.bisect(a, b, v_a, v_b));
+                return Some(self.bisect(a, b, v_a, v_b)).into();
             }
 
             self.refine(&mut a, &mut b, &mut v_a, &mut v_b);
         }
 
-        None
+        None.into()
     }
 
     #[inline]

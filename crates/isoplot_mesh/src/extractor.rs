@@ -1,16 +1,17 @@
 mod grid;
 
+use isoplot_math::Vec3;
 use std::array;
 
 use crate::{
     lattice::{
         Corner, Edge, EdgeKey, EdgeKind, EdgeSlot, Face, FaceKey, FaceKind, FaceSlot, Offset,
     },
-    math::Vec3,
     mesh::{PopulateMesh, Vertex},
     quant::Quant,
     source::{NormalField, ScalarField, Translate},
 };
+
 use grid::{AdaptiveGrid, EdgeSeam, FaceSeam};
 
 #[derive(Debug)]
@@ -230,7 +231,7 @@ fn place_feature<S: NormalField>(field: &S, cell: Quant) -> Option<Vec3<f32>> {
 
             let (a, b) = (i as usize, j as usize);
 
-            let Some(point) = field.find_intersection(positions[a], positions[b]) else {
+            let Some(point) = field.find_intersection(positions[a], positions[b]).get() else {
                 continue;
             };
 

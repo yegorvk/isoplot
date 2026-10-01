@@ -3430,6 +3430,7 @@ dependencies = [
  "dashmap",
  "glam",
  "isoplot-eval",
+ "isoplot-math",
  "isoplot-mesh",
  "log",
 ]
@@ -3445,6 +3446,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "isoplot-math"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "derive-where",
+ "fearless_simd",
+ "fearless_simd_macros",
+ "itertools 0.15.0",
+]
+
+[[package]]
 name = "isoplot-mesh"
 version = "0.1.0"
 dependencies = [
@@ -3455,7 +3467,9 @@ dependencies = [
  "fearless_simd",
  "fearless_simd_macros",
  "glam",
+ "isoplot-math",
  "itertools 0.15.0",
+ "sealed",
 ]
 
 [[package]]
@@ -4852,6 +4866,17 @@ dependencies = [
  "memmap2",
  "smithay-client-toolkit",
  "tiny-skia",
+]
+
+[[package]]
+name = "sealed"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b68e2ea526d9fb32f23ca8894fb5da9e743f34c2f41701f0501dc8a25c4b343"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
 ]
 
 [[package]]

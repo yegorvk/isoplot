@@ -1,10 +1,11 @@
 use bilge::prelude::*;
-use fearless_simd::{Bytes, ExtractToken, Select, Simd, SimdBase, SimdInt, SimdInto, SimdMask};
-
-use crate::{
-    math::{Vec3, u32s_splat},
-    octree::{ChildIndex, Payload},
+use fearless_simd::{
+    Bytes, ExtractToken, Select, Simd, SimdBase, SimdInt, SimdInto, SimdMask, f32x8, i32x8,
+    mask32x8, u32x8,
 };
+use isoplot_math::Vec3;
+
+use crate::octree::{ChildIndex, Payload};
 
 /// A quantized point in a unit cube
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
@@ -67,12 +68,12 @@ impl<S: Simd> QuantS<S> {
     }
 
     #[inline(always)]
-    pub(crate) fn level(self) -> S::u32s {
+    pub(crate) fn level(self) -> u32x8<S> {
         self.0.level()
     }
 
     #[inline(always)]
-    pub(crate) fn is_leaf(self) -> S::mask32s {
+    pub(crate) fn is_leaf(self) -> mask32x8<S> {
         self.0.is_leaf()
     }
 
@@ -83,19 +84,19 @@ impl<S: Simd> QuantS<S> {
     }
 
     #[inline(always)]
-    pub(crate) fn min_point_size(self) -> (Vec3<S::f32s>, S::f32s) {
+    pub(crate) fn min_point_size(self) -> (Vec3<f32x8<S>>, f32x8<S>) {
         let (parts, level) = self.0.parts_level();
 
-        let x = fract_u32_to_f32_s::<S>(parts.x, level);
-        let y = fract_u32_to_f32_s::<S>(parts.y, level);
-        let z = fract_u32_to_f32_s::<S>(parts.z, level);
+        let x = fract_u32_to_f32_s(parts.x, level);
+        let y = fract_u32_to_f32_s(parts.y, level);
+        let z = fract_u32_to_f32_s(parts.z, level);
 
-        let neg_level = -level.bitcast::<S::i32s>();
-        (Vec3::new(x, y, z), f32_exp2_small_i32_s::<S>(neg_level))
+        let neg_level = -level.bitcast::<i32x8<S>>();
+        (Vec3::new(x, y, z), f32_exp2_small_i32_s(neg_level))
     }
 
     #[inline(always)]
-    pub(crate) fn center_point(self) -> Vec3<S::f32s> {
+    pub(crate) fn center_point(self) -> Vec3<f32x8<S>> {
         let (min_point, size) = self.min_point_size();
         min_point + size * 0.5
     }
@@ -157,7 +158,7 @@ impl RawQuant {
 
 #[derive(Copy, Clone)]
 #[repr(transparent)]
-struct RawQuantS<S: Simd>(S::u32s);
+struct RawQuantS<S: Simd>(u32x8<S>);
 
 impl<S: Simd> RawQuantS<S> {
     const X_BITS: u32 = 11;
@@ -177,7 +178,7 @@ impl<S: Simd> RawQuantS<S> {
     }
 
     #[inline(always)]
-    fn from_raw_parts(raw_x: S::u32s, y: S::u32s, z: S::u32s) -> Self {
+    fn from_raw_parts(raw_x: u32x8<S>, y: u32x8<S>, z: u32x8<S>) -> Self {
         debug_assert!(
             raw_x.simd_eq(0).all_false()
                 && raw_x.simd_le(mask(Self::X_BITS)).all_true()
@@ -189,17 +190,17 @@ impl<S: Simd> RawQuantS<S> {
     }
 
     #[inline(always)]
-    fn level(self) -> S::u32s {
-        quant_level_s::<S>(self.raw_x())
+    fn level(self) -> u32x8<S> {
+        quant_level_s(self.raw_x())
     }
 
     #[inline(always)]
-    fn is_leaf(self) -> S::mask32s {
+    fn is_leaf(self) -> mask32x8<S> {
         self.level().simd_lt(Quant::MAX_SUBDIV as u32)
     }
 
     #[inline(always)]
-    fn child(self, which: S::u32s) -> Self {
+    fn child(self, which: u32x8<S>) -> Self {
         let raw_x = (self.raw_x() << 1) | (which & 0x1);
         let y = (self.y() << 1) | ((which & 0x2) >> 1);
         let z = (self.z() << 1) | ((which & 0x4) >> 2);
@@ -207,33 +208,33 @@ impl<S: Simd> RawQuantS<S> {
     }
 
     #[inline(always)]
-    fn parts_level(self) -> (Vec3<S::u32s>, S::u32s) {
+    fn parts_level(self) -> (Vec3<u32x8<S>>, u32x8<S>) {
         let [raw_x, y, z] = self.raw_parts();
 
-        let level = quant_level_s::<S>(raw_x);
-        let one: S::u32s = 1u32.simd_into(self.token());
-        let level_bit: S::u32s = one << level;
+        let level = quant_level_s(raw_x);
+        let one: u32x8<S> = 1u32.simd_into(self.token());
+        let level_bit: u32x8<S> = one << level;
 
         (Vec3::new(raw_x ^ level_bit, y, z), level)
     }
 
     #[inline(always)]
-    fn raw_parts(self) -> [S::u32s; 3] {
+    fn raw_parts(self) -> [u32x8<S>; 3] {
         [self.raw_x(), self.y(), self.z()]
     }
 
     #[inline(always)]
-    fn raw_x(self) -> S::u32s {
+    fn raw_x(self) -> u32x8<S> {
         self.0 & mask(Self::X_BITS)
     }
 
     #[inline(always)]
-    fn y(self) -> S::u32s {
+    fn y(self) -> u32x8<S> {
         (self.0 >> Self::Y_SHIFT) & mask(Self::Y_BITS)
     }
 
     #[inline(always)]
-    fn z(self) -> S::u32s {
+    fn z(self) -> u32x8<S> {
         (self.0 >> Self::Z_SHIFT) & mask(Self::Z_BITS)
     }
 }
@@ -258,22 +259,22 @@ fn quant_level(raw_x: u16) -> u8 {
 }
 
 #[inline(always)]
-fn quant_level_s<S: Simd>(raw_x: S::u32s) -> S::u32s {
-    let level = msb_index_u32_s::<S>(raw_x);
+fn quant_level_s<S: Simd>(raw_x: u32x8<S>) -> u32x8<S> {
+    let level = msb_index_u32_s(raw_x);
     debug_assert!(level.simd_lt(Quant::MAX_SUBDIV as u32).all_true());
     level
 }
 
 #[inline(always)]
-fn msb_index_u32_s<S: Simd>(v: S::u32s) -> S::u32s {
+fn msb_index_u32_s<S: Simd>(v: u32x8<S>) -> u32x8<S> {
     v.simd_eq(0)
-        .select(0.simd_into(v.token()), msb_index_non_zero_u32_s::<S>(v))
+        .select(0.simd_into(v.token()), msb_index_non_zero_u32_s(v))
 }
 
 #[inline(always)]
-fn msb_index_non_zero_u32_s<S: Simd>(v: S::u32s) -> S::u32s {
-    let v_f32: S::f32s = v.to_float();
-    let v_exp = v_f32.bitcast::<S::u32s>() >> 23;
+fn msb_index_non_zero_u32_s<S: Simd>(v: u32x8<S>) -> u32x8<S> {
+    let v_f32: f32x8<S> = v.to_float();
+    let v_exp = v_f32.bitcast::<u32x8<S>>() >> 23;
     let msb = v_exp - 127;
     (v >> msb).simd_eq(1).select(msb, msb - 1)
 }
@@ -300,21 +301,21 @@ const fn fract_u32_to_f32(num: u32, len: u32) -> f32 {
 }
 
 #[inline(always)]
-fn f32_exp2_small_i32_s<S: Simd>(exp: S::i32s) -> S::f32s {
+fn f32_exp2_small_i32_s<S: Simd>(exp: i32x8<S>) -> f32x8<S> {
     debug_assert!(exp.simd_ge(-126).all_true());
-    ((exp + 127).bitcast::<S::u32s>() << 23).bitcast()
+    ((exp + 127).bitcast::<u32x8<S>>() << 23).bitcast()
 }
 
 #[inline(always)]
-fn fract_u32_to_f32_s<S: Simd>(num: S::u32s, len: S::u32s) -> S::f32s {
+fn fract_u32_to_f32_s<S: Simd>(num: u32x8<S>, len: u32x8<S>) -> f32x8<S> {
     let simd = num.token();
     debug_assert!(
         ((num.simd_eq(1) & len.simd_eq(0))
-            | (len.simd_le(23) & num.simd_lt(u32s_splat(simd, 1) << len)))
+            | (len.simd_le(23) & num.simd_lt(u32x8::splat(simd, 1) << len)))
         .all_true()
     );
-    let fract: S::u32s = num << (u32s_splat(simd, 23) - len);
-    (u32s_splat(simd, 127u32 << 23u32) + fract).bitcast::<S::f32s>() - 1f32
+    let fract = num << (u32x8::splat(simd, 23) - len);
+    (u32x8::splat(simd, 127u32 << 23u32) + fract).bitcast::<f32x8<S>>() - 1f32
 }
 
 #[cfg(test)]
@@ -437,34 +438,32 @@ mod tests {
     #[test]
     fn test_u32_msb_s() {
         simd_test!(simd, {
-            simd_assert_eq!(msb_index_u32_s::<S>(u32s_splat(simd, 0)), 0);
-            simd_assert_eq!(msb_index_u32_s::<S>(u32s_splat(simd, 2)), 1);
-            simd_assert_eq!(msb_index_u32_s::<S>(u32s_splat(simd, 6)), 2);
-            simd_assert_eq!(msb_index_u32_s::<S>(u32s_splat(simd, (1u32 << 20) - 1)), 19);
-            simd_assert_eq!(msb_index_u32_s::<S>(u32s_splat(simd, (1u32 << 29) - 1)), 28);
-            simd_assert_eq!(msb_index_u32_s::<S>(u32s_splat(simd, 1u32 << 29)), 29);
-            simd_assert_eq!(msb_index_u32_s::<S>(u32s_splat(simd, 1u32 << 31)), 31);
-            simd_assert_eq!(msb_index_u32_s::<S>(u32s_splat(simd, u32::MAX)), 31);
+            simd_assert_eq!(msb_index_u32_s(u32x8::splat(simd, 0)), 0);
+            simd_assert_eq!(msb_index_u32_s(u32x8::splat(simd, 2)), 1);
+            simd_assert_eq!(msb_index_u32_s(u32x8::splat(simd, 6)), 2);
+            simd_assert_eq!(msb_index_u32_s(u32x8::splat(simd, (1u32 << 20) - 1)), 19);
+            simd_assert_eq!(msb_index_u32_s(u32x8::splat(simd, (1u32 << 29) - 1)), 28);
+            simd_assert_eq!(msb_index_u32_s(u32x8::splat(simd, 1u32 << 29)), 29);
+            simd_assert_eq!(msb_index_u32_s(u32x8::splat(simd, 1u32 << 31)), 31);
+            simd_assert_eq!(msb_index_u32_s(u32x8::splat(simd, u32::MAX)), 31);
         });
     }
 
     #[test]
     fn test_f32_exp2_small_i32_s() {
         simd_test!(simd, {
-            use crate::math::i32s_splat;
-
             // Zero
-            simd_assert_eq!(f32_exp2_small_i32_s::<S>(i32s_splat(simd, 0)), 1.0);
+            simd_assert_eq!(f32_exp2_small_i32_s(i32x8::splat(simd, 0)), 1.0);
 
             // Positive
-            simd_assert_eq!(f32_exp2_small_i32_s::<S>(i32s_splat(simd, 1)), 2.0);
-            simd_assert_eq!(f32_exp2_small_i32_s::<S>(i32s_splat(simd, 3)), 8.0);
-            simd_assert_eq!(f32_exp2_small_i32_s::<S>(i32s_splat(simd, 4)), 16.0);
+            simd_assert_eq!(f32_exp2_small_i32_s(i32x8::splat(simd, 1)), 2.0);
+            simd_assert_eq!(f32_exp2_small_i32_s(i32x8::splat(simd, 3)), 8.0);
+            simd_assert_eq!(f32_exp2_small_i32_s(i32x8::splat(simd, 4)), 16.0);
 
             // Negative
-            simd_assert_eq!(f32_exp2_small_i32_s::<S>(i32s_splat(simd, -1)), 0.5);
-            simd_assert_eq!(f32_exp2_small_i32_s::<S>(i32s_splat(simd, -3)), 0.125);
-            simd_assert_eq!(f32_exp2_small_i32_s::<S>(i32s_splat(simd, -4)), 0.0625);
+            simd_assert_eq!(f32_exp2_small_i32_s(i32x8::splat(simd, -1)), 0.5);
+            simd_assert_eq!(f32_exp2_small_i32_s(i32x8::splat(simd, -3)), 0.125);
+            simd_assert_eq!(f32_exp2_small_i32_s(i32x8::splat(simd, -4)), 0.0625);
         });
     }
 
@@ -473,49 +472,49 @@ mod tests {
         simd_test!(simd, {
             // num == 0
             simd_assert_eq!(
-                fract_u32_to_f32_s::<S>(u32s_splat(simd, 0), u32s_splat(simd, 0)),
+                fract_u32_to_f32_s(u32x8::splat(simd, 0), u32x8::splat(simd, 0)),
                 0.0
             );
             simd_assert_eq!(
-                fract_u32_to_f32_s::<S>(u32s_splat(simd, 0), u32s_splat(simd, 1)),
+                fract_u32_to_f32_s(u32x8::splat(simd, 0), u32x8::splat(simd, 1)),
                 0.0
             );
             simd_assert_eq!(
-                fract_u32_to_f32_s::<S>(u32s_splat(simd, 0), u32s_splat(simd, 23)),
+                fract_u32_to_f32_s(u32x8::splat(simd, 0), u32x8::splat(simd, 23)),
                 0.0
             );
 
             // 0 bits of precision
             simd_assert_eq!(
-                fract_u32_to_f32_s::<S>(u32s_splat(simd, 1), u32s_splat(simd, 0)),
+                fract_u32_to_f32_s(u32x8::splat(simd, 1), u32x8::splat(simd, 0)),
                 1.0
             );
 
             // 1 bit of precision
             simd_assert_eq!(
-                fract_u32_to_f32_s::<S>(u32s_splat(simd, 0), u32s_splat(simd, 1)),
+                fract_u32_to_f32_s(u32x8::splat(simd, 0), u32x8::splat(simd, 1)),
                 0.0
             );
             simd_assert_eq!(
-                fract_u32_to_f32_s::<S>(u32s_splat(simd, 1), u32s_splat(simd, 1)),
+                fract_u32_to_f32_s(u32x8::splat(simd, 1), u32x8::splat(simd, 1)),
                 0.5
             );
 
             // 2 bits of precision
             simd_assert_eq!(
-                fract_u32_to_f32_s::<S>(u32s_splat(simd, 0), u32s_splat(simd, 2)),
+                fract_u32_to_f32_s(u32x8::splat(simd, 0), u32x8::splat(simd, 2)),
                 0.0
             );
             simd_assert_eq!(
-                fract_u32_to_f32_s::<S>(u32s_splat(simd, 1), u32s_splat(simd, 2)),
+                fract_u32_to_f32_s(u32x8::splat(simd, 1), u32x8::splat(simd, 2)),
                 0.25
             );
             simd_assert_eq!(
-                fract_u32_to_f32_s::<S>(u32s_splat(simd, 2), u32s_splat(simd, 2)),
+                fract_u32_to_f32_s(u32x8::splat(simd, 2), u32x8::splat(simd, 2)),
                 0.5
             );
             simd_assert_eq!(
-                fract_u32_to_f32_s::<S>(u32s_splat(simd, 3), u32s_splat(simd, 2)),
+                fract_u32_to_f32_s(u32x8::splat(simd, 3), u32x8::splat(simd, 2)),
                 0.75
             );
         });
