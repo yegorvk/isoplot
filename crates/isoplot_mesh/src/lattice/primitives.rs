@@ -37,18 +37,6 @@ impl AxisKind {
 pub struct Offset(u8);
 
 impl Offset {
-    pub(crate) const ZERO: Self = Self(0);
-
-    pub(crate) const ALL: [Offset; 8] = {
-        let mut a = [Self::ZERO; 8];
-        let mut i = 0u8;
-        while i < 8 {
-            a[i as usize] = Self(i);
-            i += 1;
-        }
-        a
-    };
-
     #[inline]
     pub(crate) const fn new(axis: AxisKind) -> Self {
         Self(1u8 << (axis as u8))
@@ -448,9 +436,22 @@ impl FaceIndex {
 ///
 /// It is just a newtype for [`FaceIndex`] since there is a natural
 /// isomorphism between them.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub(crate) struct BEdgeIndex(pub(crate) FaceIndex);
 
 impl BEdgeIndex {
+    pub(crate) const ALL: [Self; 12] = {
+        let mut a = [Self(FaceIndex(0)); 12];
+
+        let mut i = 0usize;
+        while i < 12 {
+            a[i] = Self(FaceIndex::ALL[i]);
+            i += 1;
+        }
+
+        a
+    };
+
     #[inline]
     pub(crate) fn corners(self) -> [Corner; 2] {
         self.corner_offsets().map(Corner)

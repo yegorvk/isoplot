@@ -11,6 +11,30 @@ use crate::{
     utils::array_transpose,
 };
 
+pub(crate) struct Cell {
+    pub(crate) vol: Quant,
+    mask: BEdgesMask,
+}
+
+impl Cell {
+    pub(crate) fn contains_intersection(&self, index: BEdgeIndex) -> bool {
+        self.mask.contains(index)
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub(super) struct Feature {
+    pub(super) vertex: Vec3<f32>,
+    level: u8,
+    mask: BEdgesMask,
+}
+
+impl Feature {
+    pub(super) fn contains_intersection(&self, index: BEdgeIndex) -> bool {
+        self.mask.contains(index)
+    }
+}
+
 struct OctreeSource<S, P> {
     scalar_field: S,
     max_level: u8,
@@ -20,7 +44,7 @@ struct OctreeSource<S, P> {
 impl<S, P> BuildOctree<Feature> for OctreeSource<S, P>
 where
     S: ScalarField,
-    P: Fn(Quant) -> Option<Vec3<f32>>,
+    P: Fn(Cell) -> Option<Vec3<f32>>,
 {
     #[inline]
     fn is_empty(&mut self, tag: Quant) -> bool {
@@ -47,10 +71,17 @@ where
                 .corners()
                 .map(|corner| min_corner + corner.0.as_vec3().cast() * size);
 
-            self.scalar_field.find_intersection(a, b).get().is_some()
+            if !self.scalar_field.may_contain_intersection(a, b) {
+                return false;
+            }
+
+            let v_a = self.scalar_field.sample(a);
+            let v_b = self.scalar_field.sample(b);
+
+            v_a.is_sign_positive() != v_b.is_sign_positive()
         });
 
-        let vertex = (self.place_feature)(tag)
+        let vertex = (self.place_feature)(Cell { vol: tag, mask })
             .unwrap_or_else(|| tag.center_point())
             .clamp(min_corner, min_corner + size);
 
@@ -59,19 +90,6 @@ where
             level: tag.level(),
             mask,
         }
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
-pub(super) struct Feature {
-    pub(super) vertex: Vec3<f32>,
-    level: u8,
-    mask: BEdgesMask,
-}
-
-impl Feature {
-    pub(super) const fn contains_intersection(&self, index: BEdgeIndex) -> bool {
-        self.mask.contains(index)
     }
 }
 
@@ -84,7 +102,7 @@ impl Chunk {
     pub(crate) fn build<S, P>(field: S, max_level: u8, place_feature: P) -> Self
     where
         S: ScalarField,
-        P: Fn(Quant) -> Option<Vec3<f32>>,
+        P: Fn(Cell) -> Option<Vec3<f32>>,
     {
         let mut source = OctreeSource {
             scalar_field: field,

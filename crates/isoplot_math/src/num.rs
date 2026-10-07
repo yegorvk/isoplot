@@ -1,4 +1,3 @@
-use bytemuck::{NoUninit, Pod, Zeroable};
 use fearless_simd::{
     Bytes, Select as SimdSelect, Simd, SimdBase, SimdFloat, SimdMask, f32x8, u32x8,
 };
@@ -95,20 +94,6 @@ pub trait Number<Token: Copy>:
 
     /// Returns the maximum of two numbers.
     fn max(self, rhs: Self) -> Self;
-}
-
-pub trait IntoNumber<Token: Copy>: Sealed<Token> + Copy {
-    type Number: Number<Token>;
-    fn into_number(self) -> Self::Number;
-}
-
-impl<Token: Copy, T: Number<Token>> IntoNumber<Token> for T {
-    type Number = T;
-
-    #[inline(always)]
-    fn into_number(self) -> Self::Number {
-        self
-    }
 }
 
 pub trait Signed<Token: Copy>: Sealed<Token> + Number<Token> + ops::Neg {

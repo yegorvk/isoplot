@@ -1,26 +1,27 @@
-use isoplot_math::{Finite, MaskedVec3, Vec3};
+use isoplot_math::Vec3;
 use std::iter;
+
+const TILE_SIZE: usize = 8;
 
 /// A scalar field source for isosurface extraction
 pub trait ScalarField {
     /// Samples the scalar field at the specified point.
     fn sample(&self, point: Vec3<f32>) -> f32;
 
-    fn sample_batch<const N: usize>(&self, point: &[Vec3<[f32; N]>], out: &mut [[f32; N]]) {
+    fn sample_batch(&self, point: &[Vec3<[f32; TILE_SIZE]>], out: &mut [[f32; TILE_SIZE]]) {
         for (tile, out) in iter::zip(point, out) {
             #[allow(clippy::needless_range_loop)]
-            for i in 0..N {
+            for i in 0..TILE_SIZE {
                 out[i] = self.sample(Vec3::new(tile.x[i], tile.y[i], tile.z[i]));
             }
         }
     }
 
-    /// Finds a point where the 0-level set intersects the given segment, if any.
-    fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> MaskedVec3<Finite<f32>>;
-
-    /// Returns `true` if the image of the interval `[start, end]` is bounded.
-    fn is_bounded(&self, start: Vec3<f32>, end: Vec3<f32>) -> bool {
-        self.find_intersection(start, end).get().is_some()
+    /// Returns `true` if the image of the interval `[start, end]` *might* intersect the isosurface.
+    #[inline]
+    fn may_contain_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> bool {
+        _ = (start, end);
+        false
     }
 
     /// Returns `true` *only if* the given region is empty.
@@ -56,8 +57,13 @@ impl<S: ?Sized + ScalarField> ScalarField for &S {
     }
 
     #[inline]
-    fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> MaskedVec3<Finite<f32>> {
-        <S as ScalarField>::find_intersection(self, start, end)
+    fn may_contain_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> bool {
+        <S as ScalarField>::may_contain_intersection(self, start, end)
+    }
+
+    #[inline]
+    fn is_empty(&self, min: Vec3<f32>, size: f32) -> bool {
+        <S as ScalarField>::is_empty(self, min, size)
     }
 
     #[inline]
@@ -97,10 +103,14 @@ impl<S: ScalarField> ScalarField for Translate<S> {
     }
 
     #[inline]
-    fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> MaskedVec3<Finite<f32>> {
+    fn may_contain_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> bool {
         self.source
-            .find_intersection(start + self.offset, end + self.offset)
-            .filter_map(|point| point - self.offset)
+            .may_contain_intersection(start + self.offset, end + self.offset)
+    }
+
+    #[inline]
+    fn is_empty(&self, min: Vec3<f32>, size: f32) -> bool {
+        self.source.is_empty(min + self.offset, size)
     }
 
     #[inline]
@@ -134,8 +144,13 @@ impl<S: ScalarField> ScalarField for CentralDifference<S> {
     }
 
     #[inline]
-    fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> MaskedVec3<Finite<f32>> {
-        self.source.find_intersection(start, end)
+    fn may_contain_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> bool {
+        self.source.may_contain_intersection(start, end)
+    }
+
+    #[inline]
+    fn is_empty(&self, min: Vec3<f32>, size: f32) -> bool {
+        self.source.is_empty(min, size)
     }
 
     #[inline]

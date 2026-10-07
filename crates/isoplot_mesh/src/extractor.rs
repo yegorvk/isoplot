@@ -2,13 +2,14 @@ mod chunk;
 mod seams;
 
 use isoplot_math::Vec3;
-use std::array;
 
 use crate::{
-    extractor::seams::{EdgeSeam, FaceSeam},
-    lattice::{Corner, Edge, EdgeKey, EdgeKind, Face, FaceKey, FaceKind, Offset},
+    extractor::{
+        chunk::Cell,
+        seams::{EdgeSeam, FaceSeam},
+    },
+    lattice::{BEdgeIndex, Edge, EdgeKey, EdgeKind, Face, FaceKey, FaceKind, Offset},
     mesh::{PopulateMesh, Vertex},
-    quant::Quant,
     source::{NormalField, ScalarField, Translate},
 };
 
@@ -167,36 +168,30 @@ impl<B: BorrowChunk> EdgeSeamKey<B> {
 #[derive(Debug)]
 pub struct ExtractError;
 
-fn place_feature<S: NormalField>(field: &S, cell: Quant) -> Option<Vec3<f32>> {
-    const ITERS: usize = 25;
+fn place_feature<S: NormalField>(field: &S, cell: Cell) -> Option<Vec3<f32>> {
+    const ITERS: usize = 8;
 
-    let (min_corner, size) = cell.min_point_size();
-
-    let positions: [Vec3<f32>; 8] =
-        array::from_fn(|i| min_corner + Corner(Offset::ALL[i]).0.as_vec3().cast() * size);
+    let (min_corner, size) = cell.vol.min_point_size();
 
     let mut points = [Vec3::ZERO; 12];
     let mut normals = [Vec3::ZERO; 12];
     let mut count = 0;
 
-    for i in 0..8u8 {
-        for axis in [1u8, 2, 4] {
-            let j = i ^ axis;
-
-            if i >= j {
-                continue;
-            }
-
-            let (a, b) = (i as usize, j as usize);
-
-            let Some(point) = field.find_intersection(positions[a], positions[b]).get() else {
-                continue;
-            };
-
-            points[count] = point;
-            normals[count] = field.sample_normal(point);
-            count += 1;
+    for index in BEdgeIndex::ALL {
+        if !cell.contains_intersection(index) {
+            continue;
         }
+
+        let [a, b] = index.corners().map(|c| {
+            let offset = c.0.as_vec3();
+            min_corner + offset.cast() * size
+        });
+
+        let point = bisect(field, a, b, field.sample(a));
+
+        points[count] = point;
+        normals[count] = field.sample_normal(point);
+        count += 1;
     }
 
     if count == 0 {
@@ -214,13 +209,33 @@ fn place_feature<S: NormalField>(field: &S, cell: Quant) -> Option<Vec3<f32>> {
     for _ in 0..ITERS {
         let mut force = Vec3::ZERO;
 
-        for k in 0..count {
-            let n = normals[k];
-            force += n * n.dot(points[k] - x);
+        for i in 0..count {
+            let n = normals[i];
+            force += n * n.dot(points[i] - x);
         }
 
         x = (x + force / count as f32).clamp(min_corner, max_corner);
     }
 
     x.all(f32::is_finite).then_some(x)
+}
+
+fn bisect<S>(field: S, mut a: Vec3<f32>, mut b: Vec3<f32>, mut v_a: f32) -> Vec3<f32>
+where
+    S: ScalarField,
+{
+    const ITERS: usize = 8;
+
+    for _ in 0..ITERS {
+        let m = (a + b) * 0.5;
+        let v_m = field.sample(m);
+
+        if v_m.is_sign_positive() == v_a.is_sign_positive() {
+            (a, v_a) = (m, v_m);
+        } else {
+            b = m;
+        }
+    }
+
+    (a + b) * 0.5
 }

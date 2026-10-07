@@ -5,7 +5,7 @@ use derive_where::derive_where;
 use fearless_simd::{Simd, SimdBase, SimdInto};
 
 use crate::{
-    num::{ConstOne, ConstZero, Number, PrimitiveCast, Real},
+    num::{ConstOne, ConstZero, Number, PrimitiveCast, Real, Signed},
     token::{PhantomToken, SimdToken},
 };
 
@@ -237,9 +237,7 @@ impl<Token: Copy, T: Number<Token>> AVec3<T, Token> {
             self.x * rhs.y - self.y * rhs.x,
         )
     }
-}
 
-impl<Token: Copy, T: Number<Token>> AVec3<T, Token> {
     #[inline(always)]
     pub fn eq_mask(self, rhs: Self) -> AVec3<T::Mask, Token> {
         self.mix(rhs, Number::eq)
@@ -283,6 +281,13 @@ impl<Token: Copy, T: Number<Token> + ConstZero<Token> + ConstOne<Token>> AVec3<T
     pub const X: Self = AVec3::new(T::ONE, T::ZERO, T::ZERO);
     pub const Y: Self = AVec3::new(T::ZERO, T::ONE, T::ZERO);
     pub const Z: Self = AVec3::new(T::ZERO, T::ZERO, T::ONE);
+}
+
+impl<Token: Copy, T: Signed<Token>> AVec3<T, Token> {
+    #[inline(always)]
+    pub fn abs(self) -> Self {
+        self.map(Signed::abs)
+    }
 }
 
 impl<Token: Copy, T: Real<Token>> AVec3<T, Token> {

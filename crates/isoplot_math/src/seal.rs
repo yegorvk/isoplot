@@ -2,12 +2,12 @@ use crate::token::{PhantomToken, SimdToken};
 use fearless_simd::{Simd, f32x8, mask32x8, u32x8};
 
 // Rust orphan rules ensure that we do not need trait-specific seals.
-mod seal {
+mod private {
     /// Prevents downstream crates from implementing internal traits
     pub trait Sealed<Token> {}
 }
 
-pub(crate) use seal::Sealed;
+pub(crate) use private::Sealed;
 
 macro_rules! seal {
     ($($ty:ty),*) => {

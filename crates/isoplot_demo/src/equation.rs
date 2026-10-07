@@ -4,7 +4,7 @@ use isoplot_eval::{
     Bounds, CompileError, DefaultBackend, Diagnostic, Evaluator, Gradient, Instance, Interval,
     Program, ProgramDesc,
 };
-use isoplot_math::{Finite, MaskedVec3, Vec3};
+use isoplot_math::Vec3;
 use isoplot_mesh::{NormalField, ScalarField};
 
 use crate::plot::PlotSource;
@@ -61,22 +61,32 @@ impl ScalarField for DynamicSource {
     }
 
     #[inline]
-    fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> MaskedVec3<Finite<f32>> {
-        let (v_start, v_end) = (self.sample(start), self.sample(end));
-
-        if 1f32.copysign(v_start) == 1f32.copysign(v_end) {
-            return None.into();
+    fn may_contain_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> bool {
+        if self.is_bounded(start, end) {
+            return true;
         }
 
-        let range = self.field_bounds.evaluate(&array::from_fn(|i| {
-            Interval::new(start[i].min(end[i]), start[i].max(end[i]))
-        }));
+        const MAX_ITERS: usize = 2;
 
-        if range.get().is_none() {
-            return None.into();
+        let (mut a, mut b) = (start, end);
+        let mut v_a = self.sample(a);
+
+        for _ in 0..MAX_ITERS {
+            let m = (a + b) * 0.5;
+            let v_m = self.sample(m);
+
+            if v_m.is_sign_positive() == v_a.is_sign_positive() {
+                (a, v_a) = (m, v_m);
+            } else {
+                b = m;
+            }
+
+            if self.is_bounded(a, b) {
+                return true;
+            }
         }
 
-        return Some(self.bisect(start, end, v_start, v_end)).into();
+        false
     }
 
     #[inline]
@@ -137,33 +147,12 @@ impl ScalarField for DynamicSource {
 }
 
 impl DynamicSource {
-    #[inline]
-    fn refine(&self, a: &mut Vec3<f32>, b: &mut Vec3<f32>, v_a: &mut f32, v_b: &mut f32) {
-        let m = (*a + *b) * 0.5;
-        let v_m = self.sample(m);
+    fn is_bounded(&self, a: Vec3<f32>, b: Vec3<f32>) -> bool {
+        let range = self.field_bounds.evaluate(&array::from_fn(|i| {
+            Interval::new(a[i].min(b[i]), a[i].max(b[i]))
+        }));
 
-        if (v_m < 0.0) == (*v_a < 0.0) {
-            (*a, *v_a) = (m, v_m);
-        } else {
-            (*b, *v_b) = (m, v_m);
-        }
-    }
-
-    #[inline]
-    fn bisect(&self, mut a: Vec3<f32>, mut b: Vec3<f32>, mut v_a: f32, mut v_b: f32) -> Vec3<f32> {
-        const ITERS: usize = 3;
-
-        for _ in 0..ITERS {
-            self.refine(&mut a, &mut b, &mut v_a, &mut v_b);
-        }
-
-        let t = if (v_a - v_b).abs() > f32::EPSILON {
-            (v_a / (v_a - v_b)).clamp(0.0, 1.0)
-        } else {
-            0.5
-        };
-
-        a + (b - a) * t
+        range.get().is_some()
     }
 
     #[inline]
