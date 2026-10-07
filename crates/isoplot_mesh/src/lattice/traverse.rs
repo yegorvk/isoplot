@@ -1,11 +1,12 @@
 use derive_where::derive_where;
 use std::{iter, marker::PhantomData};
 
-use super::tables::{
-    Corner, Edge, EdgeKind, EdgeSlot, FaceKind, FaceSlot, for_each_face_edge, for_each_sub_edge,
-    for_each_sub_face,
-};
 use crate::utils::{array_transpose, traverse_ping_pong};
+
+use super::{
+    primitives::{Corner, Edge, EdgeKind, EdgeSlot, FaceKind, FaceSlot},
+    tables::{for_each_face_edge, for_each_sub_edge, for_each_sub_face},
+};
 
 pub(crate) trait TraverseOctree {
     /// Octree node type
@@ -50,7 +51,7 @@ impl<T: Copy> MinimalEdges<T> {
     where
         L: FnMut(&T) -> bool,
         R: FnMut(&T, Corner) -> Option<T>,
-        F: FnMut(EdgeKind, Edge<T>),
+        F: FnMut(Edge<T>),
     {
         let mut cx = TraverseSingleOctree {
             is_leaf,
@@ -64,7 +65,7 @@ impl<T: Copy> MinimalEdges<T> {
     pub(crate) fn traverse<C, F>(mut self, cx: &mut C, mut f: F)
     where
         C: TraverseOctree<Node = T>,
-        F: FnMut(EdgeKind, Edge<T>),
+        F: FnMut(Edge<T>),
     {
         for (kind, faces) in self.faces.into_axes() {
             traverse_ping_pong(faces, |current, next| {
@@ -78,7 +79,7 @@ impl<T: Copy> MinimalEdges<T> {
 
                     for_each_sub_face(
                         kind,
-                        |slot, corner| cx.refine_face(&keys[slot.as_usize()], kind, slot, corner),
+                        |slot, corner| cx.refine_face(&keys[slot.index()], kind, slot, corner),
                         |sub_face| {
                             if let Some(sub_face) = array_transpose(sub_face) {
                                 next.push(sub_face);
@@ -86,12 +87,10 @@ impl<T: Copy> MinimalEdges<T> {
                         },
                     );
 
-                    for edge_kind in kind.tangent_edges() {
+                    for edge_kind in kind.adjacent_edges() {
                         for_each_face_edge(
                             (kind, edge_kind),
-                            |slot, corner| {
-                                cx.refine_face(&keys[slot.as_usize()], kind, slot, corner)
-                            },
+                            |slot, corner| cx.refine_face(&keys[slot.index()], kind, slot, corner),
                             |edge| {
                                 if let Some(edge) = array_transpose(edge) {
                                     self.edges.insert(edge_kind, edge);
@@ -110,13 +109,13 @@ impl<T: Copy> MinimalEdges<T> {
                         .all(|(key, slot)| cx.is_edge_leaf(key, kind, slot));
 
                     if leaf {
-                        f(kind, Edge(keys));
+                        f(Edge::new(kind, keys));
                         continue;
                     }
 
                     for_each_sub_edge(
                         kind,
-                        |slot, corner| cx.refine_edge(&keys[slot.as_usize()], kind, slot, corner),
+                        |slot, corner| cx.refine_edge(&keys[slot.index()], kind, slot, corner),
                         |sub_edge| {
                             if let Some(edge) = array_transpose(sub_edge) {
                                 next.push(edge);
@@ -179,7 +178,7 @@ pub(crate) struct Faces<T> {
 
 impl<T> Faces<T> {
     pub(crate) fn insert(&mut self, kind: FaceKind, face: [T; 2]) {
-        self.axes[kind.axis() as usize].push(face);
+        self.axes[kind.0 as usize].push(face);
     }
 
     pub(crate) fn for_each_axis_mut<F>(&mut self, mut f: F)
@@ -204,7 +203,7 @@ pub(crate) struct Edges<T> {
 
 impl<T> Edges<T> {
     pub(crate) fn insert(&mut self, kind: EdgeKind, edge: [T; 4]) {
-        self.axes[kind.axis() as usize].push(edge);
+        self.axes[kind.0 as usize].push(edge);
     }
 
     pub(crate) fn for_each_axis_mut<F>(&mut self, mut f: F)

@@ -1,94 +1,8 @@
-use super::{AxisKind, Offset};
+use super::primitives::{Corner, EdgeKind, EdgeSlot, FaceIndex, FaceKind, FaceSlot, Offset};
 use std::array;
 
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct Corner(Offset);
-
-impl Corner {
-    pub(crate) const fn new(offset: Offset) -> Self {
-        Self(offset)
-    }
-
-    pub(crate) const fn offset(self) -> Offset {
-        self.0
-    }
-}
-
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
-pub(crate) struct FaceKind(AxisKind);
-
-impl FaceKind {
-    const X: Self = Self(AxisKind::X);
-    const Y: Self = Self(AxisKind::Y);
-    const Z: Self = Self(AxisKind::Z);
-
-    pub(crate) const ALL: [Self; 3] = [Self::X, Self::Y, Self::Z];
-
-    pub(crate) const fn axis(self) -> AxisKind {
-        self.0
-    }
-
-    pub(crate) const fn tangent_edges(self) -> [EdgeKind; 2] {
-        match self.0 {
-            AxisKind::X => [EdgeKind::Y, EdgeKind::Z],
-            AxisKind::Y => [EdgeKind::X, EdgeKind::Z],
-            AxisKind::Z => [EdgeKind::X, EdgeKind::Y],
-        }
-    }
-
-    const fn normal(self) -> Offset {
-        Offset::new(self.0)
-    }
-
-    pub(crate) const fn slot_offset(self, slot: FaceSlot) -> Offset {
-        match slot.0 {
-            0 => Offset::ZERO,
-            _ => self.normal(),
-        }
-    }
-}
-
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
-pub(crate) struct EdgeKind(AxisKind);
-
-impl EdgeKind {
-    const X: Self = Self(AxisKind::X);
-    const Y: Self = Self(AxisKind::Y);
-    const Z: Self = Self(AxisKind::Z);
-
-    pub(crate) const ALL: [Self; 3] = [Self::X, Self::Y, Self::Z];
-
-    pub(crate) const fn axis(self) -> AxisKind {
-        self.0
-    }
-
-    const fn perp_faces(self) -> [FaceKind; 2] {
-        match self.0 {
-            AxisKind::X => [FaceKind::Y, FaceKind::Z],
-            AxisKind::Y => [FaceKind::X, FaceKind::Z],
-            AxisKind::Z => [FaceKind::X, FaceKind::Y],
-        }
-    }
-
-    const fn perp_normals(self) -> [Offset; 2] {
-        let [a, b] = self.perp_faces();
-        [a.normal(), b.normal()]
-    }
-
-    pub(crate) fn slot_offset(self, slot: EdgeSlot) -> Offset {
-        let [a, b] = self.perp_normals();
-
-        match slot.0 {
-            0 => Offset::ZERO,
-            1 => a,
-            2 => a | b,
-            _ => b,
-        }
-    }
-}
-
 const fn c(corner: u8) -> Corner {
-    Corner::new(Offset::from_components(
+    Corner(Offset::from_components(
         corner & 1 != 0,
         corner & 2 != 0,
         corner & 4 != 0,
@@ -106,7 +20,7 @@ where
     R: FnMut(Corner) -> B,
     F: FnMut([B; 2]),
 {
-    for indices in CELL_FACES[kind.axis() as usize] {
+    for indices in CELL_FACES[kind.0 as usize] {
         f(indices.map(&mut refine))
     }
 }
@@ -122,7 +36,7 @@ where
     R: FnMut(Corner) -> B,
     F: FnMut([B; 4]),
 {
-    for indices in CELL_EDGES[kind.axis() as usize] {
+    for indices in CELL_EDGES[kind.0 as usize] {
         f(indices.map(&mut refine))
     }
 }
@@ -138,8 +52,10 @@ where
     R: FnMut(FaceSlot, Corner) -> B,
     F: FnMut([B; 2]),
 {
-    for corners in SUB_FACES[kind.axis() as usize] {
-        f(array::from_fn(|i| refine(FaceSlot(i as u8), corners[i])))
+    for corners in SUB_FACES[kind.0 as usize] {
+        f(array::from_fn(|i| {
+            refine(FaceSlot::new(i as u8), corners[i])
+        }))
     }
 }
 
@@ -195,12 +111,12 @@ where
     F: FnMut([B; 4]),
 {
     for indices in face_edges(kind) {
-        f(indices.map(|(i, which)| refine(FaceSlot(i), which)));
+        f(indices.map(|(i, which)| refine(FaceSlot::new(i), which)));
     }
 }
 
 pub(crate) const fn face_edge_slot(kind: (FaceKind, EdgeKind), slot: EdgeSlot) -> FaceSlot {
-    FaceSlot(face_edges(kind)[0][slot.0 as usize].0)
+    FaceSlot::new(face_edges(kind)[0][slot.index()].0)
 }
 
 const SUB_EDGES: [[[Corner; 4]; 2]; 3] = [
@@ -214,102 +130,14 @@ where
     R: FnMut(EdgeSlot, Corner) -> B,
     F: FnMut([B; 4]),
 {
-    for indices in SUB_EDGES[kind.axis() as usize] {
-        f(array::from_fn(|i| refine(EdgeSlot(i as u8), indices[i])));
+    for indices in SUB_EDGES[kind.0 as usize] {
+        f(array::from_fn(|i| {
+            refine(EdgeSlot::new(i as u8), indices[i])
+        }));
     }
 }
 
-const EDGE_CORNERS: [[[Corner; 2]; 4]; 3] = [
-    [[c(6), c(7)], [c(4), c(5)], [c(0), c(1)], [c(2), c(3)]],
-    [[c(5), c(7)], [c(4), c(6)], [c(0), c(2)], [c(1), c(3)]],
-    [[c(3), c(7)], [c(2), c(6)], [c(0), c(4)], [c(1), c(5)]],
-];
-
-pub(crate) fn edge_corners<B, R>(
-    kind: EdgeKind,
-    refine: R,
-) -> impl Iterator<Item = (EdgeSlot, [B; 2])>
-where
-    R: Fn(EdgeSlot, Corner) -> B,
-{
-    EDGE_CORNERS[kind.axis() as usize]
-        .iter()
-        .enumerate()
-        .map(move |(slot, corners)| {
-            let slot = EdgeSlot(slot as u8);
-            (slot, array::from_fn(|i| refine(slot, corners[i])))
-        })
-}
-
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub(crate) struct FaceSlot(u8);
-
-impl FaceSlot {
-    pub(crate) const ALL: [Self; 2] = [Self(0), Self(1)];
-
-    pub(crate) fn as_usize(self) -> usize {
-        self.0 as usize
-    }
-}
-
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub(crate) struct EdgeSlot(u8);
-
-impl EdgeSlot {
-    pub(crate) const ALL: [Self; 4] = [Self(0), Self(1), Self(2), Self(3)];
-
-    pub(crate) fn as_usize(self) -> usize {
-        self.0 as usize
-    }
-}
-
-pub(crate) struct Face<T>(pub [T; 2]);
-
-impl<T> Face<T> {
-    pub(crate) fn try_from_fn<F, E>(mut key: FaceKey<T>, mut f: F) -> Result<Self, E>
-    where
-        F: FnMut(&mut T, Offset) -> Result<T, E>,
-    {
-        let positive = f(&mut key.min_cell, key.kind.normal())?;
-        Ok(Self([key.min_cell, positive]))
-    }
-}
-
-pub(crate) struct Edge<T>(pub [T; 4]);
-
-impl<T> Edge<T> {
-    pub(crate) fn try_from_fn<F, E>(mut key: EdgeKey<T>, mut f: F) -> Result<Self, E>
-    where
-        F: FnMut(&mut T, Offset) -> Result<T, E>,
-    {
-        let [a, b] = key.kind.perp_normals();
-
-        let pn = f(&mut key.min_cell, a)?;
-        let pp = f(&mut key.min_cell, a | b)?;
-        let np = f(&mut key.min_cell, b)?;
-
-        Ok(Self([key.min_cell, pn, pp, np]))
-    }
-}
-
-pub(crate) struct FaceKey<T> {
-    pub kind: FaceKind,
-    pub min_cell: T,
-}
-
-impl<T> FaceKey<T> {
-    pub(crate) fn new(kind: FaceKind, min_cell: T) -> Self {
-        Self { kind, min_cell }
-    }
-}
-
-pub(crate) struct EdgeKey<T> {
-    pub kind: EdgeKind,
-    pub min_cell: T,
-}
-
-impl<T> EdgeKey<T> {
-    pub(crate) fn new(kind: EdgeKind, min_cell: T) -> Self {
-        Self { kind, min_cell }
-    }
+#[inline]
+pub(crate) const fn edge_normal_face(kind: EdgeKind, slot: EdgeSlot) -> FaceIndex {
+    FaceIndex::new(kind.normal_face(), slot.opposite())
 }

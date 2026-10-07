@@ -1,4 +1,5 @@
 use std::{
+    array,
     mem::{self, MaybeUninit},
     ptr,
 };
@@ -42,6 +43,20 @@ where
 
 unsafe fn assume_init_array<T, const N: usize>(array: [MaybeUninit<T>; N]) -> [T; N] {
     array.map(|elem| unsafe { elem.assume_init() })
+}
+
+#[inline]
+pub(crate) fn array_map_index<T, F, U, const N: usize>(a: [T; N], mut f: F) -> [U; N]
+where
+    F: FnMut(usize, T) -> U,
+{
+    let mut iter = a.into_iter();
+
+    array::from_fn(|i| {
+        // SAFETY: both array contain exactly `N` elements.
+        let old = unsafe { iter.next().unwrap_unchecked() };
+        f(i, old)
+    })
 }
 
 pub(crate) fn traverse_ping_pong<T, F>(roots: Vec<T>, mut f: F) -> Vec<T>

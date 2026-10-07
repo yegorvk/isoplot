@@ -28,7 +28,7 @@ pub(crate) struct InlineOctree<T> {
 
 impl<T> InlineOctree<T> {
     #[inline]
-    pub(crate) fn get(&self, key: Key) -> Option<&InlineNode<T>> {
+    pub(crate) fn get(&self, key: OctreeKey) -> Option<&InlineNode<T>> {
         self.nodes.get(key.0.as_usize())
     }
 }
@@ -159,11 +159,11 @@ impl<T: Payload> InlineOctree<T> {
     }
 }
 
-impl<T> Index<Key> for InlineOctree<T> {
+impl<T> Index<OctreeKey> for InlineOctree<T> {
     type Output = InlineNode<T>;
 
     #[inline]
-    fn index(&self, index: Key) -> &Self::Output {
+    fn index(&self, index: OctreeKey) -> &Self::Output {
         self.get(index).unwrap()
     }
 }
@@ -230,7 +230,7 @@ impl<T> Octree<T> {
     }
 
     #[inline]
-    pub(crate) fn get(&self, key: Key) -> Option<Node<&T>> {
+    pub(crate) fn get(&self, key: OctreeKey) -> Option<Node<&T>> {
         self.octree.get(key).map(|inline| {
             let node = inline.as_node();
             node.map_leaf(|i| &self.leaves[i.as_usize()])
@@ -238,16 +238,16 @@ impl<T> Octree<T> {
     }
 
     #[inline]
-    pub(crate) fn is_leaf(&self, key: Key) -> bool {
+    pub(crate) fn is_leaf(&self, key: OctreeKey) -> bool {
         self.get(key).unwrap().is_leaf()
     }
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(transparent)]
-pub(crate) struct Key(u23);
+pub(crate) struct OctreeKey(u23);
 
-impl Key {
+impl OctreeKey {
     /// The key of the root node
     pub(crate) const ROOT: Self = Self(u23::new(0));
 }
@@ -413,9 +413,9 @@ impl Branch {
     }
 
     #[inline]
-    pub(crate) fn child(&self, which: ChildIndex) -> Option<Key> {
+    pub(crate) fn child(&self, which: ChildIndex) -> Option<OctreeKey> {
         if self.has_child(which) {
-            Some(Key(u23::new(self.child_offset(which))))
+            Some(OctreeKey(u23::new(self.child_offset(which))))
         } else {
             None
         }

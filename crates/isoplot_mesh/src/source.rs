@@ -18,6 +18,11 @@ pub trait ScalarField {
     /// Finds a point where the 0-level set intersects the given segment, if any.
     fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> MaskedVec3<Finite<f32>>;
 
+    /// Returns `true` if the image of the interval `[start, end]` is bounded.
+    fn is_bounded(&self, start: Vec3<f32>, end: Vec3<f32>) -> bool {
+        self.find_intersection(start, end).get().is_some()
+    }
+
     /// Returns `true` *only if* the given region is empty.
     #[inline]
     fn is_empty(&self, min: Vec3<f32>, size: f32) -> bool {
@@ -28,7 +33,7 @@ pub trait ScalarField {
     /// Returns `true` *only if* the given region is flat.
     ///
     /// A region is considered flat when it does not need to be further
-    /// subdivided. Note that this method is always allowed to return `false`.
+    /// subdivided. Consequently, it is always allowed to return `false`.
     #[inline]
     fn is_flat(&self, min: Vec3<f32>, size: f32) -> bool {
         _ = (min, size);

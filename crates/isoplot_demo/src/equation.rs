@@ -62,27 +62,21 @@ impl ScalarField for DynamicSource {
 
     #[inline]
     fn find_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> MaskedVec3<Finite<f32>> {
-        const MAX_ITERS: usize = 32;
+        let (v_start, v_end) = (self.sample(start), self.sample(end));
 
-        let (mut a, mut b) = (start, end);
-        let (mut v_a, mut v_b) = (self.sample(a), self.sample(b));
-
-        if 1f32.copysign(v_a) == 1f32.copysign(v_b) {
+        if 1f32.copysign(v_start) == 1f32.copysign(v_end) {
             return None.into();
         }
 
-        // Shrink the segment until its bounds are free of discontinuities.
-        for _ in 0..MAX_ITERS {
-            let segment = array::from_fn(|i| Interval::new(a[i].min(b[i]), a[i].max(b[i])));
+        let range = self.field_bounds.evaluate(&array::from_fn(|i| {
+            Interval::new(start[i].min(end[i]), start[i].max(end[i]))
+        }));
 
-            if self.field_bounds.evaluate(&segment).get().is_some() {
-                return Some(self.bisect(a, b, v_a, v_b)).into();
-            }
-
-            self.refine(&mut a, &mut b, &mut v_a, &mut v_b);
+        if range.get().is_none() {
+            return None.into();
         }
 
-        None.into()
+        return Some(self.bisect(start, end, v_start, v_end)).into();
     }
 
     #[inline]

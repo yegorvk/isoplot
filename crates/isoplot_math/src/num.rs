@@ -216,7 +216,7 @@ macro_rules! impl_number {
                 }
             }
 
-            impl Number<PhantomToken > for $ty {
+            impl Number<PhantomToken> for $ty {
                 #[inline(always)]
                 fn eq(self, rhs: Self) -> Self::Mask {
                     self == rhs

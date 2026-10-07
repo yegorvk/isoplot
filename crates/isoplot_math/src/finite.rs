@@ -126,8 +126,7 @@ impl<Token: Copy, T: Real<Token>> MaybeFinite<T, Token> {
 impl<Token: Copy, T: Real<Token, Mask = bool>> MaybeFinite<T, Token> {
     #[inline(always)]
     pub fn get(self) -> Option<Finite<T, Token>> {
-        self.is_finite()
-            .then_some(Finite::new_unchecked(self.value))
+        self.is_finite().then(|| Finite::new_unchecked(self.value))
     }
 }
 

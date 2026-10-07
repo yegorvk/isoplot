@@ -7,6 +7,7 @@ pub struct Vertex {
 }
 
 impl Vertex {
+    #[inline]
     pub fn new(position: impl Into<Vec3<f32>>, normal: impl Into<Vec3<f32>>) -> Self {
         Self {
             position: position.into(),
@@ -14,6 +15,7 @@ impl Vertex {
         }
     }
 
+    #[inline]
     fn translated(self, offset: Vec3<f32>) -> Self {
         Self {
             position: self.position + offset,

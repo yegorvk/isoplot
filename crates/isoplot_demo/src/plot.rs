@@ -11,8 +11,8 @@ use bevy::{
 };
 
 use isoplot_mesh::{
-    BorrowChunk, Chunk, ChunkEdge, ChunkFace, Extractor, NormalField, Offset, SeparateNormals,
-    SharedEdgeKind, SharedFaceKind, WindingOrder,
+    BorrowChunk, Chunk, EdgeKind, EdgeSeamKey, Extractor, FaceKind, FaceSeamKey, NormalField,
+    Offset, SeparateNormals, WindingOrder,
 };
 
 const WIREFRAME_OFFSET: f32 = 1e-3;
@@ -103,15 +103,15 @@ where
         self.world.insert(coords, chunk);
         out.push((coords, sink));
 
-        for kind in SharedFaceKind::ALL {
-            for offset in kind.slot_offsets() {
+        for kind in FaceKind::ALL {
+            for offset in kind.offsets() {
                 let anchor = coords - offset_to_ivec3(offset);
                 self.try_extract_face_seam(&field, kind, anchor, &mut out);
             }
         }
 
-        for kind in SharedEdgeKind::ALL {
-            for offset in kind.slot_offsets() {
+        for kind in EdgeKind::ALL {
+            for offset in kind.offsets() {
                 let anchor = coords - offset_to_ivec3(offset);
                 self.try_extract_edge_seam(&field, kind, anchor, &mut out);
             }
@@ -132,7 +132,7 @@ impl<F> ChunkExtractor<F> {
     fn try_extract_face_seam<S: NormalField>(
         &self,
         source: &S,
-        kind: SharedFaceKind,
+        kind: FaceKind,
         anchor: IVec3,
         out: &mut Vec<(IVec3, SeparateNormals)>,
     ) {
@@ -140,7 +140,7 @@ impl<F> ChunkExtractor<F> {
             return;
         };
 
-        let Some(face) = ChunkFace::from_fn(kind, min_chunk, self.lookup_from(anchor)) else {
+        let Some(face) = FaceSeamKey::from_fn(kind, min_chunk, self.lookup_from(anchor)) else {
             return;
         };
 
@@ -161,7 +161,7 @@ impl<F> ChunkExtractor<F> {
     fn try_extract_edge_seam<S: NormalField>(
         &self,
         source: &S,
-        kind: SharedEdgeKind,
+        kind: EdgeKind,
         anchor: IVec3,
         out: &mut Vec<(IVec3, SeparateNormals)>,
     ) {
@@ -169,7 +169,7 @@ impl<F> ChunkExtractor<F> {
             return;
         };
 
-        let Some(edge) = ChunkEdge::from_fn(kind, min_chunk, self.lookup_from(anchor)) else {
+        let Some(edge) = EdgeSeamKey::from_fn(kind, min_chunk, self.lookup_from(anchor)) else {
             return;
         };
 
@@ -371,8 +371,8 @@ fn build_wireframe_mesh(data: &SeparateNormals) -> Mesh {
 #[derive(Debug, Default)]
 struct World {
     chunks: DashMap<IVec3, Arc<Chunk>>,
-    face_seams: DashSet<(SharedFaceKind, IVec3)>,
-    edge_seams: DashSet<(SharedEdgeKind, IVec3)>,
+    face_seams: DashSet<(FaceKind, IVec3)>,
+    edge_seams: DashSet<(EdgeKind, IVec3)>,
 }
 
 impl World {
@@ -386,11 +386,11 @@ impl World {
         self.chunks.insert(coords, Arc::new(chunk));
     }
 
-    fn mark_face_seam(&self, kind: SharedFaceKind, anchor: IVec3) -> bool {
+    fn mark_face_seam(&self, kind: FaceKind, anchor: IVec3) -> bool {
         self.face_seams.insert((kind, anchor))
     }
 
-    fn mark_edge_seam(&self, kind: SharedEdgeKind, anchor: IVec3) -> bool {
+    fn mark_edge_seam(&self, kind: EdgeKind, anchor: IVec3) -> bool {
         self.edge_seams.insert((kind, anchor))
     }
 }
