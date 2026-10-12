@@ -5,7 +5,7 @@ use crate::{
         BEdgeIndex, BEdgesMask, Corner, Edge, Edges, Faces, MinimalEdges, edge_normal_face,
         for_each_cell_edge, for_each_cell_face,
     },
-    octree::{BuildOctree, ChildIndex, Node, Octree, OctreeKey},
+    octree::{ChildIndex, Node, Octree, OctreeBuilder, OctreeKey},
     quant::Quant,
     source::ScalarField,
     utils::array_transpose,
@@ -41,7 +41,7 @@ struct OctreeSource<S, P> {
     place_feature: P,
 }
 
-impl<S, P> BuildOctree<Feature> for OctreeSource<S, P>
+impl<S, P> OctreeBuilder<Feature> for OctreeSource<S, P>
 where
     S: ScalarField,
     P: Fn(Cell) -> Option<Vec3<f32>>,

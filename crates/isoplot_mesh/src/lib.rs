@@ -3,6 +3,7 @@ mod lattice;
 mod mesh;
 mod octree;
 mod quant;
+mod simd;
 mod source;
 mod utils;
 

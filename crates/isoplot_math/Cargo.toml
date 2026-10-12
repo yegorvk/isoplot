@@ -9,7 +9,6 @@ license.workspace = true
 derive-where.workspace = true
 fearless_simd.workspace = true
 fearless_simd_macros.workspace = true
-itertools.workspace = true
 
 [dependencies.bytemuck]
 workspace = true

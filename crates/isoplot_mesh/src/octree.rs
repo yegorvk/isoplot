@@ -2,7 +2,7 @@ use bilge::prelude::*;
 use derive_where::derive_where;
 use std::{iter, marker::PhantomData, mem, ops::Index};
 
-use crate::quant::Quant;
+use crate::{quant::Quant, simd::BMask8};
 
 /// Maximum number of levels in an octree
 ///
@@ -10,33 +10,53 @@ use crate::quant::Quant;
 /// so there is always at least 1 level.
 pub(crate) const MAX_LEVELS: u8 = 10;
 
-pub(crate) trait BuildOctree<T> {
+pub(crate) trait OctreeBuilder<T> {
     /// Returns `true` if the specified node is empty.
     fn is_empty(&mut self, tag: Quant) -> bool;
+
+    fn is_empty_s(&mut self, tag: &[[Quant; 8]], out: &mut [BMask8]) {
+        for (tag, out) in iter::zip(tag, out) {
+            *out = BMask8::from_fn(|i| self.is_empty(tag[i]));
+        }
+    }
 
     /// Returns `true` if the specified node is a leaf.
     fn is_leaf(&mut self, tag: Quant) -> bool;
 
+    fn is_leaf_s(&mut self, tag: &[[Quant; 8]], out: &mut [BMask8]) {
+        for (tag, out) in iter::zip(tag, out) {
+            *out = BMask8::from_fn(|i| self.is_leaf(tag[i]));
+        }
+    }
+
     /// Returns the leaf payload associated with the specified tag.
     fn place_leaf(&mut self, tag: Quant) -> T;
+
+    fn place_leaf_s(&mut self, tag: &[[Quant; 8]], out: &mut [[T; 8]]) {
+        for (tag, out) in iter::zip(tag, out) {
+            for i in 0..8 {
+                out[i] = self.place_leaf(tag[i]);
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
-pub(crate) struct InlineOctree<T> {
+struct InlineOctree<T> {
     nodes: Vec<InlineNode<T>>,
 }
 
 impl<T> InlineOctree<T> {
     #[inline]
-    pub(crate) fn get(&self, key: OctreeKey) -> Option<&InlineNode<T>> {
+    fn get(&self, key: OctreeKey) -> Option<&InlineNode<T>> {
         self.nodes.get(key.0.as_usize())
     }
 }
 
 impl<T: Payload> InlineOctree<T> {
-    pub(crate) fn build<B>(source: &mut B) -> Self
+    fn build<B>(source: &mut B) -> Self
     where
-        B: ?Sized + BuildOctree<T>,
+        B: ?Sized + OctreeBuilder<T>,
     {
         let mut nodes = vec![];
 
@@ -49,14 +69,32 @@ impl<T: Payload> InlineOctree<T> {
         let mut pending_leaves = vec![];
         let mut pending_tags = vec![];
 
+        // Temporary buffers
+        let mut temp_masks = vec![];
+
         let mut next_offset = next_tags.len() as u32;
 
         for _ in 0..MAX_LEVELS {
             nodes.reserve(next_tags.len());
+            {
+                let (chunks, tail) = next_tags.as_chunks::<8>();
 
-            for (i, tag) in next_tags.iter().copied().enumerate() {
-                let is_leaf_bit = source.is_leaf(tag) as u8;
-                nodes.push(InlineNode::new_branch(Branch::new(is_leaf_bit, i as u32)));
+                temp_masks.resize(chunks.len(), BMask8::ZERO);
+                source.is_leaf_s(chunks, &mut temp_masks);
+
+                for i in 0..temp_masks.len() {
+                    for j in 0..8 {
+                        let offset = (8 * i + j) as u32;
+                        let is_leaf_bit = temp_masks[i].get(j as u8) as u8;
+                        nodes.push(InlineNode::new_branch(Branch::new(is_leaf_bit, offset)));
+                    }
+                }
+
+                for (i, tag) in tail.iter().enumerate() {
+                    let offset = (8 * temp_masks.len() + i) as u32;
+                    let is_leaf_bit = source.is_leaf(*tag) as u8;
+                    nodes.push(InlineNode::new_branch(Branch::new(is_leaf_bit, offset)));
+                }
             }
 
             let total_nodes = nodes.len();
@@ -170,15 +208,15 @@ impl<T> Index<OctreeKey> for InlineOctree<T> {
 
 struct Collector<'a, T, I>
 where
-    I: BuildOctree<T>,
+    I: OctreeBuilder<T>,
 {
     source: &'a mut I,
     leaves: Vec<T>,
 }
 
-impl<T, I> BuildOctree<u31> for Collector<'_, T, I>
+impl<T, I> OctreeBuilder<u31> for Collector<'_, T, I>
 where
-    I: BuildOctree<T>,
+    I: OctreeBuilder<T>,
 {
     #[inline]
     fn is_empty(&mut self, tag: Quant) -> bool {
@@ -206,7 +244,7 @@ pub(crate) struct Octree<T> {
 impl<T> Octree<T> {
     pub(crate) fn build<S>(source: &mut S) -> Self
     where
-        S: BuildOctree<T>,
+        S: OctreeBuilder<T>,
     {
         let mut collector = Collector {
             source,
@@ -542,7 +580,7 @@ mod tests {
 
         struct Degenerate;
 
-        impl BuildOctree<Dummy> for Degenerate {
+        impl OctreeBuilder<Dummy> for Degenerate {
             fn is_empty(&mut self, _tag: Quant) -> bool {
                 true
             }
@@ -568,7 +606,7 @@ mod tests {
 
         struct Uniform;
 
-        impl BuildOctree<Quant> for Uniform {
+        impl OctreeBuilder<Quant> for Uniform {
             fn is_empty(&mut self, _tag: Quant) -> bool {
                 false
             }
@@ -604,7 +642,7 @@ mod tests {
 
         struct Uniform;
 
-        impl BuildOctree<Quant> for Uniform {
+        impl OctreeBuilder<Quant> for Uniform {
             fn is_empty(&mut self, _tag: Quant) -> bool {
                 false
             }

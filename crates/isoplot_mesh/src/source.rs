@@ -1,18 +1,18 @@
 use isoplot_math::Vec3;
 use std::iter;
 
-const TILE_SIZE: usize = 8;
+use crate::simd::BMask8;
 
 /// A scalar field source for isosurface extraction
 pub trait ScalarField {
     /// Samples the scalar field at the specified point.
     fn sample(&self, point: Vec3<f32>) -> f32;
 
-    fn sample_batch(&self, point: &[Vec3<[f32; TILE_SIZE]>], out: &mut [[f32; TILE_SIZE]]) {
-        for (tile, out) in iter::zip(point, out) {
-            #[allow(clippy::needless_range_loop)]
-            for i in 0..TILE_SIZE {
-                out[i] = self.sample(Vec3::new(tile.x[i], tile.y[i], tile.z[i]));
+    #[inline]
+    fn sample_s(&self, point: &[Vec3<[f32; 8]>], out: &mut [[f32; 8]]) {
+        for (p, out) in iter::zip(point, out) {
+            for i in 0..8 {
+                out[i] = self.sample(Vec3::new(p.x[i], p.y[i], p.z[i]));
             }
         }
     }
@@ -24,11 +24,37 @@ pub trait ScalarField {
         false
     }
 
+    #[inline]
+    fn may_contain_intersection_s(
+        &self,
+        endpoints: &[(Vec3<[f32; 8]>, Vec3<[f32; 8]>)],
+        out: &mut [BMask8],
+    ) {
+        for ((a, b), out) in iter::zip(endpoints, out) {
+            *out = BMask8::from_fn(|i| {
+                self.may_contain_intersection(
+                    Vec3::new(a.x[i], a.y[i], a.z[i]),
+                    Vec3::new(b.x[i], b.y[i], b.z[i]),
+                )
+            });
+        }
+    }
+
     /// Returns `true` *only if* the given region is empty.
     #[inline]
     fn is_empty(&self, min: Vec3<f32>, size: f32) -> bool {
         _ = (min, size);
         false
+    }
+
+    #[inline]
+    fn is_empty_s(&self, min_size: &[(Vec3<[f32; 8]>, [f32; 8])], out: &mut [BMask8]) {
+        for ((p, s), out) in iter::zip(min_size, out) {
+            *out = BMask8::from_fn(|i| {
+                let p = Vec3::new(p.x[i], p.y[i], p.z[i]);
+                self.is_empty(p, s[i])
+            });
+        }
     }
 
     /// Returns `true` *only if* the given region is flat.
@@ -39,6 +65,16 @@ pub trait ScalarField {
     fn is_flat(&self, min: Vec3<f32>, size: f32) -> bool {
         _ = (min, size);
         false
+    }
+
+    #[inline]
+    fn is_flat_s(&self, min_size: &[(Vec3<[f32; 8]>, [f32; 8])], out: &mut [BMask8]) {
+        for ((p, s), out) in iter::zip(min_size, out) {
+            *out = BMask8::from_fn(|i| {
+                let p = Vec3::new(p.x[i], p.y[i], p.z[i]);
+                self.is_flat(p, s[i])
+            });
+        }
     }
 
     #[inline]

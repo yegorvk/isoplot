@@ -139,6 +139,14 @@ impl<Token: Copy, T: Copy> AVec3<T, Token> {
     {
         must_cast_mut(a)
     }
+
+    #[inline(always)]
+    pub fn into_simd<S: Simd, U: Copy>(self, simd: S) -> AVec3<U, SimdToken<S>>
+    where
+        T: SimdInto<U, S>,
+    {
+        AVec3::simd_new(simd, self.x, self.y, self.z)
+    }
 }
 
 impl<S: Simd, V: Copy> AVec3<V, SimdToken<S>> {
