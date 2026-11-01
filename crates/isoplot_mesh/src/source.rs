@@ -1,7 +1,7 @@
 use isoplot_math::Vec3;
-use std::iter;
+use std::array;
 
-use crate::simd::BMask8;
+use crate::simd::{BMask8, WriteBuf, WriteBufExt};
 
 /// A scalar field source for isosurface extraction
 pub trait ScalarField {
@@ -9,15 +9,21 @@ pub trait ScalarField {
     fn sample(&self, point: Vec3<f32>) -> f32;
 
     #[inline]
-    fn sample_s(&self, point: &[Vec3<[f32; 8]>], out: &mut [[f32; 8]]) {
-        for (p, out) in iter::zip(point, out) {
-            for i in 0..8 {
-                out[i] = self.sample(Vec3::new(p.x[i], p.y[i], p.z[i]));
-            }
-        }
+    fn sample_s<'out, B>(&self, offset: Vec3<f32>, points: &[Vec3<[f32; 8]>], out: B)
+    where
+        B: WriteBuf<'out, Item = [f32; 8]>,
+    {
+        out.write_all_with(|out| {
+            out.write_from_iter(points.iter().map(|p| {
+                array::from_fn(|i| {
+                    let p = Vec3::new(p.x[i], p.y[i], p.z[i]);
+                    self.sample(p + offset)
+                })
+            }));
+        });
     }
 
-    /// Returns `true` if the image of the interval `[start, end]` *might* intersect the isosurface.
+    /// Returns `false` if the image of the interval `[start, end]` does *not* intersect the isosurface.
     #[inline]
     fn may_contain_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> bool {
         _ = (start, end);
@@ -25,19 +31,27 @@ pub trait ScalarField {
     }
 
     #[inline]
-    fn may_contain_intersection_s(
+    fn may_contain_intersection_s<'out, B>(
         &self,
-        endpoints: &[(Vec3<[f32; 8]>, Vec3<[f32; 8]>)],
-        out: &mut [BMask8],
-    ) {
-        for ((a, b), out) in iter::zip(endpoints, out) {
-            *out = BMask8::from_fn(|i| {
-                self.may_contain_intersection(
-                    Vec3::new(a.x[i], a.y[i], a.z[i]),
-                    Vec3::new(b.x[i], b.y[i], b.z[i]),
-                )
-            });
-        }
+        offset: Vec3<f32>,
+        endpoints: &[[Vec3<[f32; 8]>; 2]],
+        out: B,
+    ) where
+        B: WriteBuf<'out, Item = BMask8>,
+    {
+        out.write_all_with(|out| {
+            out.write_from_iter(endpoints.iter().map(|endpoints| {
+                BMask8::from_fn(|i| {
+                    let i = i as usize;
+
+                    let [a, b] = array::from_fn(|j| {
+                        offset + Vec3::new(endpoints[j].x[i], endpoints[j].y[i], endpoints[j].z[i])
+                    });
+
+                    self.may_contain_intersection(a, b)
+                })
+            }));
+        });
     }
 
     /// Returns `true` *only if* the given region is empty.
@@ -48,13 +62,23 @@ pub trait ScalarField {
     }
 
     #[inline]
-    fn is_empty_s(&self, min_size: &[(Vec3<[f32; 8]>, [f32; 8])], out: &mut [BMask8]) {
-        for ((p, s), out) in iter::zip(min_size, out) {
-            *out = BMask8::from_fn(|i| {
-                let p = Vec3::new(p.x[i], p.y[i], p.z[i]);
-                self.is_empty(p, s[i])
-            });
-        }
+    fn is_empty_s<'out, B>(
+        &self,
+        offset: Vec3<f32>,
+        min_size: &[(Vec3<[f32; 8]>, [f32; 8])],
+        out: B,
+    ) where
+        B: WriteBuf<'out, Item = BMask8>,
+    {
+        out.write_all_with(|out| {
+            out.write_from_iter(min_size.iter().map(|(p, s)| {
+                BMask8::from_fn(|i| {
+                    let i = i as usize;
+                    let p = offset + Vec3::new(p.x[i], p.y[i], p.z[i]);
+                    self.is_empty(p, s[i])
+                })
+            }));
+        });
     }
 
     /// Returns `true` *only if* the given region is flat.
@@ -68,13 +92,19 @@ pub trait ScalarField {
     }
 
     #[inline]
-    fn is_flat_s(&self, min_size: &[(Vec3<[f32; 8]>, [f32; 8])], out: &mut [BMask8]) {
-        for ((p, s), out) in iter::zip(min_size, out) {
-            *out = BMask8::from_fn(|i| {
-                let p = Vec3::new(p.x[i], p.y[i], p.z[i]);
-                self.is_flat(p, s[i])
-            });
-        }
+    fn is_flat_s<'out, B>(&self, offset: Vec3<f32>, min_size: &[(Vec3<[f32; 8]>, [f32; 8])], out: B)
+    where
+        B: WriteBuf<'out, Item = BMask8>,
+    {
+        out.write_all_with(|out| {
+            out.write_from_iter(min_size.iter().map(|(p, s)| {
+                BMask8::from_fn(|i| {
+                    let i = i as usize;
+                    let p = offset + Vec3::new(p.x[i], p.y[i], p.z[i]);
+                    self.is_flat(p, s[i])
+                })
+            }));
+        });
     }
 
     #[inline]
@@ -82,7 +112,10 @@ pub trait ScalarField {
     where
         Self: Sized,
     {
-        Translate::new(self, offset)
+        Translate {
+            field: self,
+            offset,
+        }
     }
 }
 
@@ -106,6 +139,46 @@ impl<S: ?Sized + ScalarField> ScalarField for &S {
     fn is_flat(&self, min: Vec3<f32>, size: f32) -> bool {
         <S as ScalarField>::is_flat(self, min, size)
     }
+
+    #[inline(always)]
+    fn sample_s<'out, B>(&self, offset: Vec3<f32>, points: &[Vec3<[f32; 8]>], out: B)
+    where
+        B: WriteBuf<'out, Item = [f32; 8]>,
+    {
+        <S as ScalarField>::sample_s(self, offset, points, out)
+    }
+
+    #[inline(always)]
+    fn may_contain_intersection_s<'out, B>(
+        &self,
+        offset: Vec3<f32>,
+        endpoints: &[[Vec3<[f32; 8]>; 2]],
+        out: B,
+    ) where
+        B: WriteBuf<'out, Item = BMask8>,
+    {
+        <S as ScalarField>::may_contain_intersection_s(self, offset, endpoints, out);
+    }
+
+    #[inline(always)]
+    fn is_empty_s<'out, B>(
+        &self,
+        offset: Vec3<f32>,
+        min_size: &[(Vec3<[f32; 8]>, [f32; 8])],
+        out: B,
+    ) where
+        B: WriteBuf<'out, Item = BMask8>,
+    {
+        <S as ScalarField>::is_empty_s(self, offset, min_size, out);
+    }
+
+    #[inline(always)]
+    fn is_flat_s<'out, B>(&self, offset: Vec3<f32>, min_size: &[(Vec3<[f32; 8]>, [f32; 8])], out: B)
+    where
+        B: WriteBuf<'out, Item = BMask8>,
+    {
+        <S as ScalarField>::is_flat_s(self, offset, min_size, out);
+    }
 }
 
 /// A scalar field source with normals
@@ -122,89 +195,83 @@ impl<S: ?Sized + NormalField> NormalField for &S {
 }
 
 pub struct Translate<S> {
-    source: S,
+    field: S,
     offset: Vec3<f32>,
 }
 
 impl<S> Translate<S> {
-    pub fn new(source: S, offset: Vec3<f32>) -> Self {
-        Self { source, offset }
+    pub fn new(field: S, offset: Vec3<f32>) -> Self {
+        Self { field, offset }
     }
 }
 
 impl<S: ScalarField> ScalarField for Translate<S> {
     #[inline]
     fn sample(&self, point: Vec3<f32>) -> f32 {
-        self.source.sample(point + self.offset)
+        self.field.sample(point + self.offset)
     }
 
     #[inline]
     fn may_contain_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> bool {
-        self.source
+        self.field
             .may_contain_intersection(start + self.offset, end + self.offset)
     }
 
     #[inline]
     fn is_empty(&self, min: Vec3<f32>, size: f32) -> bool {
-        self.source.is_empty(min + self.offset, size)
+        self.field.is_empty(min + self.offset, size)
     }
 
     #[inline]
     fn is_flat(&self, min: Vec3<f32>, size: f32) -> bool {
-        self.source.is_flat(min + self.offset, size)
+        self.field.is_flat(min + self.offset, size)
+    }
+
+    #[inline(always)]
+    fn sample_s<'out, B>(&self, offset: Vec3<f32>, points: &[Vec3<[f32; 8]>], out: B)
+    where
+        B: WriteBuf<'out, Item = [f32; 8]>,
+    {
+        self.field.sample_s(offset + self.offset, points, out);
+    }
+
+    #[inline(always)]
+    fn may_contain_intersection_s<'out, B>(
+        &self,
+        offset: Vec3<f32>,
+        endpoints: &[[Vec3<[f32; 8]>; 2]],
+        out: B,
+    ) where
+        B: WriteBuf<'out, Item = BMask8>,
+    {
+        self.field
+            .may_contain_intersection_s(offset + self.offset, endpoints, out)
+    }
+
+    #[inline(always)]
+    fn is_empty_s<'out, B>(
+        &self,
+        offset: Vec3<f32>,
+        min_size: &[(Vec3<[f32; 8]>, [f32; 8])],
+        out: B,
+    ) where
+        B: WriteBuf<'out, Item = BMask8>,
+    {
+        self.field.is_empty_s(offset + self.offset, min_size, out);
+    }
+
+    #[inline(always)]
+    fn is_flat_s<'out, B>(&self, offset: Vec3<f32>, min_size: &[(Vec3<[f32; 8]>, [f32; 8])], out: B)
+    where
+        B: WriteBuf<'out, Item = BMask8>,
+    {
+        self.field.is_flat_s(offset + self.offset, min_size, out)
     }
 }
 
 impl<S: NormalField> NormalField for Translate<S> {
     #[inline]
     fn sample_normal(&self, point: Vec3<f32>) -> Vec3<f32> {
-        self.source.sample_normal(point + self.offset)
-    }
-}
-
-pub struct CentralDifference<S> {
-    source: S,
-    delta: f32,
-}
-
-impl<S: ScalarField> CentralDifference<S> {
-    pub fn new(source: S, delta: f32) -> Self {
-        Self { source, delta }
-    }
-}
-
-impl<S: ScalarField> ScalarField for CentralDifference<S> {
-    #[inline]
-    fn sample(&self, point: Vec3<f32>) -> f32 {
-        self.source.sample(point)
-    }
-
-    #[inline]
-    fn may_contain_intersection(&self, start: Vec3<f32>, end: Vec3<f32>) -> bool {
-        self.source.may_contain_intersection(start, end)
-    }
-
-    #[inline]
-    fn is_empty(&self, min: Vec3<f32>, size: f32) -> bool {
-        self.source.is_empty(min, size)
-    }
-
-    #[inline]
-    fn is_flat(&self, min: Vec3<f32>, size: f32) -> bool {
-        self.source.is_flat(min, size)
-    }
-}
-
-impl<S: ScalarField> NormalField for CentralDifference<S> {
-    #[inline]
-    fn sample_normal(&self, point: Vec3<f32>) -> Vec3<f32> {
-        let (p, e) = (point, self.delta);
-        let f = |p: Vec3<f32>| self.source.sample(p);
-
-        let dx = f(p + Vec3::X * e) - f(p - Vec3::X * e);
-        let dy = f(p + Vec3::Y * e) - f(p - Vec3::Y * e);
-        let dz = f(p + Vec3::Z * e) - f(p - Vec3::Z * e);
-
-        Vec3::new(dx, dy, dz).normalize_or_zero()
+        self.field.sample_normal(point + self.offset)
     }
 }

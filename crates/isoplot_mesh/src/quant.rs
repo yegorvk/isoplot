@@ -3,7 +3,7 @@ use fearless_simd::{
     Bytes, ExtractToken, Select, Simd, SimdBase, SimdInt, SimdInto, SimdMask, f32x8, i32x8,
     mask32x8, u32x8,
 };
-use isoplot_math::Vec3;
+use isoplot_math::{Vec3, Vec3S};
 
 use crate::octree::{ChildIndex, Payload};
 
@@ -26,6 +26,15 @@ impl Quant {
 
     pub(crate) fn child(self, which: ChildIndex) -> Option<Quant> {
         self.0.child(which.0).map(Quant)
+    }
+
+    #[inline(always)]
+    pub(crate) fn children_s<S: Simd>(self, simd: S) -> Option<QuantS<S>> {
+        if self.level() >= Self::MAX_SUBDIV {
+            return None;
+        }
+        let indices = u32x8::load_array(simd, ChildIndex::ALL.map(|index| index.0.value() as u32));
+        Some(QuantS(QuantS::splat(simd, self).0.child(indices)))
     }
 
     pub(crate) fn min_point_size(self) -> (Vec3<f32>, f32) {
@@ -59,12 +68,31 @@ impl Payload for Quant {
 pub(crate) struct QuantS<S: Simd>(RawQuantS<S>);
 
 impl<S: Simd> QuantS<S> {
-    /// Maximum number of consequent subdivisions
-    pub(crate) const MAX_SUBDIV: u8 = Quant::MAX_SUBDIV;
-
     #[inline(always)]
     pub(crate) fn root(simd: S) -> Self {
         Self(RawQuantS::root(simd))
+    }
+
+    #[inline(always)]
+    fn splat(simd: S, value: Quant) -> Self {
+        Self(RawQuantS(u32x8::splat(simd, value.0.value.value())))
+    }
+
+    #[inline(always)]
+    pub(crate) fn load(simd: S, lanes: [Quant; 8]) -> Self {
+        Self(RawQuantS(u32x8::load_array(
+            simd,
+            lanes.map(|lane| lane.0.value.value()),
+        )))
+    }
+
+    #[inline(always)]
+    pub(crate) fn to_array(self) -> [Quant; 8] {
+        self.0.0.to_array().map(|quant| {
+            Quant(RawQuant {
+                value: u31::new(quant),
+            })
+        })
     }
 
     #[inline(always)]
@@ -84,7 +112,7 @@ impl<S: Simd> QuantS<S> {
     }
 
     #[inline(always)]
-    pub(crate) fn min_point_size(self) -> (Vec3<f32x8<S>>, f32x8<S>) {
+    pub(crate) fn min_point_size(self) -> (Vec3S<f32x8<S>>, f32x8<S>) {
         let (parts, level) = self.0.parts_level();
 
         let x = fract_u32_to_f32_s(parts.x, level);
@@ -92,11 +120,11 @@ impl<S: Simd> QuantS<S> {
         let z = fract_u32_to_f32_s(parts.z, level);
 
         let neg_level = -level.bitcast::<i32x8<S>>();
-        (Vec3::new(x, y, z), f32_exp2_small_i32_s(neg_level))
+        (Vec3S::new(x, y, z), f32_exp2_small_i32_s(neg_level))
     }
 
     #[inline(always)]
-    pub(crate) fn center_point(self) -> Vec3<f32x8<S>> {
+    pub(crate) fn center_point(self) -> Vec3S<f32x8<S>> {
         let (min_point, size) = self.min_point_size();
         min_point + size * 0.5
     }
@@ -196,7 +224,7 @@ impl<S: Simd> RawQuantS<S> {
 
     #[inline(always)]
     fn is_leaf(self) -> mask32x8<S> {
-        self.level().simd_lt(Quant::MAX_SUBDIV as u32)
+        self.level().simd_ge(Quant::MAX_SUBDIV as u32)
     }
 
     #[inline(always)]

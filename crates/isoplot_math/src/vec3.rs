@@ -1,6 +1,6 @@
-use std::{iter, marker::PhantomData, ops};
+use std::{array, iter, marker::PhantomData, ops};
 
-use bytemuck::{AnyBitPattern, NoUninit, Zeroable, must_cast_mut, must_cast_ref};
+use bytemuck::{Pod, Zeroable};
 use derive_where::derive_where;
 use fearless_simd::{Simd, SimdBase, SimdInto};
 
@@ -18,14 +18,13 @@ pub struct AVec3<T, Token = PhantomToken> {
     _tkn: PhantomData<Token>,
 }
 
-/// SAFETY: `AVec3<T>` is a `repr(C)` struct with exactly `N` fields of type `T`.
-unsafe impl<T: Copy, const N: usize> Zeroable for AVec3<[T; N]> where [T; N]: Zeroable {}
+/// SAFETY: `AVec3` is a `repr(C)` struct with exactly `3` fields of type `T`.
+unsafe impl<T: Copy + Zeroable, Token> Zeroable for AVec3<T, Token> where [T; 3]: Zeroable {}
 
-/// SAFETY: `AVec3<T>` is a `repr(C)` struct with exactly `N` fields of type `T`.
-unsafe impl<T: Copy, const N: usize> AnyBitPattern for AVec3<[T; N]> where [T; N]: AnyBitPattern {}
-
-/// SAFETY: `AVec3<T>` is a `repr(C)` struct with exactly `N` fields of type `T`.
-unsafe impl<T: Copy, const N: usize> NoUninit for AVec3<[T; N]> where [T; N]: NoUninit {}
+/// SAFETY: `AVec3` is a `repr(C)` struct with exactly `3` fields of type `T`.
+// NOTE: it is impossible to implement `Pod` and `AnyBitPattern`/`NoUninit` at the same
+// time, while compositions are implemented via `Pod`.
+unsafe impl<T: Pod, Token: 'static> Pod for AVec3<T, Token> where [T; 3]: Pod {}
 
 impl<Token: Copy, T: Copy> AVec3<T, Token> {
     #[inline(always)]
@@ -60,6 +59,14 @@ impl<Token: Copy, T: Copy> AVec3<T, Token> {
         T: PrimitiveCast<U>,
     {
         self.map(|x| x.cast())
+    }
+
+    #[inline(always)]
+    pub fn cast_f32(self) -> AVec3<f32, Token>
+    where
+        T: PrimitiveCast<f32>,
+    {
+        self.cast()
     }
 
     #[inline(always)]
@@ -105,39 +112,27 @@ impl<Token: Copy, T: Copy> AVec3<T, Token> {
     }
 
     #[inline(always)]
-    pub const fn as_array(&self) -> &[T; 3]
-    where
-        [T; 3]: AnyBitPattern,
-        Self: NoUninit,
-    {
-        must_cast_ref(self)
+    pub const fn as_array(&self) -> &[T; 3] {
+        // SAFETY: `AVec3` has `repr(C)` and is equivalent to `[T; 3]`.
+        unsafe { (self as *const Self).cast::<[T; 3]>().as_ref_unchecked() }
     }
 
     #[inline(always)]
-    pub fn as_array_mut(&mut self) -> &mut [T; 3]
-    where
-        [T; 3]: NoUninit + AnyBitPattern,
-        Self: NoUninit + AnyBitPattern,
-    {
-        must_cast_mut(self)
+    pub fn as_array_mut(&mut self) -> &mut [T; 3] {
+        // SAFETY: `AVec3` has `repr(C)` and is equivalent to `[T; 3]`.
+        unsafe { (self as *mut Self).cast::<[T; 3]>().as_mut_unchecked() }
     }
 
     #[inline(always)]
-    pub const fn from_array_ref(a: &[T; 3]) -> &Self
-    where
-        Self: AnyBitPattern,
-        [T; 3]: NoUninit,
-    {
-        must_cast_ref(a)
+    pub const fn from_array_ref(a: &[T; 3]) -> &Self {
+        // SAFETY: `AVec3` has `repr(C)` and is equivalent to `[T; 3]`.
+        unsafe { (a as *const [T; 3]).cast::<Self>().as_ref_unchecked() }
     }
 
     #[inline(always)]
-    pub fn from_array_mut(a: &mut [T; 3]) -> &mut Self
-    where
-        Self: NoUninit + AnyBitPattern,
-        [T; 3]: NoUninit + AnyBitPattern,
-    {
-        must_cast_mut(a)
+    pub fn from_array_mut(a: &mut [T; 3]) -> &mut Self {
+        // SAFETY: `AVec3` has `repr(C)` and is equivalent to `[T; 3]`.
+        unsafe { (a as *mut [T; 3]).cast::<Self>().as_mut_unchecked() }
     }
 
     #[inline(always)]
@@ -169,6 +164,13 @@ impl<S: Simd, V: Copy> AVec3<V, SimdToken<S>> {
 }
 
 impl<S: Simd, V: SimdBase<S>> AVec3<V, SimdToken<S>> {
+    pub fn simd_spread<T, Token>(simd: S, vec: AVec3<T, Token>) -> Self
+    where
+        T: SimdInto<V, S>,
+    {
+        Self::simd_new(simd, vec.x, vec.y, vec.z)
+    }
+
     #[inline(always)]
     pub fn simd_from_slice(simd: S, slice: &[V::Element]) -> Self {
         assert_eq!(slice.len(), V::LEN * 3);
@@ -178,6 +180,27 @@ impl<S: Simd, V: SimdBase<S>> AVec3<V, SimdToken<S>> {
             V::from_slice(simd, &slice[V::LEN..(2 * V::LEN)]),
             V::from_slice(simd, &slice[(2 * V::LEN)..]),
         )
+    }
+
+    #[inline(always)]
+    pub fn simd_load<Token>(simd: S, vec: AVec3<V::Array, Token>) -> Self {
+        Self::simd_new(simd, vec.x, vec.y, vec.z)
+    }
+
+    #[inline(always)]
+    pub fn simd_to_array(self) -> AVec3<V::Array, PhantomToken> {
+        AVec3::new(self.x.to_array(), self.y.to_array(), self.z.to_array())
+    }
+}
+
+impl<S: Simd, T: Copy, V, const N: usize> AVec3<V, SimdToken<S>>
+where
+    V: SimdBase<S, Array = [T; N]>,
+{
+    #[inline(always)]
+    pub fn simd_transpose(self) -> [AVec3<T, PhantomToken>; N] {
+        let coords = self.to_array().map(|v| v.to_array());
+        array::from_fn(|i| AVec3::from_array(array::from_fn(|j| coords[j][i])))
     }
 }
 

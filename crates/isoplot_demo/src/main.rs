@@ -38,7 +38,7 @@ fn main() {
                 task_pool_options: TaskPoolOptions {
                     async_compute: TaskPoolThreadAssignmentPolicy {
                         min_threads: 1,
-                        max_threads: usize::MAX,
+                        max_threads: 1,
                         percent: 1.0,
                         on_thread_spawn: None,
                         on_thread_destroy: None,

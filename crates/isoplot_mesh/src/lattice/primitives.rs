@@ -1,6 +1,8 @@
-use std::ops;
+use std::{array, ops};
 
 use crate::utils::array_map_index;
+use bytemuck::{Pod, Zeroable};
+use fearless_simd::{Bytes, Simd, SimdBase, SimdMask, mask32x8, u32x8};
 use isoplot_math::Vec3;
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
@@ -427,6 +429,11 @@ impl FaceIndex {
     }
 
     #[inline]
+    pub(crate) const fn as_usize(self) -> usize {
+        self.0 as usize
+    }
+
+    #[inline]
     const fn into_parts(self) -> (FaceKind, EdgeSlot) {
         (self.kind(), self.slot())
     }
@@ -451,6 +458,11 @@ impl BEdgeIndex {
 
         a
     };
+
+    #[inline]
+    pub(crate) const fn as_usize(self) -> usize {
+        self.0.as_usize()
+    }
 
     #[inline]
     pub(crate) fn corners(self) -> [Corner; 2] {
@@ -485,11 +497,7 @@ impl BEdgesMask {
         let mut mask = 0u16;
 
         for index in FaceIndex::ALL {
-            if f(BEdgeIndex(index)) {
-                let raw_index = index.0;
-                debug_assert!(raw_index < 16);
-                mask |= 1u16 << raw_index;
-            }
+            mask |= (f(BEdgeIndex(index)) as u16) << index.0;
         }
 
         Self(mask)
@@ -497,8 +505,53 @@ impl BEdgesMask {
 
     #[inline]
     pub(crate) const fn contains(self, index: BEdgeIndex) -> bool {
-        let raw_index = index.0.0;
-        debug_assert!(raw_index < 16);
-        self.0 & (1u16 << raw_index) != 0
+        self.0 & (1u16 << index.0.0) != 0
     }
 }
+
+#[derive(Copy, Clone)]
+pub(crate) struct BEdgesMaskS<S: Simd>(u32x8<S>);
+
+impl<S: Simd> BEdgesMaskS<S> {
+    #[inline(always)]
+    pub(crate) fn from_fn<F>(simd: S, mut f: F) -> Self
+    where
+        F: FnMut(BEdgeIndex) -> mask32x8<S>,
+    {
+        let mut mask = u32x8::splat(simd, 0);
+
+        for index in FaceIndex::ALL {
+            let is_set: u32x8<S> = f(BEdgeIndex(index)).to_vector().bitcast();
+            mask |= is_set & (1u32 << index.0);
+        }
+
+        Self(mask)
+    }
+
+    #[inline(always)]
+    pub(crate) fn contains(self, index: BEdgeIndex) -> mask32x8<S> {
+        !(self.0 & (1u32 << index.0.0)).simd_eq(0)
+    }
+
+    #[inline(always)]
+    pub(crate) fn to_array(self) -> [BEdgesMask; 8] {
+        self.0.to_array().map(|mask| BEdgesMask(mask as u16))
+    }
+}
+
+#[derive(Copy, Clone)]
+#[repr(transparent)]
+pub(crate) struct BEdges<T>(pub(crate) [T; 12]);
+
+impl<T> BEdges<T> {
+    #[inline]
+    pub(crate) fn from_fn<F>(mut f: F) -> Self
+    where
+        F: FnMut(BEdgeIndex) -> T,
+    {
+        Self(array::from_fn(|i| f(BEdgeIndex(FaceIndex(i as u8)))))
+    }
+}
+
+unsafe impl<T: Zeroable> Zeroable for BEdges<T> where [T; 12]: Zeroable {}
+unsafe impl<T: Pod> Pod for BEdges<T> where [T; 12]: Pod {}

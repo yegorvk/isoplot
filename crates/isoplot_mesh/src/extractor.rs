@@ -5,7 +5,7 @@ use isoplot_math::Vec3;
 
 use crate::{
     extractor::{
-        chunk::Cell,
+        chunk::{Cell, PlaceFeature},
         seams::{EdgeSeam, FaceSeam},
     },
     lattice::{BEdgeIndex, Edge, EdgeKey, EdgeKind, Face, FaceKey, FaceKind, Offset},
@@ -59,9 +59,13 @@ where
     where
         P: PopulateMesh,
     {
-        let chunk = Chunk::build(&self.scalar_field, self.max_level, |cell| {
-            place_feature(&self.scalar_field, cell)
-        });
+        let chunk = Chunk::build(
+            &self.scalar_field,
+            self.max_level,
+            MassParticle {
+                field: &self.scalar_field,
+            },
+        );
         chunk.for_each_quad(|vertices| self.add_quad(vertices, &mut sink));
         Ok(chunk)
     }
@@ -168,7 +172,18 @@ impl<B: BorrowChunk> EdgeSeamKey<B> {
 #[derive(Debug)]
 pub struct ExtractError;
 
-fn place_feature<S: NormalField>(field: &S, cell: Cell) -> Option<Vec3<f32>> {
+struct MassParticle<S> {
+    field: S,
+}
+
+impl<S: NormalField> PlaceFeature for MassParticle<S> {
+    #[inline]
+    fn place_feature(&mut self, cell: Cell) -> Vec3<f32> {
+        place_feature(&self.field, cell)
+    }
+}
+
+fn place_feature<S: NormalField>(field: S, cell: Cell) -> Vec3<f32> {
     const ITERS: usize = 8;
 
     let (min_corner, size) = cell.vol.min_point_size();
@@ -187,7 +202,7 @@ fn place_feature<S: NormalField>(field: &S, cell: Cell) -> Option<Vec3<f32>> {
             min_corner + offset.cast() * size
         });
 
-        let point = bisect(field, a, b, field.sample(a));
+        let point = bisect(&field, a, b, field.sample(a));
 
         points[count] = point;
         normals[count] = field.sample_normal(point);
@@ -195,7 +210,7 @@ fn place_feature<S: NormalField>(field: &S, cell: Cell) -> Option<Vec3<f32>> {
     }
 
     if count == 0 {
-        return None;
+        return cell.vol.center_point();
     }
 
     let mut x = Vec3::ZERO;
@@ -217,7 +232,9 @@ fn place_feature<S: NormalField>(field: &S, cell: Cell) -> Option<Vec3<f32>> {
         x = (x + force / count as f32).clamp(min_corner, max_corner);
     }
 
-    x.all(f32::is_finite).then_some(x)
+    x.all(f32::is_finite)
+        .then_some(x)
+        .unwrap_or(cell.vol.center_point())
 }
 
 fn bisect<S>(field: S, mut a: Vec3<f32>, mut b: Vec3<f32>, mut v_a: f32) -> Vec3<f32>

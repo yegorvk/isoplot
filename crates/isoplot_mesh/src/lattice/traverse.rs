@@ -68,7 +68,7 @@ impl<T: Copy> MinimalEdges<T> {
         F: FnMut(Edge<T>),
     {
         for (kind, faces) in self.faces.into_axes() {
-            traverse_ping_pong(faces, |current, next| {
+            traverse_ping_pong(faces, None, |_, current, next| {
                 for keys in current.iter().copied() {
                     let leaf = iter::zip(&keys, FaceSlot::ALL)
                         .all(|(key, slot)| cx.is_face_leaf(key, slot));
@@ -103,7 +103,7 @@ impl<T: Copy> MinimalEdges<T> {
         }
 
         for (kind, edges) in self.edges.into_axes() {
-            traverse_ping_pong(edges, |current, next| {
+            traverse_ping_pong(edges, None, |_, current, next| {
                 for keys in current.iter().copied() {
                     let leaf = iter::zip(&keys, EdgeSlot::ALL)
                         .all(|(key, slot)| cx.is_edge_leaf(key, kind, slot));

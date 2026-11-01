@@ -1,43 +1,85 @@
 use bilge::prelude::*;
 use derive_where::derive_where;
-use std::{iter, marker::PhantomData, mem, ops::Index};
+use fearless_simd::{Level, Simd, dispatch};
+use fearless_simd_macros::simd;
+use std::{hint::select_unpredictable, iter, marker::PhantomData, mem, ops::Index};
 
-use crate::{quant::Quant, simd::BMask8};
+use crate::{
+    quant::Quant,
+    simd::{BMask8, VecExt, WriteBuf, WriteBufExt},
+    utils::{
+        filter_branchless_into_vec, map_vec_in_place, transmute_empty_vec, traverse_ping_pong,
+    },
+};
 
 /// Maximum number of levels in an octree
 ///
-/// Note that the root node is taken into account,
-/// so there is always at least 1 level.
+/// The root node is always taken into account,
+/// so that this values is always at least 1.
 pub(crate) const MAX_LEVELS: u8 = 10;
 
-pub(crate) trait OctreeBuilder<T> {
+/// The maximum octree level
+///
+/// The levels are numbered starting from zero.
+pub(crate) const MAX_LEVEL: u8 = MAX_LEVELS - 1;
+
+pub(crate) trait OctreeSource<T: Copy> {
     /// Returns `true` if the specified node is empty.
     fn is_empty(&mut self, tag: Quant) -> bool;
 
-    fn is_empty_s(&mut self, tag: &[[Quant; 8]], out: &mut [BMask8]) {
-        for (tag, out) in iter::zip(tag, out) {
-            *out = BMask8::from_fn(|i| self.is_empty(tag[i]));
-        }
+    #[inline]
+    fn is_child_empty_mask(&mut self, tag: Quant) -> BMask8 {
+        BMask8::from_fn(|i| self.is_empty(tag.child(ChildIndex::new(i)).unwrap()))
     }
 
     /// Returns `true` if the specified node is a leaf.
     fn is_leaf(&mut self, tag: Quant) -> bool;
 
-    fn is_leaf_s(&mut self, tag: &[[Quant; 8]], out: &mut [BMask8]) {
-        for (tag, out) in iter::zip(tag, out) {
-            *out = BMask8::from_fn(|i| self.is_leaf(tag[i]));
-        }
-    }
-
     /// Returns the leaf payload associated with the specified tag.
     fn place_leaf(&mut self, tag: Quant) -> T;
 
-    fn place_leaf_s(&mut self, tag: &[[Quant; 8]], out: &mut [[T; 8]]) {
-        for (tag, out) in iter::zip(tag, out) {
-            for i in 0..8 {
-                out[i] = self.place_leaf(tag[i]);
-            }
-        }
+    fn is_child_empty_mask_s<'out, S: Simd, B>(&mut self, simd: S, parent: &[Quant], out: B)
+    where
+        B: WriteBuf<'out, Item = BMask8>,
+    {
+        _ = simd;
+        out.write_all_with(|out| {
+            out.write_from_iter(parent.iter().map(|tag| {
+                BMask8::from_fn(|i| {
+                    let child_index = ChildIndex::new(i as u8);
+                    self.is_empty(tag.child(child_index).unwrap())
+                })
+            }));
+        });
+    }
+
+    fn is_leaf_s<'out, S: Simd, B>(&mut self, simd: S, tag: &[[Quant; 8]], out: B)
+    where
+        B: WriteBuf<'out, Item = BMask8>,
+    {
+        _ = simd;
+        out.write_all_with(|out| {
+            out.write_from_iter(
+                tag.iter()
+                    .map(|tag| BMask8::from_fn(|i| self.is_leaf(tag[i as usize]))),
+            );
+        });
+    }
+
+    fn place_leaves_s<'out, S: Simd, B>(&mut self, simd: S, tags: &[Quant], out: B)
+    where
+        T: 'out,
+        B: WriteBuf<'out, Item = T>,
+    {
+        _ = simd;
+        out.write_all_with(|out| {
+            out.write_from_iter(tags.iter().map(|tag| self.place_leaf(*tag)));
+        });
+    }
+
+    #[inline]
+    fn should_vectorize(&mut self) -> bool {
+        true
     }
 }
 
@@ -54,132 +96,246 @@ impl<T> InlineOctree<T> {
 }
 
 impl<T: Payload> InlineOctree<T> {
-    fn build<B>(source: &mut B) -> Self
+    pub(crate) fn build<I>(source: &mut I) -> Self
     where
-        B: ?Sized + OctreeBuilder<T>,
+        I: ?Sized + OctreeSource<T>,
     {
-        let mut nodes = vec![];
+        let level = Level::new();
 
-        let mut this_tags = vec![];
-        let mut next_tags = vec![Quant::root()];
+        if !source.should_vectorize() || level.is_fallback() {
+            Self::build_scalar(source)
+        } else {
+            dispatch!(level, simd => Self::build_s(simd, source))
+        }
+    }
 
-        let mut anchors = vec![];
+    fn build_scalar<I>(source: &mut I) -> Self
+    where
+        I: ?Sized + OctreeSource<T>,
+    {
+        let mut nodes: Vec<InlineNode<Quant>> = vec![];
 
-        let mut pending_branches = vec![];
-        let mut pending_leaves = vec![];
-        let mut pending_tags = vec![];
+        let mut next_branch_offset = 1u32;
+        let mut total_leaves = 0usize;
 
-        // Temporary buffers
-        let mut temp_masks = vec![];
+        let mut temp_branches: Vec<Branch> = vec![];
 
-        let mut next_offset = next_tags.len() as u32;
+        traverse_ping_pong(
+            vec![Quant::root()],
+            Some(MAX_LEVEL as usize),
+            |_, old_tags, new_tags| {
+                debug_assert!(temp_branches.is_empty());
 
-        for _ in 0..MAX_LEVELS {
-            nodes.reserve(next_tags.len());
-            {
-                let (chunks, tail) = next_tags.as_chunks::<8>();
+                let old_node_count = nodes.len();
+                let mut num_leaves = 0usize;
 
-                temp_masks.resize(chunks.len(), BMask8::ZERO);
-                source.is_leaf_s(chunks, &mut temp_masks);
+                nodes.extend(old_tags.iter().copied().enumerate().map(|(i, tag)| {
+                    let is_leaf = source.is_leaf(tag);
+                    num_leaves += is_leaf as usize;
+                    InlineNode::new(is_leaf, Branch::new(0, i as u32), InlineLeaf::new(tag))
+                }));
 
-                for i in 0..temp_masks.len() {
-                    for j in 0..8 {
-                        let offset = (8 * i + j) as u32;
-                        let is_leaf_bit = temp_masks[i].get(j as u8) as u8;
-                        nodes.push(InlineNode::new_branch(Branch::new(is_leaf_bit, offset)));
+                let new_nodes = &mut nodes[old_node_count..];
+
+                {
+                    let mut temp = transmute_empty_vec(mem::take(&mut temp_branches));
+                    filter_branchless_into_vec(new_nodes, &mut temp, |node| node.is_branch());
+                    temp_branches = map_vec_in_place(temp, |node| node.as_branch().unwrap());
+                }
+
+                for branch in temp_branches.drain(..) {
+                    let index = branch.base_offset() as usize;
+                    let mask = !source.is_child_empty_mask(old_tags[index]);
+
+                    new_nodes[index] = Branch::new(mask.0, next_branch_offset).into();
+                    next_branch_offset += mask.count_set() as u32;
+
+                    for i in 0..8u8 {
+                        if mask.contains(i) {
+                            new_tags.push(old_tags[index].child(ChildIndex::new(i)).unwrap());
+                        }
                     }
                 }
 
-                for (i, tag) in tail.iter().enumerate() {
-                    let offset = (8 * temp_masks.len() + i) as u32;
-                    let is_leaf_bit = source.is_leaf(*tag) as u8;
-                    nodes.push(InlineNode::new_branch(Branch::new(is_leaf_bit, offset)));
-                }
-            }
+                total_leaves += num_leaves;
+            },
+        );
 
-            let total_nodes = nodes.len();
-            let new_nodes = &mut nodes[(total_nodes - next_tags.len())..];
+        _ = temp_branches;
+        let mut leaf_tags: Vec<Quant> = Vec::with_capacity(total_leaves);
 
-            anchors.extend(iter::zip(
-                new_nodes.iter().copied(),
-                next_tags.iter().copied(),
-            ));
-
-            anchors.sort_unstable_by_key(|(node, _)| node.is_leaf());
-
-            let num_leaves = anchors
-                .iter()
-                .filter(|(anchor, _)| {
-                    let fake_branch = anchor.as_branch().unwrap();
-                    fake_branch.mask() != 0
-                })
-                .count();
-
-            let num_branches = anchors.len() - num_leaves;
-
-            pending_branches.reserve(num_branches);
-            pending_tags.reserve(num_branches);
-
-            pending_leaves.reserve(anchors.len());
-
-            for (anchor, tag) in anchors.drain(..) {
-                let fake_branch = anchor.as_branch().unwrap();
-
-                let is_leaf = fake_branch.mask() != 0;
-                let index = fake_branch.base_offset() as usize;
-
-                if is_leaf {
-                    let payload = source.place_leaf(tag);
-                    pending_leaves.push((index, InlineLeaf::new(payload)));
-                    continue;
-                }
-
-                let mut mask = 0u8;
-
-                for child_index in ChildIndex::enumerate() {
-                    let child = tag.child(child_index).unwrap();
-                    mask |= (!source.is_empty(child) as u8) << child_index.0.value();
-                    this_tags.reserve(mask.count_ones() as usize);
-                    pending_tags.push((tag, mask));
-
-                    if mask & (1u8 << child_index.0.value()) != 0 {
-                        this_tags.push(child);
-                    }
-                }
-
-                pending_branches.push((index, Branch::new(mask, next_offset)));
-                next_offset += mask.count_ones();
-            }
-
-            {
-                pending_branches.sort_unstable_by_key(|(i, _)| *i);
-
-                for (index, branch) in pending_branches.drain(..) {
-                    new_nodes[index] = branch.into();
-                }
-
-                pending_branches.clear();
-            }
-
-            {
-                pending_leaves.sort_unstable_by_key(|(i, _)| *i);
-
-                for (index, leaf) in pending_leaves.drain(..) {
-                    new_nodes[index] = leaf.into();
-                }
-
-                pending_leaves.clear();
-            }
-
-            mem::swap(&mut this_tags, &mut next_tags);
-            this_tags.clear();
-
-            if next_tags.is_empty() {
-                break;
-            }
+        {
+            let mut temp = transmute_empty_vec(mem::take(&mut leaf_tags));
+            filter_branchless_into_vec(&nodes, &mut temp, |node| node.is_leaf());
+            leaf_tags = map_vec_in_place(temp, |node| node.as_leaf().unwrap().get())
         }
 
-        debug_assert_eq!(next_offset, nodes.len() as u32);
+        let leaves = map_vec_in_place(leaf_tags, |tag| source.place_leaf(tag));
+
+        let nodes: Vec<InlineNode<T>> = if total_leaves != 0 {
+            let mut i = 0usize;
+
+            let raw_nodes: Vec<RawNode> = nodes
+                .into_iter()
+                .map(|node| {
+                    let is_leaf = node.is_leaf();
+                    if i >= leaves.len() {
+                        return node.inner;
+                    }
+                    let raw_node = select_unpredictable(
+                        is_leaf,
+                        RawNode::new_leaf(InlineLeaf::new(leaves[i])),
+                        node.inner,
+                    );
+                    i += is_leaf as usize;
+                    raw_node
+                })
+                .collect();
+
+            map_vec_in_place(raw_nodes, |node| unsafe { InlineNode::from_raw(node) })
+        } else {
+            map_vec_in_place(nodes, |node| node.as_branch().unwrap().into())
+        };
+
+        Self { nodes }
+    }
+
+    #[allow(dead_code)]
+    #[simd]
+    fn build_s<S: Simd, I>(simd: S, source: &mut I) -> Self
+    where
+        I: ?Sized + OctreeSource<T>,
+    {
+        let mut nodes: Vec<InlineNode<Quant>> = vec![];
+
+        let mut temp_branches: Vec<Branch> = vec![];
+        let mut temp_masks: Vec<BMask8> = vec![];
+        let mut temp_quants: Vec<Quant> = vec![];
+
+        let mut next_branch_offset = 1u32;
+        let mut total_leaves = 0usize;
+
+        traverse_ping_pong(
+            vec![Quant::root()],
+            Some(MAX_LEVEL as usize),
+            |_, old_tags, new_tags| {
+                debug_assert!(
+                    temp_branches.is_empty() && temp_masks.is_empty() && temp_quants.is_empty()
+                );
+
+                let old_node_count = nodes.len();
+
+                nodes.reserve(old_tags.len());
+                let num_leaves = {
+                    let (chunks, tail) = old_tags.as_chunks::<8>();
+
+                    source.is_leaf_s(simd, chunks, temp_masks.clear_write(chunks.len()));
+
+                    let mut num_leaves = 0usize;
+                    for i in 0..temp_masks.len() {
+                        for j in 0..8 {
+                            let is_leaf = temp_masks[i].contains(j as u8);
+                            num_leaves += is_leaf as usize;
+                            nodes.push(InlineNode::new(
+                                is_leaf,
+                                Branch::new(0, (i * 8 + j) as u32),
+                                InlineLeaf::new(chunks[i][j]),
+                            ));
+                        }
+                    }
+
+                    temp_masks.clear();
+
+                    for (i, tag) in tail.iter().copied().enumerate() {
+                        let is_leaf = source.is_leaf(tag);
+                        num_leaves += is_leaf as usize;
+                        nodes.push(InlineNode::new(
+                            is_leaf,
+                            Branch::new(0, (8 * chunks.len() + i) as u32),
+                            InlineLeaf::new(tag),
+                        ));
+                    }
+
+                    num_leaves
+                };
+
+                let new_nodes = &mut nodes[old_node_count..];
+                let num_branches = new_nodes.len() - num_leaves;
+
+                {
+                    let mut temp = transmute_empty_vec(mem::take(&mut temp_branches));
+                    filter_branchless_into_vec(new_nodes, &mut temp, |node| node.is_branch());
+                    temp_branches = map_vec_in_place(temp, |node| node.as_branch().unwrap());
+                }
+
+                temp_quants.clear();
+                temp_quants.extend(
+                    temp_branches
+                        .iter()
+                        .map(|branch| old_tags[branch.base_offset() as usize]),
+                );
+
+                source.is_child_empty_mask_s(
+                    simd,
+                    &temp_quants,
+                    temp_masks.clear_write(num_branches),
+                );
+
+                temp_quants.clear();
+
+                for (branch, mask) in iter::zip(temp_branches.drain(..), temp_masks.drain(..)) {
+                    let index = branch.base_offset() as usize;
+                    new_nodes[index] = Branch::new(!mask.0, next_branch_offset).into();
+                    next_branch_offset += mask.0.count_zeros();
+
+                    for i in 0..8u8 {
+                        if mask.0 & (1u8 << i) == 0 {
+                            new_tags.push(old_tags[index].child(ChildIndex::new(i)).unwrap());
+                        }
+                    }
+                }
+
+                total_leaves += num_leaves;
+            },
+        );
+
+        _ = (temp_branches, temp_masks);
+        let mut leaf_tags: Vec<Quant> = Vec::with_capacity(total_leaves);
+
+        {
+            let mut temp = transmute_empty_vec(mem::take(&mut leaf_tags));
+            filter_branchless_into_vec(&nodes, &mut temp, |node| node.is_leaf());
+            leaf_tags = map_vec_in_place(temp, |node| node.as_leaf().unwrap().get())
+        }
+
+        let mut leaves = Vec::with_capacity(total_leaves);
+        source.place_leaves_s(simd, &leaf_tags, leaves.extend_write(total_leaves));
+        _ = leaf_tags;
+
+        let nodes: Vec<InlineNode<T>> = if total_leaves != 0 {
+            let mut i = 0usize;
+
+            let raw_nodes: Vec<RawNode> = nodes
+                .into_iter()
+                .map(|node| {
+                    let is_leaf = node.is_leaf();
+                    if i >= leaves.len() {
+                        return node.inner;
+                    }
+                    let raw_node = select_unpredictable(
+                        is_leaf,
+                        RawNode::new_leaf(InlineLeaf::new(leaves[i])),
+                        node.inner,
+                    );
+                    i += is_leaf as usize;
+                    raw_node
+                })
+                .collect();
+
+            map_vec_in_place(raw_nodes, |node| unsafe { InlineNode::from_raw(node) })
+        } else {
+            map_vec_in_place(nodes, |node| node.as_branch().unwrap().into())
+        };
 
         Self { nodes }
     }
@@ -206,17 +362,17 @@ impl<T> Index<OctreeKey> for InlineOctree<T> {
     }
 }
 
-struct Collector<'a, T, I>
+struct Collector<'a, T: Copy, I>
 where
-    I: OctreeBuilder<T>,
+    I: OctreeSource<T>,
 {
     source: &'a mut I,
     leaves: Vec<T>,
 }
 
-impl<T, I> OctreeBuilder<u31> for Collector<'_, T, I>
+impl<T: Copy, I> OctreeSource<u31> for Collector<'_, T, I>
 where
-    I: OctreeBuilder<T>,
+    I: OctreeSource<T>,
 {
     #[inline]
     fn is_empty(&mut self, tag: Quant) -> bool {
@@ -233,6 +389,37 @@ where
         self.leaves.push(I::place_leaf(self.source, tag));
         u31::new(self.leaves.len() as u32 - 1)
     }
+
+    #[inline(always)]
+    fn is_child_empty_mask_s<'out, S: Simd, B>(&mut self, simd: S, tag: &[Quant], out: B)
+    where
+        B: WriteBuf<'out, Item = BMask8>,
+    {
+        I::is_child_empty_mask_s(self.source, simd, tag, out);
+    }
+
+    #[inline(always)]
+    fn is_leaf_s<'out, S: Simd, B>(&mut self, simd: S, tag: &[[Quant; 8]], out: B)
+    where
+        B: WriteBuf<'out, Item = BMask8>,
+    {
+        I::is_leaf_s(self.source, simd, tag, out);
+    }
+
+    #[inline(always)]
+    fn place_leaves_s<'out, S: Simd, B>(&mut self, simd: S, tags: &[Quant], mut out: B)
+    where
+        B: WriteBuf<'out, Item = u31>,
+    {
+        let old_len = self.leaves.len();
+
+        self.source
+            .place_leaves_s(simd, tags, self.leaves.extend_write(tags.len()));
+
+        out.write_all_with(|out| {
+            out.write_from_iter((old_len..self.leaves.len()).map(|i| u31::new(i as u32)));
+        });
+    }
 }
 
 #[derive(Debug)]
@@ -241,10 +428,10 @@ pub(crate) struct Octree<T> {
     leaves: Vec<T>,
 }
 
-impl<T> Octree<T> {
+impl<T: Copy> Octree<T> {
     pub(crate) fn build<S>(source: &mut S) -> Self
     where
-        S: OctreeBuilder<T>,
+        S: OctreeSource<T>,
     {
         let mut collector = Collector {
             source,
@@ -277,7 +464,7 @@ impl<T> Octree<T> {
 
     #[inline]
     pub(crate) fn is_leaf(&self, key: OctreeKey) -> bool {
-        self.get(key).unwrap().is_leaf()
+        self.get(key).map(|node| node.is_leaf()).unwrap_or(false)
     }
 }
 
@@ -342,6 +529,22 @@ impl<T: Payload> InlineNode<T> {
     fn new_leaf(leaf: InlineLeaf<T>) -> Self {
         Self {
             inner: RawNode::new_leaf(leaf),
+            _ty: PhantomData,
+        }
+    }
+
+    #[inline]
+    fn new(is_leaf: bool, branch: Branch, leaf: InlineLeaf<T>) -> Self {
+        Self {
+            inner: RawNode::new_dyn(is_leaf, branch, leaf),
+            _ty: PhantomData,
+        }
+    }
+
+    #[inline]
+    unsafe fn from_raw(raw_node: RawNode) -> Self {
+        Self {
+            inner: raw_node,
             _ty: PhantomData,
         }
     }
@@ -417,6 +620,18 @@ impl RawNode {
         let data = leaf.payload;
         Self::new(NodeKind::Leaf, data)
     }
+
+    #[inline]
+    fn new_dyn<T>(is_leaf: bool, branch: Branch, leaf: InlineLeaf<T>) -> Self {
+        // Dear compiler, please eliminate this branch.
+        let kind = if is_leaf {
+            NodeKind::Leaf
+        } else {
+            NodeKind::Branch
+        };
+        let payload = select_unpredictable(is_leaf, leaf.payload, branch.into_u31());
+        Self::new(kind, payload)
+    }
 }
 
 #[bitsize(1)]
@@ -481,14 +696,19 @@ impl Branch {
 pub(crate) struct ChildIndex(pub(crate) u3);
 
 impl ChildIndex {
+    pub(crate) const ALL: [ChildIndex; 8] = {
+        let mut a = [ChildIndex(u3::ZERO); 8];
+        let mut i = 0usize;
+        while i < 8 {
+            a[i] = ChildIndex(u3::new(i as u8));
+            i += 1;
+        }
+        a
+    };
+
     #[inline]
     pub(crate) const fn new(index: u8) -> Self {
         Self(u3::new(index))
-    }
-
-    #[inline]
-    pub(crate) fn enumerate() -> impl Iterator<Item = Self> {
-        (0..8u8).map(|i| ChildIndex(u3::new(i)))
     }
 }
 
@@ -501,7 +721,7 @@ struct RawBranch {
     /// are present, in order.
     mask: u8,
 
-    /// Offset (in nodes) of the first present child in the next level
+    /// Offset (in nodes) of the first present child in the octree
     offset: u23,
 }
 
@@ -564,8 +784,9 @@ mod tests {
 
     #[test]
     fn test_octree_degenerate() {
+        #[allow(dead_code)]
         #[derive(Copy, Clone)]
-        struct Dummy;
+        struct Dummy(u32);
 
         impl Payload for Dummy {
             fn into_bits(self) -> u31 {
@@ -574,13 +795,13 @@ mod tests {
 
             unsafe fn from_bits(bits: u31) -> Self {
                 assert_eq!(bits, u31::new(67));
-                Dummy
+                Dummy(0)
             }
         }
 
         struct Degenerate;
 
-        impl OctreeBuilder<Dummy> for Degenerate {
+        impl OctreeSource<Dummy> for Degenerate {
             fn is_empty(&mut self, _tag: Quant) -> bool {
                 true
             }
@@ -591,12 +812,12 @@ mod tests {
 
             fn place_leaf(&mut self, tag: Quant) -> Dummy {
                 assert_eq!(tag, Quant::root());
-                Dummy
+                Dummy(0)
             }
         }
 
-        let octree = InlineOctree::build(&mut Degenerate);
-        assert_eq!(octree.nodes.as_slice(), &[InlineLeaf::new(Dummy).into()]);
+        let octree = InlineOctree::build_scalar(&mut Degenerate);
+        assert_eq!(octree.nodes.as_slice(), &[InlineLeaf::new(Dummy(0)).into()]);
     }
 
     #[test]
@@ -606,7 +827,7 @@ mod tests {
 
         struct Uniform;
 
-        impl OctreeBuilder<Quant> for Uniform {
+        impl OctreeSource<Quant> for Uniform {
             fn is_empty(&mut self, _tag: Quant) -> bool {
                 false
             }
@@ -620,7 +841,7 @@ mod tests {
             }
         }
 
-        let octree = InlineOctree::build(&mut Uniform);
+        let octree = InlineOctree::build_scalar(&mut Uniform);
         let mut leaves = HashSet::new();
 
         for node in octree.nodes {
@@ -642,7 +863,7 @@ mod tests {
 
         struct Uniform;
 
-        impl OctreeBuilder<Quant> for Uniform {
+        impl OctreeSource<Quant> for Uniform {
             fn is_empty(&mut self, _tag: Quant) -> bool {
                 false
             }
@@ -656,10 +877,118 @@ mod tests {
             }
         }
 
-        let octree = InlineOctree::build(&mut Uniform);
+        let octree = InlineOctree::build_scalar(&mut Uniform);
         let root = octree.nodes[0].as_branch().unwrap();
 
-        for which in ChildIndex::enumerate() {
+        for which in ChildIndex::ALL {
+            let child = octree[root.child(which).unwrap()];
+
+            assert_eq!(
+                child.as_leaf().unwrap().get(),
+                Quant::root().child(which).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn test_octree_degenerate_simd() {
+        #[allow(dead_code)]
+        #[derive(Copy, Clone)]
+        struct Dummy(u32);
+
+        impl Payload for Dummy {
+            fn into_bits(self) -> u31 {
+                u31::new(67)
+            }
+
+            unsafe fn from_bits(bits: u31) -> Self {
+                assert_eq!(bits, u31::new(67));
+                Dummy(0)
+            }
+        }
+
+        struct Degenerate;
+
+        impl OctreeSource<Dummy> for Degenerate {
+            fn is_empty(&mut self, _tag: Quant) -> bool {
+                true
+            }
+
+            fn is_leaf(&mut self, _: Quant) -> bool {
+                true
+            }
+
+            fn place_leaf(&mut self, tag: Quant) -> Dummy {
+                assert_eq!(tag, Quant::root());
+                Dummy(0)
+            }
+        }
+
+        let octree = dispatch!(Level::new(), simd => InlineOctree::build_s(simd, &mut Degenerate));
+        assert_eq!(octree.nodes.as_slice(), &[InlineLeaf::new(Dummy(0)).into()]);
+    }
+
+    #[test]
+    fn test_octree_uniform_simd() {
+        use crate::quant::Quant;
+        use std::collections::HashSet;
+
+        struct Uniform;
+
+        impl OctreeSource<Quant> for Uniform {
+            fn is_empty(&mut self, _tag: Quant) -> bool {
+                false
+            }
+
+            fn is_leaf(&mut self, tag: Quant) -> bool {
+                tag.level() == 4
+            }
+
+            fn place_leaf(&mut self, tag: Quant) -> Quant {
+                tag
+            }
+        }
+
+        let octree = dispatch!(Level::new(), simd => InlineOctree::build_s(simd, &mut Uniform));
+        let mut leaves = HashSet::new();
+
+        for node in octree.nodes {
+            if node.is_leaf() {
+                leaves.insert(node.as_leaf().unwrap());
+            }
+        }
+
+        assert_eq!(leaves.len(), 4096);
+
+        for leaf in &leaves {
+            assert_eq!(leaf.get().level(), 4);
+        }
+    }
+
+    #[test]
+    fn test_octree_child_simd() {
+        use crate::quant::Quant;
+
+        struct Uniform;
+
+        impl OctreeSource<Quant> for Uniform {
+            fn is_empty(&mut self, _tag: Quant) -> bool {
+                false
+            }
+
+            fn is_leaf(&mut self, tag: Quant) -> bool {
+                tag.level() == 1
+            }
+
+            fn place_leaf(&mut self, tag: Quant) -> Quant {
+                tag
+            }
+        }
+
+        let octree = dispatch!(Level::new(), simd => InlineOctree::build_s(simd, &mut Uniform));
+        let root = octree.nodes[0].as_branch().unwrap();
+
+        for which in ChildIndex::ALL {
             let child = octree[root.child(which).unwrap()];
 
             assert_eq!(
