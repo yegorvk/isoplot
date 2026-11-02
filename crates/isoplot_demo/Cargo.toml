@@ -6,7 +6,7 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
-isoplot-eval.workspace = true
+isoplot-expr.workspace = true
 isoplot-math.workspace = true
 isoplot-mesh.workspace = true
 bytemuck = "1.25"
@@ -32,4 +32,4 @@ version = "*"
 features = ["max_level_debug", "release_max_level_warn"]
 
 [features]
-default = ["isoplot-eval/default-cranelift"]
+default = ["isoplot-expr/default-cranelift"]

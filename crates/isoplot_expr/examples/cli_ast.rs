@@ -1,6 +1,5 @@
+use isoplot_expr::{Diagnostic, ProgramDesc, dump_ast};
 use std::{env, process::ExitCode};
-
-use isoplot_eval::{Diagnostic, ProgramDesc, dump_ast};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();

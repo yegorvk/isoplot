@@ -1,6 +1,6 @@
 use std::array;
 
-use isoplot_eval::{
+use isoplot_expr::{
     Bounds, CompileError, DefaultBackend, Diagnostic, Evaluator, Gradient, Instance, Interval,
     Program, ProgramDesc,
 };

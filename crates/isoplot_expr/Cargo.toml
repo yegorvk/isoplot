@@ -1,5 +1,5 @@
 [package]
-name = "isoplot-eval"
+name = "isoplot-expr"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true

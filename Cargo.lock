@@ -3428,14 +3428,14 @@ dependencies = [
  "bevy",
  "bytemuck",
  "dashmap",
- "isoplot-eval",
+ "isoplot-expr",
  "isoplot-math",
  "isoplot-mesh",
  "log",
 ]
 
 [[package]]
-name = "isoplot-eval"
+name = "isoplot-expr"
 version = "0.1.0"
 dependencies = [
  "bytemuck",

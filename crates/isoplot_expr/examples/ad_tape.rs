@@ -1,4 +1,4 @@
-use isoplot_eval::{Program, ProgramDesc};
+use isoplot_expr::{Program, ProgramDesc};
 
 fn main() {
     let program: Program<[f32; 3], f32> = Program::compile(
