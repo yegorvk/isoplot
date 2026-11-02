@@ -3440,6 +3440,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "cranelift",
+ "isoplot-tape",
  "logos",
  "thiserror 2.0.21",
 ]
@@ -3465,6 +3466,10 @@ dependencies = [
  "fearless_simd_macros",
  "isoplot-math",
 ]
+
+[[package]]
+name = "isoplot-tape"
+version = "0.1.0"
 
 [[package]]
 name = "itertools"

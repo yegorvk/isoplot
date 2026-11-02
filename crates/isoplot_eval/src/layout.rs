@@ -3,7 +3,7 @@ use std::{iter, slice};
 use bytemuck::{Pod, Zeroable};
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub enum ValueType {
+pub enum SchemaType {
     I32,
     F32,
 }
@@ -11,11 +11,11 @@ pub enum ValueType {
 #[derive(Copy, Clone)]
 pub struct TypedValue {
     value: RawValue,
-    ty: ValueType,
+    ty: SchemaType,
 }
 
 impl TypedValue {
-    pub(crate) fn ty(&self) -> ValueType {
+    pub(crate) fn ty(&self) -> SchemaType {
         self.ty
     }
 
@@ -28,7 +28,7 @@ impl From<i32> for TypedValue {
     fn from(value: i32) -> Self {
         Self {
             value: RawValue::from_i32(value),
-            ty: ValueType::I32,
+            ty: SchemaType::I32,
         }
     }
 }
@@ -37,7 +37,7 @@ impl From<f32> for TypedValue {
     fn from(value: f32) -> Self {
         Self {
             value: RawValue::from_f32(value),
-            ty: ValueType::F32,
+            ty: SchemaType::F32,
         }
     }
 }
@@ -76,19 +76,19 @@ impl RawValue {
 
 /// Types that can be safely transmuted into `RawValue`.
 trait TransmuteIntoValue: Pod + Zeroable {
-    const TYPE: ValueType;
+    const TYPE: SchemaType;
 }
 
 impl TransmuteIntoValue for i32 {
-    const TYPE: ValueType = ValueType::I32;
+    const TYPE: SchemaType = SchemaType::I32;
 }
 
 impl TransmuteIntoValue for f32 {
-    const TYPE: ValueType = ValueType::F32;
+    const TYPE: SchemaType = SchemaType::F32;
 }
 
 mod private {
-    use super::ValueType;
+    use super::SchemaType;
     use bytemuck::{Pod, Zeroable};
 
     /// Plain data made of exactly `LEN` consecutive `RawValue`s.
@@ -96,7 +96,7 @@ mod private {
     pub trait Vector: Pod + Zeroable {
         type Scalar: Vector;
         const LEN: usize;
-        fn types() -> impl Iterator<Item = ValueType>;
+        fn types() -> impl Iterator<Item = SchemaType>;
     }
 }
 
@@ -109,7 +109,7 @@ impl<T: TransmuteIntoValue> Vector for T {
     type Scalar = T;
     const LEN: usize = 1;
 
-    fn types() -> impl Iterator<Item = ValueType> {
+    fn types() -> impl Iterator<Item = SchemaType> {
         iter::once(T::TYPE)
     }
 }
@@ -118,7 +118,7 @@ impl<T: Vector, const N: usize> Vector for [T; N] {
     type Scalar = T::Scalar;
     const LEN: usize = N * T::LEN;
 
-    fn types() -> impl Iterator<Item = ValueType> {
+    fn types() -> impl Iterator<Item = SchemaType> {
         (0..N).flat_map(|_| T::types())
     }
 }

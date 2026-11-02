@@ -5,10 +5,8 @@ mod cranelift;
 
 use std::marker::PhantomData;
 
-use crate::{
-    layout::{Layout, RawValue, VectorExt},
-    tape::Tape,
-};
+use crate::layout::{Layout, RawValue, VectorExt};
+use isoplot_tape::Tape;
 
 mod private {
     use super::{Layout, RawValue, Tape};

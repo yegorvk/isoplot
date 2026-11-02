@@ -3,11 +3,8 @@ use std::{
     sync::Arc,
 };
 
-use crate::{
-    MIN_F32_MAGNITUDE,
-    layout::RawValue,
-    tape::{Instr, Tape, ValueId},
-};
+use crate::{MIN_F32_MAGNITUDE, layout::RawValue};
+use isoplot_tape::{Instr, Tape, ValueId};
 
 fn ensure_magnitude(x: f32) -> f32 {
     x.abs().max(MIN_F32_MAGNITUDE).copysign(x)
@@ -63,7 +60,7 @@ impl Evaluator {
         let mut buf = self.buf.borrow_mut();
         buf[..num_args].copy_from_slice(args);
 
-        for r in self.tape.instrs() {
+        for r in self.tape.iter_ref() {
             let v_i32 = |id: ValueId<i32>| buf[id.index()].as_i32();
             let v_bool = |id: ValueId<bool>| buf[id.index()].as_bool();
             let v_f32 = |id: ValueId<f32>| buf[id.index()].as_f32();
@@ -150,7 +147,8 @@ impl Evaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tape::Type;
+
+    use isoplot_tape::ValueType;
 
     fn eval(evaluator: &Evaluator, args: &[f32]) -> f32 {
         let mut output = [RawValue::ZERO];
@@ -160,7 +158,7 @@ mod tests {
 
     #[test]
     fn f32_ops() {
-        let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32, ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let y = b.arg(1);
         let sum = b.f32_add(x, y);
@@ -183,7 +181,7 @@ mod tests {
 
     #[test]
     fn f32_fn_calls() {
-        let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32, ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let y = b.arg(1);
         let sin = b.f32_sin(x);
@@ -218,7 +216,7 @@ mod tests {
 
     #[test]
     fn i32_ops() {
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let three = b.i32_const(3);
         let two = b.i32_const(2);
@@ -238,7 +236,7 @@ mod tests {
 
     #[test]
     fn f32_div_clamped() {
-        let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32, ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let y = b.arg(1);
         b.f32_div(x, y);
@@ -254,7 +252,7 @@ mod tests {
 
     #[test]
     fn f32_sign() {
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         b.f32_sign(x);
         let tape = b.build().unwrap();
@@ -269,7 +267,7 @@ mod tests {
     #[test]
     fn f32_select() {
         // f = if 0 < x && x < y { x } else { y }
-        let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32, ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let y = b.arg(1);
         let zero = b.f32_const(0.0);
@@ -287,7 +285,7 @@ mod tests {
 
     #[test]
     fn bool_i32_ops() {
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let two = b.i32_const(2);
         let three = b.i32_const(3);
@@ -312,7 +310,10 @@ mod tests {
 
     #[test]
     fn multi_results() {
-        let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32; 3]);
+        let mut b = Tape::builder(
+            vec![ValueType::F32, ValueType::F32],
+            vec![ValueType::F32; 3],
+        );
         let x = b.arg(0);
         let y = b.arg(1);
         b.f32_add(x, y);

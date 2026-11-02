@@ -1,14 +1,15 @@
 use std::marker::PhantomData;
 use thiserror::Error;
 
+use isoplot_tape::{Tape, ValueType};
+
 use crate::{
     autodiff,
     backend::{Backend, Instance},
     diag,
-    frontend::{Bindings, ParseError, Parsed, ValidateError, lower_type, parse},
+    frontend::{Bindings, ParseError, Parsed, ValidateError, parse, translate_type},
     interval,
     layout::{Layout, TypedValue},
-    tape::{Tape, Type},
 };
 
 #[derive(Error, Debug)]
@@ -110,8 +111,8 @@ impl<Args: Layout, Ret: Layout> Program<Args, Ret> {
     }
 }
 
-fn vector_types<T: Layout>() -> Vec<Type> {
-    T::types().map(lower_type).collect()
+fn vector_types<T: Layout>() -> Vec<ValueType> {
+    T::types().map(translate_type).collect()
 }
 
 pub fn dump_ast<Args: Layout>(

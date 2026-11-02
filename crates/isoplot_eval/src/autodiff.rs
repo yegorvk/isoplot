@@ -1,11 +1,11 @@
+use bytemuck::{Pod, Zeroable};
 use std::fmt::{self, Debug, Formatter};
 
-use bytemuck::{Pod, Zeroable};
+use isoplot_tape::{Inlined, Instr, NewValueId, Tape, TapeBuilder, ValueId, ValueType};
 
 use crate::{
-    layout::{Layout, ValueType, Vector},
+    layout::{Layout, SchemaType, Vector},
     program::Program,
-    tape::{Inlined, Instr, NewId, Tape, TapeBuilder, Type, ValueId},
 };
 
 /// Value of a scalar function together with its gradient
@@ -46,7 +46,7 @@ impl<V: Layout> Vector for Gradient<V> {
     const LEN: usize = <V::Scalar as Vector>::LEN + V::LEN;
     type Scalar = V::Scalar;
 
-    fn types() -> impl Iterator<Item = ValueType> {
+    fn types() -> impl Iterator<Item = SchemaType> {
         V::Scalar::types().chain(V::types())
     }
 }
@@ -61,13 +61,13 @@ struct Autodiff<'a> {
     source: &'a Tape,
     inlined: Inlined<'a>,
     builder: TapeBuilder,
-    adjoints: Vec<Option<NewId<f32>>>,
+    adjoints: Vec<Option<NewValueId<f32>>>,
 }
 
 impl<'a> Autodiff<'a> {
     fn new(source: &'a Tape) -> Self {
         assert!(
-            source.arg_types().iter().all(|&ty| ty == Type::F32),
+            source.arg_types().iter().all(|&ty| ty == ValueType::F32),
             "autodiff arguments must be f32"
         );
 
@@ -80,7 +80,10 @@ impl<'a> Autodiff<'a> {
         let num_args = source.num_args();
         let num_values = num_args + source.instrs().len();
 
-        let mut builder = Tape::builder(vec![Type::F32; num_args], vec![Type::F32; 1 + num_args]);
+        let mut builder = Tape::builder(
+            vec![ValueType::F32; num_args],
+            vec![ValueType::F32; 1 + num_args],
+        );
         let inlined = builder.extend(source);
 
         Self {
@@ -98,7 +101,7 @@ impl<'a> Autodiff<'a> {
         let seed = self.builder.f32_const(1.0);
         *self.adjoints.last_mut().unwrap() = Some(seed);
 
-        for r in self.source.instrs().rev() {
+        for r in self.source.iter_ref().rev() {
             let Some(w_bar) = self.adjoints[r.index()] else {
                 continue;
             };
@@ -119,7 +122,7 @@ impl<'a> Autodiff<'a> {
         self.builder.build().unwrap()
     }
 
-    fn propagate(&mut self, instr: Instr, w: NewId<f32>, w_bar: NewId<f32>) {
+    fn propagate(&mut self, instr: Instr, w: NewValueId<f32>, w_bar: NewValueId<f32>) {
         match instr {
             Instr::I32Const(_)
             | Instr::BoolConst(_)
@@ -296,7 +299,7 @@ impl<'a> Autodiff<'a> {
         }
     }
 
-    fn acc(&mut self, target: ValueId<f32>, contrib: NewId<f32>) {
+    fn acc(&mut self, target: ValueId<f32>, contrib: NewValueId<f32>) {
         let slot = target.index();
         self.adjoints[slot] = Some(match self.adjoints[slot] {
             None => contrib,
@@ -328,7 +331,7 @@ mod tests {
     #[test]
     fn polynomial() {
         // f = x*y + x
-        let mut b = Tape::builder(vec![Type::F32; 2], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32; 2], vec![ValueType::F32]);
         let x = b.arg(0);
         let y = b.arg(1);
         let xy = b.f32_mul(x, y);
@@ -342,7 +345,7 @@ mod tests {
     #[test]
     fn shared_operand() {
         // f = x*x
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         b.f32_mul(x, x);
         let tape = b.build().unwrap();
@@ -354,7 +357,7 @@ mod tests {
     #[test]
     fn chain_rule() {
         // f = sin(x) * exp(x)
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let sin = b.f32_sin(x);
         let exp = b.f32_exp(x);
@@ -369,7 +372,7 @@ mod tests {
     #[test]
     fn min_selects_branch() {
         // f = min(x, y*y)
-        let mut b = Tape::builder(vec![Type::F32; 2], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32; 2], vec![ValueType::F32]);
         let x = b.arg(0);
         let y = b.arg(1);
         let yy = b.f32_mul(y, y);
@@ -389,7 +392,7 @@ mod tests {
     #[test]
     fn equal_operand_min_max() {
         // f = max(x, x)
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         b.f32_max(x, x);
         let tape = b.build().unwrap();
@@ -399,7 +402,7 @@ mod tests {
     #[test]
     fn powi_and_abs() {
         // f = |x^3|
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let n = b.i32_const(3);
         let cube = b.f32_powi(x, n);
@@ -417,7 +420,7 @@ mod tests {
     #[test]
     fn select_gradient() {
         // f = if x < 2 { x*x } else { x }
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let two = b.f32_const(2.0);
         let lt = b.f32_lt(x, two);
@@ -432,7 +435,7 @@ mod tests {
     #[test]
     fn unused_argument() {
         // f = y, x unused
-        let mut b = Tape::builder(vec![Type::F32; 2], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32; 2], vec![ValueType::F32]);
         let y = b.arg(1);
         b.copy_f32(y);
         let tape = b.build().unwrap();

@@ -4,13 +4,13 @@ use std::{
 };
 
 use bytemuck::{Pod, Zeroable};
+use isoplot_tape::{Instr, NewValueId, Tape, TapeBuilder, ValueId, ValueType};
 
 use crate::{
     MIN_F32_MAGNITUDE,
     autodiff::Gradient,
-    layout::{ValueType, Vector},
+    layout::{SchemaType, Vector},
     program::Program,
-    tape::{Instr, NewId, Tape, TapeBuilder, Type, ValueId},
 };
 
 /// A closed and bounded `f32` interval
@@ -54,8 +54,8 @@ impl Vector for Interval {
     type Scalar = Interval;
     const LEN: usize = 2;
 
-    fn types() -> impl Iterator<Item = ValueType> {
-        iter::repeat_n(ValueType::F32, Self::LEN)
+    fn types() -> impl Iterator<Item = SchemaType> {
+        iter::repeat_n(SchemaType::F32, Self::LEN)
     }
 }
 
@@ -93,8 +93,8 @@ impl Vector for Bounds {
     type Scalar = Bounds;
     const LEN: usize = 3;
 
-    fn types() -> impl Iterator<Item = ValueType> {
-        [ValueType::F32, ValueType::F32, ValueType::I32].into_iter()
+    fn types() -> impl Iterator<Item = SchemaType> {
+        [SchemaType::F32, SchemaType::F32, SchemaType::I32].into_iter()
     }
 }
 
@@ -141,22 +141,22 @@ fn translate(source: &Tape) -> Tape {
 
 #[derive(Copy, Clone)]
 struct F32Range {
-    lo: NewId<f32>,
-    hi: NewId<f32>,
+    lo: NewValueId<f32>,
+    hi: NewValueId<f32>,
 }
 
 impl F32Range {
-    fn new(lo: NewId<f32>, hi: NewId<f32>) -> Self {
+    fn new(lo: NewValueId<f32>, hi: NewValueId<f32>) -> Self {
         Self { lo, hi }
     }
 
-    fn point(v: NewId<f32>) -> Self {
+    fn point(v: NewValueId<f32>) -> Self {
         Self { lo: v, hi: v }
     }
 
     fn map<F>(&self, mut f: F) -> Self
     where
-        F: FnMut(NewId<f32>) -> NewId<f32>,
+        F: FnMut(NewValueId<f32>) -> NewValueId<f32>,
     {
         Self {
             lo: f(self.lo),
@@ -164,30 +164,30 @@ impl F32Range {
         }
     }
 
-    fn values(&self) -> [NewId<f32>; 2] {
+    fn values(&self) -> [NewValueId<f32>; 2] {
         [self.lo, self.hi]
     }
 }
 
 #[derive(Copy, Clone)]
 struct BoolRange {
-    all: NewId<bool>,
-    any: NewId<bool>,
+    all: NewValueId<bool>,
+    any: NewValueId<bool>,
 }
 
 impl BoolRange {
-    fn point(v: NewId<bool>) -> Self {
+    fn point(v: NewValueId<bool>) -> Self {
         Self { all: v, any: v }
     }
 
-    fn definite(self) -> Option<NewId<bool>> {
+    fn definite(self) -> Option<NewValueId<bool>> {
         (self.all == self.any).then_some(self.all)
     }
 }
 
 #[derive(Copy, Clone)]
 enum Value {
-    I32(NewId<i32>),
+    I32(NewValueId<i32>),
     Bool(BoolRange),
     F32(F32Range),
 }
@@ -208,29 +208,29 @@ struct Translator<'a> {
     source: &'a Tape,
     builder: TapeBuilder,
     values: Vec<Value>,
-    poison: Vec<NewId<bool>>,
-    clean: NewId<bool>,
+    poison: Vec<NewValueId<bool>>,
+    clean: NewValueId<bool>,
 }
 
 impl<'a> Translator<'a> {
     fn new(source: &'a Tape) -> Self {
         assert!(
-            source.arg_types().iter().all(|&ty| ty == Type::F32),
+            source.arg_types().iter().all(|&ty| ty == ValueType::F32),
             "interval arguments must be f32"
         );
 
         assert!(
-            source.result_types().iter().all(|&ty| ty == Type::F32),
+            source.result_types().iter().all(|&ty| ty == ValueType::F32),
             "interval results must be f32"
         );
 
         let num_args = source.num_args();
 
         let result_types = (0..source.num_results())
-            .flat_map(|_| [Type::F32, Type::F32, Type::I32])
+            .flat_map(|_| [ValueType::F32, ValueType::F32, ValueType::I32])
             .collect();
 
-        let mut builder = Tape::builder(vec![Type::F32; 2 * num_args], result_types);
+        let mut builder = Tape::builder(vec![ValueType::F32; 2 * num_args], result_types);
 
         let values = (0..num_args)
             .map(|i| Value::F32(F32Range::new(builder.arg(2 * i), builder.arg(2 * i + 1))))
@@ -248,8 +248,7 @@ impl<'a> Translator<'a> {
     }
 
     fn run(mut self) -> Tape {
-        for r in self.source.instrs() {
-            let instr = r.instr();
+        for instr in self.source.instrs().iter().copied() {
             let mut inherited = self.clean;
             for source in instr.sources() {
                 inherited = self.builder.or(inherited, self.poison[source.index()]);
@@ -276,7 +275,11 @@ impl<'a> Translator<'a> {
         self.builder.build().unwrap()
     }
 
-    fn translate(&mut self, instr: Instr, inherited: NewId<bool>) -> (Value, NewId<bool>) {
+    fn translate(
+        &mut self,
+        instr: Instr,
+        inherited: NewValueId<bool>,
+    ) -> (Value, NewValueId<bool>) {
         let value = match instr {
             Instr::F32Div(lhs, rhs) => {
                 let (x, y) = (self.f32(lhs), self.f32(rhs));
@@ -628,7 +631,7 @@ impl<'a> Translator<'a> {
         (value, inherited)
     }
 
-    fn i32(&self, id: ValueId<i32>) -> NewId<i32> {
+    fn i32(&self, id: ValueId<i32>) -> NewValueId<i32> {
         match self.values[id.index()] {
             Value::I32(v) => v,
             _ => unreachable!("expected an i32 value"),
@@ -649,18 +652,18 @@ impl<'a> Translator<'a> {
         }
     }
 
-    fn f32_hull(&mut self, a: NewId<f32>, b: NewId<f32>) -> F32Range {
+    fn f32_hull(&mut self, a: NewValueId<f32>, b: NewValueId<f32>) -> F32Range {
         F32Range::new(self.builder.f32_min(a, b), self.builder.f32_max(a, b))
     }
 
-    fn min_of(&mut self, values: impl IntoIterator<Item = NewId<f32>>) -> NewId<f32> {
+    fn min_of(&mut self, values: impl IntoIterator<Item = NewValueId<f32>>) -> NewValueId<f32> {
         values
             .into_iter()
             .reduce(|x, y| self.builder.f32_min(x, y))
             .unwrap()
     }
 
-    fn max_of(&mut self, values: impl IntoIterator<Item = NewId<f32>>) -> NewId<f32> {
+    fn max_of(&mut self, values: impl IntoIterator<Item = NewValueId<f32>>) -> NewValueId<f32> {
         values
             .into_iter()
             .reduce(|x, y| self.builder.f32_max(x, y))
@@ -699,19 +702,19 @@ impl<'a> Translator<'a> {
         }
     }
 
-    fn contains_zero(&mut self, x: F32Range) -> NewId<bool> {
+    fn contains_zero(&mut self, x: F32Range) -> NewValueId<bool> {
         let zero = self.builder.f32_const(0.0);
         let lo = self.builder.f32_le(x.lo, zero);
         let hi = self.builder.f32_ge(x.hi, zero);
         self.builder.and(lo, hi)
     }
 
-    fn below_min_magnitude(&mut self, x: F32Range) -> NewId<bool> {
+    fn below_min_magnitude(&mut self, x: F32Range) -> NewValueId<bool> {
         let min = self.builder.f32_const(MIN_F32_MAGNITUDE);
         self.builder.f32_lt(x.lo, min)
     }
 
-    fn include_zero_if(&mut self, x: F32Range, cond: NewId<bool>) -> F32Range {
+    fn include_zero_if(&mut self, x: F32Range, cond: NewValueId<bool>) -> F32Range {
         let zero = self.builder.f32_const(0.0);
         let extended = F32Range::new(
             self.builder.f32_min(x.lo, zero),
@@ -739,7 +742,7 @@ impl<'a> Translator<'a> {
 
     fn select_range(
         &mut self,
-        cond: NewId<bool>,
+        cond: NewValueId<bool>,
         if_true: F32Range,
         if_false: F32Range,
     ) -> F32Range {
@@ -749,14 +752,19 @@ impl<'a> Translator<'a> {
         )
     }
 
-    fn period_index(&mut self, v: NewId<f32>, offset: NewId<f32>, scale: NewId<f32>) -> NewId<f32> {
+    fn period_index(
+        &mut self,
+        v: NewValueId<f32>,
+        offset: NewValueId<f32>,
+        scale: NewValueId<f32>,
+    ) -> NewValueId<f32> {
         let shifted = self.builder.f32_sub(v, offset);
         let scaled = self.builder.f32_mul(shifted, scale);
         self.builder.f32_floor(scaled)
     }
 
     /// Returns whether the range contains a point equal to `v` modulo `period`.
-    fn contains_modulo(&mut self, x: F32Range, v: f32, period: f32) -> NewId<bool> {
+    fn contains_modulo(&mut self, x: F32Range, v: f32, period: f32) -> NewValueId<bool> {
         let offset = self.builder.f32_const(v);
         let scale = self.builder.f32_const(period.recip());
         let first = self.period_index(x.lo, offset, scale);
@@ -812,22 +820,24 @@ mod tests {
         Interval::new(min, max)
     }
 
-    fn unary(op: fn(&mut TapeBuilder, NewId<f32>) -> NewId<f32>) -> Tape {
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+    fn unary(op: fn(&mut TapeBuilder, NewValueId<f32>) -> NewValueId<f32>) -> Tape {
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         op(&mut b, x);
         b.build().unwrap()
     }
 
-    fn binary(op: fn(&mut TapeBuilder, NewId<f32>, NewId<f32>) -> NewId<f32>) -> Tape {
-        let mut b = Tape::builder(vec![Type::F32; 2], vec![Type::F32]);
+    fn binary(
+        op: fn(&mut TapeBuilder, NewValueId<f32>, NewValueId<f32>) -> NewValueId<f32>,
+    ) -> Tape {
+        let mut b = Tape::builder(vec![ValueType::F32; 2], vec![ValueType::F32]);
         let (x, y) = (b.arg(0), b.arg(1));
         op(&mut b, x, y);
         b.build().unwrap()
     }
 
     fn powi(n: i32) -> Tape {
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let n = b.i32_const(n);
         b.f32_powi(x, n);
@@ -1012,14 +1022,14 @@ mod tests {
     #[test]
     fn results_are_trailing_instructions() {
         // Two results: nothing but copies and flag conversions may trail them.
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32; 2]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32; 2]);
         let x = b.arg(0);
         let one = b.f32_const(1.0);
         let a = b.f32_add(x, one);
         b.f32_add(a, one);
         let tape = translate(&b.build().unwrap());
 
-        let tail: Vec<_> = tape.instrs().rev().take(6).map(|r| r.instr()).collect();
+        let tail: Vec<_> = tape.instrs().iter().take(6).collect();
         for chunk in tail.chunks(3) {
             assert!(matches!(chunk[0], Instr::I32FromBool(_)), "{tail:?}");
             assert!(matches!(chunk[1], Instr::CopyF32(_)), "{tail:?}");
@@ -1030,7 +1040,7 @@ mod tests {
     #[test]
     fn poison_propagates() {
         // f = 1 / x + 1
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let one = b.f32_const(1.0);
         let recip = b.f32_div(one, x);
@@ -1044,7 +1054,7 @@ mod tests {
     #[test]
     fn poison_follows_decided_branch() {
         // f = if x < 0 { 1 / x } else { x }
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let zero = b.f32_const(0.0);
         let one = b.f32_const(1.0);
@@ -1062,7 +1072,7 @@ mod tests {
     #[test]
     fn poison_through_gradient() {
         // f = 1 / x
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let one = b.f32_const(1.0);
         b.f32_div(one, x);
@@ -1084,7 +1094,7 @@ mod tests {
     #[test]
     fn select() {
         // f = if x < y { x } else { y }
-        let mut b = Tape::builder(vec![Type::F32; 2], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32; 2], vec![ValueType::F32]);
         let (x, y) = (b.arg(0), b.arg(1));
         let lt = b.f32_lt(x, y);
         b.f32_sel(lt, x, y);
@@ -1110,7 +1120,7 @@ mod tests {
     #[test]
     fn definite_conditions() {
         // f = x * float(if 1 < 2 { 3 } else { 4 })
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let one = b.i32_const(1);
         let two = b.i32_const(2);
@@ -1128,7 +1138,7 @@ mod tests {
     #[test]
     fn mixed_i32() {
         // f = x * float(2 + 1)
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let two = b.i32_const(2);
         let one = b.i32_const(1);

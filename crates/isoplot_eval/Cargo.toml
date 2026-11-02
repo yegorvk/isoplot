@@ -6,6 +6,7 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
+isoplot-tape.workspace = true
 logos = "0.16"
 thiserror.workspace = true
 

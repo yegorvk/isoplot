@@ -59,13 +59,18 @@ pub(super) struct AstBuilder<'b> {
 }
 
 impl<'b> AstBuilder<'b> {
-    pub(super) fn un_op(&mut self, op_span: Span, op: UnOp, operand: NewId<'b>) -> NewId<'b> {
+    pub(super) fn un_op(&mut self, op_span: Span, op: UnOp, operand: NewAstId<'b>) -> NewAstId<'b> {
         let span = op_span.chain(operand.node.span);
         let operand = self.consume(operand);
         self.create(span, ExprKind::UnOp(op, operand))
     }
 
-    pub(super) fn bin_op(&mut self, op: BinOp, lhs: NewId<'b>, rhs: NewId<'b>) -> NewId<'b> {
+    pub(super) fn bin_op(
+        &mut self,
+        op: BinOp,
+        lhs: NewAstId<'b>,
+        rhs: NewAstId<'b>,
+    ) -> NewAstId<'b> {
         let span = lhs.node.span.chain(rhs.node.span);
         let (lhs, rhs) = (self.consume(lhs), self.consume(rhs));
         self.create(span, ExprKind::BinOp(op, lhs, rhs))
@@ -75,8 +80,8 @@ impl<'b> AstBuilder<'b> {
         &mut self,
         mut span: Span,
         intrinsic: Intrinsic,
-        args: impl IntoIterator<Item = NewId<'b>>,
-    ) -> NewId<'b> {
+        args: impl IntoIterator<Item = NewAstId<'b>>,
+    ) -> NewAstId<'b> {
         let start = self.arena.nodes.len() as u32;
 
         for arg in args {
@@ -91,15 +96,15 @@ impl<'b> AstBuilder<'b> {
         )
     }
 
-    pub(super) fn lit(&mut self, span: Span, value: Value) -> NewId<'b> {
+    pub(super) fn lit(&mut self, span: Span, value: Value) -> NewAstId<'b> {
         self.create(span, ExprKind::Lit(value))
     }
 
-    pub(super) fn var(&mut self, span: Span, name: Symbol) -> NewId<'b> {
+    pub(super) fn var(&mut self, span: Span, name: Symbol) -> NewAstId<'b> {
         self.create(span, ExprKind::Var(name))
     }
 
-    pub(super) fn error(&mut self, span: Span, inner: Option<NewId<'b>>) -> NewId<'b> {
+    pub(super) fn error(&mut self, span: Span, inner: Option<NewAstId<'b>>) -> NewAstId<'b> {
         match inner {
             Some(inner) => {
                 let span = inner.node.span.chain(span);
@@ -110,14 +115,14 @@ impl<'b> AstBuilder<'b> {
         }
     }
 
-    fn consume(&mut self, id: NewId<'b>) -> ExprId {
+    fn consume(&mut self, id: NewAstId<'b>) -> ExprId {
         self.isolated -= 1;
         self.arena.insert(id.node)
     }
 
-    fn create(&mut self, span: Span, kind: ExprKind) -> NewId<'b> {
+    fn create(&mut self, span: Span, kind: ExprKind) -> NewAstId<'b> {
         self.isolated += 1;
-        NewId {
+        NewAstId {
             node: Expr { kind, span },
             _brand: PhantomData,
         }
@@ -125,7 +130,7 @@ impl<'b> AstBuilder<'b> {
 }
 
 #[must_use]
-pub(super) struct NewId<'b> {
+pub(super) struct NewAstId<'b> {
     node: Expr,
     _brand: Brand<'b>,
 }
@@ -137,7 +142,7 @@ pub(super) struct Ast {
 impl Ast {
     pub(super) fn build<F>(f: F) -> Self
     where
-        F: for<'b> FnOnce(&mut AstBuilder<'b>) -> NewId<'b>,
+        F: for<'b> FnOnce(&mut AstBuilder<'b>) -> NewAstId<'b>,
     {
         let mut builder = AstBuilder {
             arena: Arena::default(),

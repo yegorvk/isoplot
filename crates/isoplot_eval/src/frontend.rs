@@ -4,17 +4,19 @@ mod pretty;
 mod symbol;
 mod token;
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, iter};
 
 use crate::{
     diag::Diagnostic,
-    layout::{Layout, TypedValue, ValueType},
-    tape::{NewId, Tape, TapeBuilder, Type},
+    layout::{Layout, SchemaType, TypedValue},
 };
+use isoplot_tape::{NewValueId, Tape, TapeBuilder, ValueType};
 
-use ast::{Ast, BinOp, DenseMap, ExprId, Intrinsic, SparseMap, UnOp, Value, Visitor};
-use pretty::PrettyPrintAst;
-use symbol::{Interner, Symbol};
+use self::{
+    ast::{Ast, BinOp, DenseMap, ExprId, Intrinsic, SparseMap, UnOp, Value, Visitor},
+    pretty::PrettyPrintAst,
+    symbol::{Interner, Symbol},
+};
 
 #[derive(Debug)]
 pub(crate) struct ParseError {
@@ -95,7 +97,11 @@ impl Parsed {
 
         Ok(Validated {
             ast: &self.ast,
-            arg_types: bindings.args.iter().map(|&(_, ty)| ty).collect(),
+            arg_types: bindings
+                .args
+                .iter()
+                .map(|&(_, ty)| translate_type(ty))
+                .collect(),
             consts: bindings.consts.iter().map(|&(_, value)| value).collect(),
             vars,
             ty,
@@ -105,15 +111,15 @@ impl Parsed {
 
 pub(crate) struct Validated<'a> {
     ast: &'a Ast,
-    arg_types: Vec<Type>,
+    arg_types: Vec<ValueType>,
     consts: Vec<TypedValue>,
     vars: SparseMap<VarSlot>,
-    ty: DenseMap<Type>,
+    ty: DenseMap<ValueType>,
 }
 
 impl Validated<'_> {
     pub(crate) fn lower_to_ir(&self) -> Tape {
-        let mut builder = Tape::builder(self.arg_types.clone(), vec![Type::F32]);
+        let mut builder = Tape::builder(self.arg_types.clone(), vec![ValueType::F32]);
 
         let generator = Generator {
             vars: &self.vars,
@@ -181,7 +187,7 @@ impl Visitor for VarResolver<'_> {
         let name = self.interner.resolve(name).unwrap();
 
         if let Some(index) = self.bindings.args.iter().position(|&(var, _)| var == name) {
-            let ty = self.bindings.args[index].1;
+            let ty = translate_type(self.bindings.args[index].1);
             return Some(VarSlot::Arg(VarIndex(index as u32), ty));
         }
 
@@ -191,7 +197,7 @@ impl Visitor for VarResolver<'_> {
             .iter()
             .position(|&(var, _)| var == name)
         {
-            let ty = lower_type(self.bindings.consts[index].1.ty());
+            let ty = translate_type(self.bindings.consts[index].1.ty());
             return Some(VarSlot::Const(VarIndex(index as u32), ty));
         }
 
@@ -217,71 +223,71 @@ struct TypeChecker<'a> {
 }
 
 impl Visitor for TypeChecker<'_> {
-    type In<'a> = &'a Type;
-    type Out = Type;
+    type In<'a> = &'a ValueType;
+    type Out = ValueType;
 
-    fn un_op(&mut self, _id: ExprId, _op: UnOp, operand: &Type) -> Type {
+    fn un_op(&mut self, _id: ExprId, _op: UnOp, operand: &ValueType) -> ValueType {
         *operand
     }
 
-    fn bin_op(&mut self, _id: ExprId, op: BinOp, lhs: &Type, rhs: &Type) -> Type {
+    fn bin_op(&mut self, _id: ExprId, op: BinOp, lhs: &ValueType, rhs: &ValueType) -> ValueType {
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul => match (lhs, rhs) {
-                (Type::I32, Type::I32) => Type::I32,
-                _ => Type::F32,
+                (ValueType::I32, ValueType::I32) => ValueType::I32,
+                _ => ValueType::F32,
             },
-            BinOp::Div | BinOp::Pow => Type::F32,
+            BinOp::Div | BinOp::Pow => ValueType::F32,
         }
     }
 
-    fn intrinsic<'a, I>(&mut self, _id: ExprId, _kind: Intrinsic, _args: I) -> Type
+    fn intrinsic<'a, I>(&mut self, _id: ExprId, _kind: Intrinsic, _args: I) -> ValueType
     where
         I: ExactSizeIterator<Item = Self::In<'a>>,
     {
-        Type::F32
+        ValueType::F32
     }
 
-    fn var(&mut self, id: ExprId, _name: Symbol) -> Type {
+    fn var(&mut self, id: ExprId, _name: Symbol) -> ValueType {
         match self.vars.get(id) {
             Some(VarSlot::Const(_, ty) | VarSlot::Arg(_, ty)) => *ty,
-            None => Type::F32,
+            None => ValueType::F32,
         }
     }
 
-    fn lit(&mut self, _id: ExprId, value: Value) -> Type {
+    fn lit(&mut self, _id: ExprId, value: Value) -> ValueType {
         match value {
-            Value::I32(_) => Type::I32,
-            Value::F32(_) => Type::F32,
+            Value::I32(_) => ValueType::I32,
+            Value::F32(_) => ValueType::F32,
         }
     }
 
-    fn map_error(&mut self, _id: ExprId, inner: Option<&Type>) -> Type {
-        inner.copied().unwrap_or(Type::F32)
+    fn map_error(&mut self, _id: ExprId, inner: Option<&ValueType>) -> ValueType {
+        inner.copied().unwrap_or(ValueType::F32)
     }
 }
 
 struct Generator<'a> {
     vars: &'a SparseMap<VarSlot>,
     consts: &'a [TypedValue],
-    ty: &'a DenseMap<Type>,
+    ty: &'a DenseMap<ValueType>,
     builder: &'a mut TapeBuilder,
 }
 
 #[derive(Copy, Clone)]
 enum Operand {
-    I32(NewId<i32>),
-    F32(NewId<f32>),
+    I32(NewValueId<i32>),
+    F32(NewValueId<f32>),
 }
 
 impl Operand {
-    fn i32(self) -> NewId<i32> {
+    fn i32(self) -> NewValueId<i32> {
         match self {
             Operand::I32(value) => value,
             Operand::F32(_) => unreachable!("expected an i32 operand"),
         }
     }
 
-    fn promote(self, builder: &mut TapeBuilder) -> NewId<f32> {
+    fn promote(self, builder: &mut TapeBuilder) -> NewValueId<f32> {
         match self {
             Operand::I32(value) => builder.f32_from_i32(value),
             Operand::F32(value) => value,
@@ -296,12 +302,12 @@ impl Visitor for Generator<'_> {
     fn un_op(&mut self, id: ExprId, op: UnOp, operand: Self::In<'_>) -> Self::Out {
         match (op, self.ty[id]) {
             (UnOp::Plus, _) => operand,
-            (UnOp::Minus, Type::I32) => {
+            (UnOp::Minus, ValueType::I32) => {
                 let zero = self.builder.i32_const(0);
                 Operand::I32(self.builder.i32_sub(zero, operand.i32()))
             }
-            (UnOp::Minus, Type::Bool) => unreachable!(),
-            (UnOp::Minus, Type::F32) => {
+            (UnOp::Minus, ValueType::Bool) => unreachable!(),
+            (UnOp::Minus, ValueType::F32) => {
                 let operand = operand.promote(self.builder);
                 Operand::F32(self.builder.f32_neg(operand))
             }
@@ -310,11 +316,17 @@ impl Visitor for Generator<'_> {
 
     fn bin_op(&mut self, id: ExprId, op: BinOp, lhs: Self::In<'_>, rhs: Self::In<'_>) -> Self::Out {
         match (op, self.ty[id]) {
-            (BinOp::Add, Type::I32) => Operand::I32(self.builder.i32_add(lhs.i32(), rhs.i32())),
-            (BinOp::Sub, Type::I32) => Operand::I32(self.builder.i32_sub(lhs.i32(), rhs.i32())),
-            (BinOp::Mul, Type::I32) => Operand::I32(self.builder.i32_mul(lhs.i32(), rhs.i32())),
+            (BinOp::Add, ValueType::I32) => {
+                Operand::I32(self.builder.i32_add(lhs.i32(), rhs.i32()))
+            }
+            (BinOp::Sub, ValueType::I32) => {
+                Operand::I32(self.builder.i32_sub(lhs.i32(), rhs.i32()))
+            }
+            (BinOp::Mul, ValueType::I32) => {
+                Operand::I32(self.builder.i32_mul(lhs.i32(), rhs.i32()))
+            }
 
-            (BinOp::Pow, Type::F32) => {
+            (BinOp::Pow, ValueType::F32) => {
                 let base = lhs.promote(self.builder);
                 Operand::F32(match rhs {
                     Operand::I32(exp) => self.builder.f32_powi(base, exp),
@@ -322,7 +334,7 @@ impl Visitor for Generator<'_> {
                 })
             }
 
-            (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, Type::F32) => {
+            (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, ValueType::F32) => {
                 let (lhs, rhs) = (lhs.promote(self.builder), rhs.promote(self.builder));
                 Operand::F32(match op {
                     BinOp::Add => self.builder.f32_add(lhs, rhs),
@@ -333,7 +345,7 @@ impl Visitor for Generator<'_> {
                 })
             }
 
-            (BinOp::Div | BinOp::Pow, Type::I32) | (_, Type::Bool) => unreachable!(),
+            (BinOp::Div | BinOp::Pow, ValueType::I32) | (_, ValueType::Bool) => unreachable!(),
         }
     }
 
@@ -370,15 +382,15 @@ impl Visitor for Generator<'_> {
             VarSlot::Const(index, ty) => {
                 let value = self.consts[index.0 as usize].value();
                 match ty {
-                    Type::I32 => Operand::I32(self.builder.i32_const(value.as_i32())),
-                    Type::Bool => unreachable!(),
-                    Type::F32 => Operand::F32(self.builder.f32_const(value.as_f32())),
+                    ValueType::I32 => Operand::I32(self.builder.i32_const(value.as_i32())),
+                    ValueType::Bool => unreachable!(),
+                    ValueType::F32 => Operand::F32(self.builder.f32_const(value.as_f32())),
                 }
             }
             VarSlot::Arg(index, ty) => match ty {
-                Type::I32 => Operand::I32(self.builder.arg(index.0 as usize)),
-                Type::Bool => unreachable!(),
-                Type::F32 => Operand::F32(self.builder.arg(index.0 as usize)),
+                ValueType::I32 => Operand::I32(self.builder.arg(index.0 as usize)),
+                ValueType::Bool => unreachable!(),
+                ValueType::F32 => Operand::F32(self.builder.arg(index.0 as usize)),
             },
         }
     }
@@ -396,7 +408,7 @@ impl Visitor for Generator<'_> {
 }
 
 pub(crate) struct Bindings<'a> {
-    args: Vec<(&'a str, Type)>,
+    args: Vec<(&'a str, SchemaType)>,
     consts: &'a [(&'a str, TypedValue)],
 }
 
@@ -420,20 +432,16 @@ impl<'a> Bindings<'a> {
         }
 
         Self {
-            args: args
-                .iter()
-                .copied()
-                .zip(Args::types().map(lower_type))
-                .collect(),
+            args: iter::zip(args.iter().copied(), Args::types()).collect(),
             consts,
         }
     }
 }
 
-pub(crate) fn lower_type(ty: ValueType) -> Type {
+pub(crate) fn translate_type(ty: SchemaType) -> ValueType {
     match ty {
-        ValueType::I32 => Type::I32,
-        ValueType::F32 => Type::F32,
+        SchemaType::I32 => ValueType::I32,
+        SchemaType::F32 => ValueType::F32,
     }
 }
 
@@ -442,8 +450,8 @@ struct VarIndex(u32);
 
 #[derive(Copy, Clone, Debug)]
 enum VarSlot {
-    Const(VarIndex, Type),
-    Arg(VarIndex, Type),
+    Const(VarIndex, ValueType),
+    Arg(VarIndex, ValueType),
 }
 
 #[cfg(test)]

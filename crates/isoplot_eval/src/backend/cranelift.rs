@@ -1,20 +1,18 @@
-use std::{collections::HashMap, marker::PhantomData, mem, ops::Index, sync::Arc};
+use std::{collections::HashMap, marker::PhantomData, mem, sync::Arc};
 
-use cranelift::codegen::ir::{
-    AbiParam, FuncRef, InstBuilder, MemFlagsData, Signature, Type, Value,
-    condcodes::{FloatCC, IntCC},
-    types,
+use cranelift::{
+    codegen::ir::FuncRef,
+    jit::{JITBuilder, JITModule},
+    module::{FuncId, Linkage, Module, default_libcall_names},
+    native,
+    prelude::*,
 };
-use cranelift::codegen::settings::{self, Configurable};
-use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext};
-use cranelift::jit::{JITBuilder, JITModule};
-use cranelift::module::{FuncId, Linkage, Module, default_libcall_names};
-use cranelift::native;
+
+use isoplot_tape::{Instr, Tape};
 
 use crate::{
     MIN_F32_MAGNITUDE,
     layout::{RawValue, Vector},
-    tape::{Instr, Tape, ValueId, ValuePrimitive},
 };
 
 fn ensure_magnitude(x: f32) -> f32 {
@@ -194,14 +192,6 @@ fn declare_eval(module: &mut JITModule, sig: &mut Signature, multi: bool) -> Fun
         .unwrap()
 }
 
-impl<T: ValuePrimitive> Index<ValueId<T>> for [Value] {
-    type Output = Value;
-
-    fn index(&self, id: ValueId<T>) -> &Value {
-        &self[id.index()]
-    }
-}
-
 struct Translator<'a> {
     builder: FunctionBuilder<'a>,
     module: &'a mut JITModule,
@@ -226,8 +216,8 @@ impl Translator<'_> {
             );
         }
 
-        for r in tape.instrs() {
-            let result = self.translate_instr(r.instr(), &values);
+        for instr in tape.instrs() {
+            let result = self.translate_instr(*instr, &values);
             values.push(result);
         }
 
@@ -256,130 +246,173 @@ impl Translator<'_> {
             Instr::BoolConst(c) => self.builder.ins().iconst(types::I8, c as i64),
             Instr::F32Const(c) => self.builder.ins().f32const(c),
 
-            Instr::I32Add(lhs, rhs) => self.builder.ins().iadd(values[lhs], values[rhs]),
-            Instr::I32Sub(lhs, rhs) => self.builder.ins().isub(values[lhs], values[rhs]),
-            Instr::I32Mul(lhs, rhs) => self.builder.ins().imul(values[lhs], values[rhs]),
+            Instr::I32Add(lhs, rhs) => self
+                .builder
+                .ins()
+                .iadd(values[lhs.index()], values[rhs.index()]),
+            Instr::I32Sub(lhs, rhs) => self
+                .builder
+                .ins()
+                .isub(values[lhs.index()], values[rhs.index()]),
+            Instr::I32Mul(lhs, rhs) => self
+                .builder
+                .ins()
+                .imul(values[lhs.index()], values[rhs.index()]),
 
             Instr::I32Eq(lhs, rhs) => {
                 self.builder
                     .ins()
-                    .icmp(IntCC::Equal, values[lhs], values[rhs])
+                    .icmp(IntCC::Equal, values[lhs.index()], values[rhs.index()])
             }
             Instr::I32Ne(lhs, rhs) => {
                 self.builder
                     .ins()
-                    .icmp(IntCC::NotEqual, values[lhs], values[rhs])
+                    .icmp(IntCC::NotEqual, values[lhs.index()], values[rhs.index()])
             }
-            Instr::I32Lt(lhs, rhs) => {
-                self.builder
-                    .ins()
-                    .icmp(IntCC::SignedLessThan, values[lhs], values[rhs])
-            }
-            Instr::I32Le(lhs, rhs) => {
-                self.builder
-                    .ins()
-                    .icmp(IntCC::SignedLessThanOrEqual, values[lhs], values[rhs])
-            }
-            Instr::I32Gt(lhs, rhs) => {
-                self.builder
-                    .ins()
-                    .icmp(IntCC::SignedGreaterThan, values[lhs], values[rhs])
-            }
-            Instr::I32Ge(lhs, rhs) => {
-                self.builder
-                    .ins()
-                    .icmp(IntCC::SignedGreaterThanOrEqual, values[lhs], values[rhs])
-            }
+            Instr::I32Lt(lhs, rhs) => self.builder.ins().icmp(
+                IntCC::SignedLessThan,
+                values[lhs.index()],
+                values[rhs.index()],
+            ),
+            Instr::I32Le(lhs, rhs) => self.builder.ins().icmp(
+                IntCC::SignedLessThanOrEqual,
+                values[lhs.index()],
+                values[rhs.index()],
+            ),
+            Instr::I32Gt(lhs, rhs) => self.builder.ins().icmp(
+                IntCC::SignedGreaterThan,
+                values[lhs.index()],
+                values[rhs.index()],
+            ),
+            Instr::I32Ge(lhs, rhs) => self.builder.ins().icmp(
+                IntCC::SignedGreaterThanOrEqual,
+                values[lhs.index()],
+                values[rhs.index()],
+            ),
 
-            Instr::Not(src) => self.builder.ins().icmp_imm_u(IntCC::Equal, values[src], 0),
-            Instr::And(lhs, rhs) => self.builder.ins().band(values[lhs], values[rhs]),
-            Instr::Or(lhs, rhs) => self.builder.ins().bor(values[lhs], values[rhs]),
-            Instr::Xor(lhs, rhs) => self.builder.ins().bxor(values[lhs], values[rhs]),
+            Instr::Not(src) => self
+                .builder
+                .ins()
+                .icmp_imm_u(IntCC::Equal, values[src.index()], 0),
+            Instr::And(lhs, rhs) => self
+                .builder
+                .ins()
+                .band(values[lhs.index()], values[rhs.index()]),
+            Instr::Or(lhs, rhs) => self
+                .builder
+                .ins()
+                .bor(values[lhs.index()], values[rhs.index()]),
+            Instr::Xor(lhs, rhs) => self
+                .builder
+                .ins()
+                .bxor(values[lhs.index()], values[rhs.index()]),
 
-            Instr::I32FromBool(src) => self.builder.ins().uextend(types::I32, values[src]),
-            Instr::F32FromI32(src) => self.builder.ins().fcvt_from_sint(types::F32, values[src]),
+            Instr::I32FromBool(src) => self.builder.ins().uextend(types::I32, values[src.index()]),
+            Instr::F32FromI32(src) => self
+                .builder
+                .ins()
+                .fcvt_from_sint(types::F32, values[src.index()]),
             Instr::F32FromBool(src) => {
-                let int = self.builder.ins().uextend(types::I32, values[src]);
+                let int = self.builder.ins().uextend(types::I32, values[src.index()]);
                 self.builder.ins().fcvt_from_uint(types::F32, int)
             }
 
-            Instr::CopyI32(src) => values[src],
-            Instr::CopyBool(src) => values[src],
-            Instr::CopyF32(src) => values[src],
+            Instr::CopyI32(src) => values[src.index()],
+            Instr::CopyBool(src) => values[src.index()],
+            Instr::CopyF32(src) => values[src.index()],
 
-            Instr::F32Neg(src) => self.builder.ins().fneg(values[src]),
-            Instr::F32Abs(src) => self.builder.ins().fabs(values[src]),
+            Instr::F32Neg(src) => self.builder.ins().fneg(values[src.index()]),
+            Instr::F32Abs(src) => self.builder.ins().fabs(values[src.index()]),
             Instr::F32Sign(src) => {
                 let one = self.builder.ins().f32const(1.0);
-                self.builder.ins().fcopysign(one, values[src])
+                self.builder.ins().fcopysign(one, values[src.index()])
             }
-            Instr::F32Floor(src) => self.builder.ins().floor(values[src]),
-            Instr::F32Add(lhs, rhs) => self.builder.ins().fadd(values[lhs], values[rhs]),
-            Instr::F32Sub(lhs, rhs) => self.builder.ins().fsub(values[lhs], values[rhs]),
-            Instr::F32Mul(lhs, rhs) => self.builder.ins().fmul(values[lhs], values[rhs]),
+            Instr::F32Floor(src) => self.builder.ins().floor(values[src.index()]),
+            Instr::F32Add(lhs, rhs) => self
+                .builder
+                .ins()
+                .fadd(values[lhs.index()], values[rhs.index()]),
+            Instr::F32Sub(lhs, rhs) => self
+                .builder
+                .ins()
+                .fsub(values[lhs.index()], values[rhs.index()]),
+            Instr::F32Mul(lhs, rhs) => self
+                .builder
+                .ins()
+                .fmul(values[lhs.index()], values[rhs.index()]),
             Instr::F32Div(lhs, rhs) => {
                 let min = self.builder.ins().f32const(MIN_F32_MAGNITUDE);
-                let magnitude = self.builder.ins().fabs(values[rhs]);
+                let magnitude = self.builder.ins().fabs(values[rhs.index()]);
                 let clamped = self.builder.ins().fmax(magnitude, min);
-                let divisor = self.builder.ins().fcopysign(clamped, values[rhs]);
-                self.builder.ins().fdiv(values[lhs], divisor)
+                let divisor = self.builder.ins().fcopysign(clamped, values[rhs.index()]);
+                self.builder.ins().fdiv(values[lhs.index()], divisor)
             }
 
-            Instr::F32Min(lhs, rhs) => self.builder.ins().fmin(values[lhs], values[rhs]),
-            Instr::F32Max(lhs, rhs) => self.builder.ins().fmax(values[lhs], values[rhs]),
+            Instr::F32Min(lhs, rhs) => self
+                .builder
+                .ins()
+                .fmin(values[lhs.index()], values[rhs.index()]),
+            Instr::F32Max(lhs, rhs) => self
+                .builder
+                .ins()
+                .fmax(values[lhs.index()], values[rhs.index()]),
 
-            Instr::F32Powf(lhs, rhs) => self.call("powf", &[values[lhs], values[rhs]]),
-            Instr::F32Powi(lhs, rhs) => self.call("powi", &[values[lhs], values[rhs]]),
+            Instr::F32Powf(lhs, rhs) => {
+                self.call("powf", &[values[lhs.index()], values[rhs.index()]])
+            }
+            Instr::F32Powi(lhs, rhs) => {
+                self.call("powi", &[values[lhs.index()], values[rhs.index()]])
+            }
 
-            Instr::F32Exp(src) => self.call("exp", &[values[src]]),
-            Instr::F32Ln(src) => self.call("ln", &[values[src]]),
-            Instr::F32Lg(src) => self.call("lg", &[values[src]]),
-            Instr::F32Sin(src) => self.call("sin", &[values[src]]),
-            Instr::F32Cos(src) => self.call("cos", &[values[src]]),
-            Instr::F32Tan(src) => self.call("tan", &[values[src]]),
-            Instr::F32Cot(src) => self.call("cot", &[values[src]]),
+            Instr::F32Exp(src) => self.call("exp", &[values[src.index()]]),
+            Instr::F32Ln(src) => self.call("ln", &[values[src.index()]]),
+            Instr::F32Lg(src) => self.call("lg", &[values[src.index()]]),
+            Instr::F32Sin(src) => self.call("sin", &[values[src.index()]]),
+            Instr::F32Cos(src) => self.call("cos", &[values[src.index()]]),
+            Instr::F32Tan(src) => self.call("tan", &[values[src.index()]]),
+            Instr::F32Cot(src) => self.call("cot", &[values[src.index()]]),
 
             Instr::F32Eq(lhs, rhs) => {
                 self.builder
                     .ins()
-                    .fcmp(FloatCC::Equal, values[lhs], values[rhs])
+                    .fcmp(FloatCC::Equal, values[lhs.index()], values[rhs.index()])
             }
             Instr::F32Ne(lhs, rhs) => {
                 self.builder
                     .ins()
-                    .fcmp(FloatCC::NotEqual, values[lhs], values[rhs])
+                    .fcmp(FloatCC::NotEqual, values[lhs.index()], values[rhs.index()])
             }
             Instr::F32Lt(lhs, rhs) => {
                 self.builder
                     .ins()
-                    .fcmp(FloatCC::LessThan, values[lhs], values[rhs])
+                    .fcmp(FloatCC::LessThan, values[lhs.index()], values[rhs.index()])
             }
-            Instr::F32Le(lhs, rhs) => {
-                self.builder
-                    .ins()
-                    .fcmp(FloatCC::LessThanOrEqual, values[lhs], values[rhs])
-            }
-            Instr::F32Gt(lhs, rhs) => {
-                self.builder
-                    .ins()
-                    .fcmp(FloatCC::GreaterThan, values[lhs], values[rhs])
-            }
-            Instr::F32Ge(lhs, rhs) => {
-                self.builder
-                    .ins()
-                    .fcmp(FloatCC::GreaterThanOrEqual, values[lhs], values[rhs])
-            }
+            Instr::F32Le(lhs, rhs) => self.builder.ins().fcmp(
+                FloatCC::LessThanOrEqual,
+                values[lhs.index()],
+                values[rhs.index()],
+            ),
+            Instr::F32Gt(lhs, rhs) => self.builder.ins().fcmp(
+                FloatCC::GreaterThan,
+                values[lhs.index()],
+                values[rhs.index()],
+            ),
+            Instr::F32Ge(lhs, rhs) => self.builder.ins().fcmp(
+                FloatCC::GreaterThanOrEqual,
+                values[lhs.index()],
+                values[rhs.index()],
+            ),
 
-            Instr::I32Sel(cond, v_true, v_false) => {
-                self.builder
-                    .ins()
-                    .select(values[cond], values[v_true], values[v_false])
-            }
-            Instr::F32Sel(cond, v_true, v_false) => {
-                self.builder
-                    .ins()
-                    .select(values[cond], values[v_true], values[v_false])
-            }
+            Instr::I32Sel(cond, v_true, v_false) => self.builder.ins().select(
+                values[cond.index()],
+                values[v_true.index()],
+                values[v_false.index()],
+            ),
+            Instr::F32Sel(cond, v_true, v_false) => self.builder.ins().select(
+                values[cond.index()],
+                values[v_true.index()],
+                values[v_false.index()],
+            ),
         }
     }
 
@@ -395,8 +428,9 @@ impl Translator<'_> {
 
 #[cfg(test)]
 mod tests {
+    use isoplot_tape::ValueType;
+
     use super::*;
-    use crate::tape::Type;
 
     fn eval(inst: &Instance<f32>, args: &[f32]) -> f32 {
         let mut output = [RawValue::ZERO];
@@ -406,7 +440,7 @@ mod tests {
 
     #[test]
     fn f32_ops() {
-        let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32, ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let y = b.arg(1);
         let sum = b.f32_add(x, y);
@@ -429,7 +463,7 @@ mod tests {
 
     #[test]
     fn f32_fn_calls() {
-        let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32, ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let y = b.arg(1);
         let sin = b.f32_sin(x);
@@ -464,7 +498,7 @@ mod tests {
 
     #[test]
     fn f32_div_clamped() {
-        let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32, ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let y = b.arg(1);
         b.f32_div(x, y);
@@ -480,7 +514,7 @@ mod tests {
 
     #[test]
     fn i32_ops() {
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let three = b.i32_const(3);
         let two = b.i32_const(2);
@@ -500,7 +534,7 @@ mod tests {
 
     #[test]
     fn f32_sign() {
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         b.f32_sign(x);
         let tape = b.build().unwrap();
@@ -514,7 +548,7 @@ mod tests {
 
     #[test]
     fn f32_floor() {
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         b.f32_floor(x);
         let tape = b.build().unwrap();
@@ -528,7 +562,7 @@ mod tests {
     #[test]
     fn f32_select() {
         // f = if 0 < x && x < y { x } else { y }
-        let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32, ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let y = b.arg(1);
         let zero = b.f32_const(0.0);
@@ -546,7 +580,7 @@ mod tests {
 
     #[test]
     fn bool_i32_ops() {
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let two = b.i32_const(2);
         let three = b.i32_const(3);
@@ -571,7 +605,10 @@ mod tests {
 
     #[test]
     fn multi_results() {
-        let mut b = Tape::builder(vec![Type::F32, Type::F32], vec![Type::F32; 3]);
+        let mut b = Tape::builder(
+            vec![ValueType::F32, ValueType::F32],
+            vec![ValueType::F32; 3],
+        );
         let x = b.arg(0);
         let y = b.arg(1);
         b.f32_add(x, y);
@@ -590,7 +627,7 @@ mod tests {
 
     #[test]
     fn clone_outlives_original() {
-        let mut b = Tape::builder(vec![Type::F32], vec![Type::F32]);
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
         let x = b.arg(0);
         let c = b.f32_const(1.0);
         b.f32_add(x, c);

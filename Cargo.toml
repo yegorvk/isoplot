@@ -13,6 +13,7 @@ license = "MPL-2.0"
 isoplot-eval = { path = "crates/isoplot_eval", version = "0.1.0" }
 isoplot-math = { path = "crates/isoplot_math", version = "0.1.0" }
 isoplot-mesh = { path = "crates/isoplot_mesh", version = "0.1.0" }
+isoplot-tape = { path = "crates/isoplot_tape", version = "0.1.0" }
 
 # External
 anyhow = "1"

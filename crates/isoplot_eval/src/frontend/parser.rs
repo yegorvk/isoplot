@@ -3,7 +3,7 @@ use std::{f32::consts::PI, mem};
 use crate::diag::{BytePos, Diagnostic, Span};
 
 use super::{
-    ast::{Ast, AstBuilder, BinOp, Intrinsic, NewId, UnOp, Value},
+    ast::{Ast, AstBuilder, BinOp, Intrinsic, NewAstId, UnOp, Value},
     symbol::Interner,
     token::{Token, TokenKind},
 };
@@ -47,7 +47,7 @@ impl<'src, 'a, 'b, I> Parser<'src, 'a, 'b, I>
 where
     I: Iterator<Item = Token<'src>>,
 {
-    fn parse_expr(&mut self, min_bp: u8) -> NewId<'b> {
+    fn parse_expr(&mut self, min_bp: u8) -> NewAstId<'b> {
         let mut lhs = self.parse_prefix();
 
         while let Some(op) = infix_op(self.next.kind) {
@@ -64,7 +64,7 @@ where
         lhs
     }
 
-    fn parse_prefix(&mut self) -> NewId<'b> {
+    fn parse_prefix(&mut self) -> NewAstId<'b> {
         let token = self.advance();
 
         match token.kind {
@@ -99,7 +99,7 @@ where
         }
     }
 
-    fn parse_call(&mut self, span: Span, intrinsic: Intrinsic) -> NewId<'b> {
+    fn parse_call(&mut self, span: Span, intrinsic: Intrinsic) -> NewAstId<'b> {
         if self.next.kind != TokenKind::LParen {
             let message = format!("expected `(`, but found {}", self.next.kind);
             return self.error(self.next.span, &message, None);
@@ -117,7 +117,7 @@ where
         self.expect(TokenKind::RParen, "expected `)`", call)
     }
 
-    fn expect(&mut self, kind: TokenKind<'src>, message: &str, expr: NewId<'b>) -> NewId<'b> {
+    fn expect(&mut self, kind: TokenKind<'src>, message: &str, expr: NewAstId<'b>) -> NewAstId<'b> {
         if self.next.kind == kind {
             self.advance();
             expr
@@ -127,7 +127,7 @@ where
         }
     }
 
-    fn error(&mut self, span: Span, message: &str, inner: Option<NewId<'b>>) -> NewId<'b> {
+    fn error(&mut self, span: Span, message: &str, inner: Option<NewAstId<'b>>) -> NewAstId<'b> {
         self.diags.push(Diagnostic::new(message, span));
         self.builder.error(span, inner)
     }
