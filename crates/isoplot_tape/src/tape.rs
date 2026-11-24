@@ -5,30 +5,30 @@ use instr::RawValueId;
 use std::ops;
 
 pub use builder::{Inlined, TapeBuilder, ValidateError};
-pub use instr::{AnyValueId, Instr, InstrRef, NewValueId, ValueId, ValueType};
+pub use instr::{AnyValueId, Instr, InstrRef, NewValueId, ValueId, ValueRepr, ValueType};
 
 #[derive(Debug)]
 pub struct Tape {
-    args: Vec<ValueType>,
+    params: Vec<ValueType>,
     results: Vec<ValueType>,
     instrs: Vec<Instr>,
 }
 
 impl Tape {
-    pub fn builder(args: Vec<ValueType>, results: Vec<ValueType>) -> TapeBuilder {
-        TapeBuilder::new(args, results)
+    pub fn builder(params: Vec<ValueType>, results: Vec<ValueType>) -> TapeBuilder {
+        TapeBuilder::new(params, results)
     }
 
-    pub fn num_args(&self) -> usize {
-        self.args.len()
+    pub fn num_params(&self) -> usize {
+        self.params.len()
     }
 
     pub fn num_results(&self) -> usize {
         self.results.len()
     }
 
-    pub fn arg_types(&self) -> &[ValueType] {
-        &self.args
+    pub fn param_types(&self) -> &[ValueType] {
+        &self.params
     }
 
     pub fn result_types(&self) -> &[ValueType] {
@@ -40,11 +40,11 @@ impl Tape {
     }
 
     pub fn iter_ref(&self) -> impl DoubleEndedIterator<Item = InstrRef> + ExactSizeIterator + '_ {
-        let num_args = self.args.len();
+        let num_params = self.params.len();
         self.instrs
             .iter()
             .enumerate()
-            .map(move |(i, &instr)| InstrRef::new(RawValueId::new(num_args + i), instr))
+            .map(move |(i, &instr)| InstrRef::new(RawValueId::new(num_params + i), instr))
     }
 }
 

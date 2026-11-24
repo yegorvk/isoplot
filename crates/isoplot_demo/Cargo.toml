@@ -6,11 +6,14 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
-isoplot-expr.workspace = true
 isoplot-math.workspace = true
 isoplot-mesh.workspace = true
-bytemuck = "1.25"
+bytemuck.workspace = true
 dashmap.workspace = true
+
+[dependencies.isoplot-expr]
+workspace = true
+features = ["cranelift"]
 
 [dependencies.bevy]
 version = "0.19"
@@ -30,6 +33,3 @@ features = [
 [dependencies.log]
 version = "*"
 features = ["max_level_debug", "release_max_level_warn"]
-
-[features]
-default = ["isoplot-expr/default-cranelift"]

@@ -20,7 +20,4 @@ optional = true
 features = ["jit", "module", "native"]
 
 [features]
-default = ["default-fallback"]
 cranelift = ["dep:cranelift"]
-default-fallback = []
-default-cranelift = ["cranelift"]

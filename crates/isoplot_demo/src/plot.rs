@@ -40,7 +40,7 @@ impl Plugin for PlotPlugin {
 }
 
 pub trait PlotSource {
-    fn field(&self) -> impl NormalField;
+    fn field<'a>(&'a self) -> impl NormalField + 'a;
 }
 
 impl<T: NormalField> PlotSource for T {

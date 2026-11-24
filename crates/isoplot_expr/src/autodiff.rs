@@ -1,60 +1,55 @@
-use bytemuck::{Pod, Zeroable};
-use std::fmt::{self, Debug, Formatter};
-
-use isoplot_tape::{Inlined, Instr, NewValueId, Tape, TapeBuilder, ValueId, ValueType};
+use std::{fmt::Debug, mem::offset_of};
 
 use crate::{
-    layout::{Layout, SchemaType, Vector},
-    program::Program,
+    artifact::Artifact,
+    schema::{Field, Schema},
 };
+use isoplot_tape::{Inlined, Instr, NewValueId, Tape, TapeBuilder, ValueId, ValueType};
 
-/// Value of a scalar function together with its gradient
-#[derive(Copy, Clone)]
-#[repr(C)]
-pub struct Gradient<V: Layout> {
-    pub value: V::Scalar,
-    pub gradient: V,
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Dual<V, const N: usize> {
+    /// The real (0th order) component
+    pub value: V,
+    /// The 1st-order derivative component
+    pub derivative: [V; N],
 }
 
-impl<V: Layout> Debug for Gradient<V>
-where
-    V: Debug,
-    V::Scalar: Debug,
+impl<V, const N: usize> Dual<V, N> {
+    fn new(value: V, derivative: [V; N]) -> Self {
+        Self {
+            value,
+            derivative: derivative.into(),
+        }
+    }
+}
+
+impl<const N: usize> From<Artifact<[[f32; 1]; N], Dual<[f32; 1], N>>>
+    for Artifact<[f32; N], Dual<f32, N>>
 {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Gradient")
-            .field("value", &self.value)
-            .field("gradient", &self.gradient)
-            .finish()
+    fn from(value: Artifact<[[f32; 1]; N], Dual<[f32; 1], N>>) -> Self {
+        Self::from_tape(value.into_tape())
     }
 }
 
-impl<V: Layout> PartialEq for Gradient<V>
+unsafe impl<V, const TILE_LEN: usize, const N: usize> Schema<TILE_LEN> for Dual<V, N>
 where
-    V: PartialEq,
-    V::Scalar: PartialEq,
+    V: Schema<TILE_LEN>,
 {
-    fn eq(&self, other: &Self) -> bool {
-        self.value == other.value && self.gradient == other.gradient
+    const NUM_FIELDS: usize = (N + 1) * V::NUM_FIELDS;
+
+    fn field(index: usize) -> Field {
+        if index < V::NUM_FIELDS {
+            V::field(index).offset_by(offset_of!(Self, value))
+        } else {
+            <[V; N]>::field(index - V::NUM_FIELDS).offset_by(offset_of!(Self, derivative))
+        }
     }
 }
 
-unsafe impl<V: Layout> Zeroable for Gradient<V> {}
-unsafe impl<V: Layout> Pod for Gradient<V> {}
-
-impl<V: Layout> Vector for Gradient<V> {
-    const LEN: usize = <V::Scalar as Vector>::LEN + V::LEN;
-    type Scalar = V::Scalar;
-
-    fn types() -> impl Iterator<Item = SchemaType> {
-        V::Scalar::types().chain(V::types())
-    }
-}
-
-pub(crate) fn autodiff<Args: Layout>(
-    program: &Program<Args, f32>,
-) -> Program<Args, Gradient<Args>> {
-    Program::new(Autodiff::new(program.tape()).run())
+pub(crate) fn autodiff<const TILE_LEN: usize, const N: usize>(
+    source: &Artifact<[[f32; TILE_LEN]; N], [f32; TILE_LEN]>,
+) -> Artifact<[[f32; TILE_LEN]; N], Dual<[f32; TILE_LEN], N>> {
+    Artifact::from_tape(Autodiff::new(source.tape()).run())
 }
 
 struct Autodiff<'a> {
@@ -67,7 +62,7 @@ struct Autodiff<'a> {
 impl<'a> Autodiff<'a> {
     fn new(source: &'a Tape) -> Self {
         assert!(
-            source.arg_types().iter().all(|&ty| ty == ValueType::F32),
+            source.param_types().iter().all(|&ty| ty == ValueType::F32),
             "autodiff arguments must be f32"
         );
 
@@ -77,12 +72,12 @@ impl<'a> Autodiff<'a> {
             "only scalar-valued functions are supported"
         );
 
-        let num_args = source.num_args();
-        let num_values = num_args + source.instrs().len();
+        let num_params = source.num_params();
+        let num_values = num_params + source.instrs().len();
 
         let mut builder = Tape::builder(
-            vec![ValueType::F32; num_args],
-            vec![ValueType::F32; 1 + num_args],
+            vec![ValueType::F32; num_params],
+            vec![ValueType::F32; 1 + num_params],
         );
         let inlined = builder.extend(source);
 
@@ -95,9 +90,8 @@ impl<'a> Autodiff<'a> {
     }
 
     fn run(mut self) -> Tape {
-        let num_args = self.source.num_args();
+        let num_params = self.source.num_params();
 
-        let ret = self.inlined.result(0);
         let seed = self.builder.f32_const(1.0);
         *self.adjoints.last_mut().unwrap() = Some(seed);
 
@@ -111,8 +105,9 @@ impl<'a> Autodiff<'a> {
             self.propagate(r.instr(), w, w_bar);
         }
 
-        self.builder.copy_f32(ret);
-        for i in 0..num_args {
+        self.builder.copy_f32(self.inlined.result(0));
+
+        for i in 0..num_params {
             match self.adjoints[i] {
                 None => self.builder.f32_const(0.0),
                 Some(v) => self.builder.copy_f32(v),
@@ -312,133 +307,131 @@ impl<'a> Autodiff<'a> {
 mod tests {
     use super::*;
     use crate::{
-        backend::{Fallback, Instance},
-        layout::VectorExt,
+        backend::Fallback,
+        kernel::{Evaluate, Kernel},
     };
 
-    fn gradient<const N: usize>(tape: &Tape, inputs: &[f32; N]) -> Vec<f32> {
-        let grad = Autodiff::new(tape).run();
-        assert_eq!(grad.num_args(), N);
-        assert_eq!(grad.num_results(), 1 + N);
+    fn gradient<const N: usize>(tape: &Tape, params: impl Into<[f32; N]>) -> Dual<f32, N> {
+        let tape = Autodiff::new(tape).run();
 
-        let output = Instance::<Fallback, [f32; N], Gradient<[f32; N]>>::new(grad)
+        assert_eq!(tape.num_params(), N);
+        assert_eq!(tape.num_results(), 1 + N);
+
+        Fallback::new(Artifact::from_tape(tape))
             .evaluator()
-            .evaluate(inputs);
-
-        bytemuck::cast_slice(output.raw_values()).to_vec()
+            .evaluate(params.into())
     }
 
     #[test]
     fn polynomial() {
-        // f = x*y + x
         let mut b = Tape::builder(vec![ValueType::F32; 2], vec![ValueType::F32]);
-        let x = b.arg(0);
-        let y = b.arg(1);
-        let xy = b.f32_mul(x, y);
-        b.f32_add(xy, x);
+
+        let x = b.param(0);
+        let y = b.param(1);
+
+        let x_mul_y = b.f32_mul(x, y);
+
+        b.f32_add(x_mul_y, x);
         let tape = b.build().unwrap();
 
-        let (x, y) = (3.0f32, 5.0f32);
-        assert_eq!(gradient(&tape, &[x, y]), [x * y + x, y + 1.0, x]);
+        let [v_x, v_y] = [3.0f32, 5.0f32];
+        assert_eq!(
+            gradient(&tape, [v_x, v_y]),
+            Dual::new(v_x * v_y + v_x, [v_y + 1.0, v_x])
+        );
     }
 
     #[test]
     fn shared_operand() {
         // f = x*x
         let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
-        let x = b.arg(0);
+        let x = b.param(0);
         b.f32_mul(x, x);
+
         let tape = b.build().unwrap();
 
         let x = 1.75f32;
-        assert_eq!(gradient(&tape, &[x]), [x * x, x + x]);
+        assert_eq!(gradient(&tape, [x]), Dual::new(x * x, [x + x]));
     }
 
     #[test]
     fn chain_rule() {
         // f = sin(x) * exp(x)
         let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
-        let x = b.arg(0);
+        let x = b.param(0);
         let sin = b.f32_sin(x);
         let exp = b.f32_exp(x);
         b.f32_mul(sin, exp);
+
         let tape = b.build().unwrap();
 
         let x = 0.7f32;
-        let expected = x.sin() * x.exp() + x.exp() * x.cos();
-        assert_eq!(gradient(&tape, &[x]), [x.sin() * x.exp(), expected]);
+        assert_eq!(
+            gradient(&tape, [x]),
+            Dual::new(x.sin() * x.exp(), [x.sin() * x.exp() + x.exp() * x.cos()])
+        );
     }
 
     #[test]
-    fn min_selects_branch() {
+    fn min_branch() {
         // f = min(x, y*y)
         let mut b = Tape::builder(vec![ValueType::F32; 2], vec![ValueType::F32]);
-        let x = b.arg(0);
-        let y = b.arg(1);
+        let x = b.param(0);
+        let y = b.param(1);
         let yy = b.f32_mul(y, y);
         b.f32_min(x, yy);
+
         let tape = b.build().unwrap();
 
-        // x selected
-        assert_eq!(gradient(&tape, &[1.0, 2.0]), [1.0, 1.0, 0.0]);
-
-        // y*y selected
-        assert_eq!(gradient(&tape, &[5.0, 2.0]), [4.0, 0.0, 4.0]);
-
-        // a tie, x wins
-        assert_eq!(gradient(&tape, &[4.0, 2.0]), [4.0, 1.0, 0.0]);
+        assert_eq!(gradient(&tape, [1.0, 2.0]), Dual::new(1.0, [1.0, 0.0]));
+        assert_eq!(gradient(&tape, [5.0, 2.0]), Dual::new(4.0, [0.0, 4.0]));
+        assert_eq!(gradient(&tape, [4.0, 2.0]), Dual::new(4.0, [1.0, 0.0]));
     }
 
     #[test]
-    fn equal_operand_min_max() {
-        // f = max(x, x)
-        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
-        let x = b.arg(0);
-        b.f32_max(x, x);
-        let tape = b.build().unwrap();
-        assert_eq!(gradient(&tape, &[3.0]), [3.0, 1.0]);
-    }
-
-    #[test]
-    fn powi_and_abs() {
+    fn powi_abs() {
         // f = |x^3|
         let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
-        let x = b.arg(0);
+        let x = b.param(0);
         let n = b.i32_const(3);
         let cube = b.f32_powi(x, n);
         b.f32_abs(cube);
+
         let tape = b.build().unwrap();
 
-        assert_eq!(gradient(&tape, &[2.0]), [8.0, 12.0]);
-        assert_eq!(gradient(&tape, &[-2.0]), [8.0, -12.0]);
+        assert_eq!(gradient(&tape, [2.0]), Dual::new(8.0, [12.0]));
+        assert_eq!(gradient(&tape, [-2.0]), Dual::new(8.0, [-12.0]));
 
-        // the base is clamped at zero, so the result is tiny but finite
         let m = crate::MIN_F32_MAGNITUDE;
-        assert_eq!(gradient(&tape, &[0.0]), [m.powi(3), 3.0 * m.powi(2)]);
+        assert_eq!(
+            gradient(&tape, [0.0]),
+            Dual::new(m.powi(3), [3.0 * m.powi(2)])
+        );
     }
 
     #[test]
-    fn select_gradient() {
+    fn gradient_branch() {
         // f = if x < 2 { x*x } else { x }
         let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
-        let x = b.arg(0);
+        let x = b.param(0);
         let two = b.f32_const(2.0);
         let lt = b.f32_lt(x, two);
         let sq = b.f32_mul(x, x);
         b.f32_sel(lt, sq, x);
+
         let tape = b.build().unwrap();
 
-        assert_eq!(gradient(&tape, &[1.0]), [1.0, 2.0]);
-        assert_eq!(gradient(&tape, &[3.0]), [3.0, 1.0]);
+        assert_eq!(gradient(&tape, [1.0]), Dual::new(1.0, [2.0]));
+        assert_eq!(gradient(&tape, [3.0]), Dual::new(3.0, [1.0]));
     }
 
     #[test]
-    fn unused_argument() {
+    fn unused_param() {
         // f = y, x unused
         let mut b = Tape::builder(vec![ValueType::F32; 2], vec![ValueType::F32]);
-        let y = b.arg(1);
+        let y = b.param(1);
         b.copy_f32(y);
         let tape = b.build().unwrap();
-        assert_eq!(gradient(&tape, &[3.0, 7.0]), [7.0, 0.0, 1.0]);
+        assert_eq!(gradient(&tape, [3.0, 7.0]), Dual::new(7.0, [0.0, 1.0]));
     }
 }

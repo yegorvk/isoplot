@@ -1,18 +1,26 @@
-use isoplot_expr::{Diagnostic, ProgramDesc, dump_ast};
+use isoplot_expr::{Diagnostic, FieldType, Shape, dump_ast};
 use std::{env, process::ExitCode};
 
 fn main() -> ExitCode {
-    let args: Vec<String> = env::args().skip(1).collect();
-    if args.is_empty() {
+    let source: Vec<String> = env::args().skip(1).collect();
+    let source = source.join(" ");
+
+    if source.is_empty() {
         eprintln!("usage: cli_ast <expression>");
         return ExitCode::from(2);
     }
-    let source = args.join(" ");
 
-    let (parsed, diagnostics) = dump_ast(
-        &ProgramDesc::<[f32; 3]>::new(&["x", "y", "z"], &[]),
+    let (parsed, diagnostics) = dump_ast::<[f32; 3]>(
+        &Shape {
+            params: &[
+                ("x", FieldType::F32),
+                ("y", FieldType::F32),
+                ("z", FieldType::F32),
+            ],
+        },
         &source,
     );
+
     println!("{}", parsed.pretty_printer());
 
     for diagnostic in &diagnostics {

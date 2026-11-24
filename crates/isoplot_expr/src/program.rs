@@ -7,7 +7,7 @@ use crate::{
     autodiff,
     backend::{Backend, Instance},
     diag,
-    frontend::{Bindings, ParseError, Parsed, ValidateError, parse, translate_type},
+    frontend::{ParamBindings, ParseError, Parsed, ValidateError, parse, translate_type},
     interval,
     layout::{Layout, TypedValue},
 };
@@ -38,19 +38,19 @@ impl CompileError {
 }
 
 pub struct ProgramDesc<'a, Args> {
-    bindings: Bindings<'a>,
+    bindings: ParamBindings<'a>,
     _marker: PhantomData<fn(&Args)>,
 }
 
 impl<'a, Args: Layout> ProgramDesc<'a, Args> {
     pub fn new(args: &[&'a str], consts: &'a [(&'a str, TypedValue)]) -> Self {
         Self {
-            bindings: Bindings::new::<Args>(args, consts),
+            bindings: ParamBindings::new::<Args>(args, consts),
             _marker: PhantomData,
         }
     }
 
-    pub(crate) fn bindings(&self) -> &Bindings<'a> {
+    pub(crate) fn bindings(&self) -> &ParamBindings<'a> {
         &self.bindings
     }
 }

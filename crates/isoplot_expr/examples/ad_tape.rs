@@ -1,11 +1,17 @@
-use isoplot_expr::{Program, ProgramDesc};
+use isoplot_expr::{Artifact, FieldType, Shape};
 
 fn main() {
-    let program: Program<[f32; 3], f32> = Program::compile(
-        &ProgramDesc::new(&["x", "y", "z"], &[]),
+    let artifact: Artifact<[f32; 3], f32> = Artifact::compile(
+        &Shape {
+            params: &[
+                ("x", FieldType::F32),
+                ("y", FieldType::F32),
+                ("z", FieldType::F32),
+            ],
+        },
         "y - ln(x^2 - z^2)",
     )
     .unwrap();
 
-    println!("{:#?}", program.autodiff());
+    println!("{:#?}", artifact.autodiff());
 }

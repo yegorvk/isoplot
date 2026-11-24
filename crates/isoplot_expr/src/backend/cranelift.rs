@@ -1,4 +1,10 @@
-use std::{collections::HashMap, marker::PhantomData, mem, sync::Arc};
+use std::{
+    collections::HashMap,
+    iter,
+    marker::PhantomData,
+    mem::{self, MaybeUninit},
+    sync::Arc,
+};
 
 use cranelift::{
     codegen::ir::FuncRef,
@@ -8,12 +14,13 @@ use cranelift::{
     prelude::*,
 };
 
-use isoplot_tape::{Instr, Tape};
-
 use crate::{
     MIN_F32_MAGNITUDE,
-    layout::{RawValue, Vector},
+    artifact::Artifact,
+    kernel::{Evaluate, Kernel},
+    schema::{FieldType, Schema, WriteSchema},
 };
+use isoplot_tape::{Instr, Tape};
 
 fn ensure_magnitude(x: f32) -> f32 {
     x.abs().max(MIN_F32_MAGNITUDE).copysign(x)
@@ -23,22 +30,22 @@ fn ensure_positive(x: f32) -> f32 {
     x.max(MIN_F32_MAGNITUDE)
 }
 
-type SingleEvalFunc = extern "C" fn(*const f32) -> f32;
-type MultiEvalFunc = extern "C" fn(*const f32, *mut f32);
+type SingleEvalFunc = extern "C" fn(*const ()) -> f32;
+type MultiEvalFunc = extern "C" fn(*const (), *mut ());
 
-pub(super) struct Instance<Ret> {
+pub struct Cranelift<Params, Ret> {
     num_args: usize,
     num_results: usize,
     module: Arc<ModuleGuard>,
     code: *const u8,
-    _marker: PhantomData<fn() -> Ret>,
+    _marker: PhantomData<fn(Params) -> Ret>,
 }
 
 // Safety: `code` points into the finalized module, which is kept alive by `module`.
-unsafe impl<Ret> Send for Instance<Ret> {}
-unsafe impl<Ret> Sync for Instance<Ret> {}
+unsafe impl<Params, Ret> Send for Cranelift<Params, Ret> {}
+unsafe impl<Params, Ret> Sync for Cranelift<Params, Ret> {}
 
-impl<Ret> Clone for Instance<Ret> {
+impl<Params, Ret> Clone for Cranelift<Params, Ret> {
     fn clone(&self) -> Self {
         Self {
             num_args: self.num_args,
@@ -50,45 +57,68 @@ impl<Ret> Clone for Instance<Ret> {
     }
 }
 
-impl<Ret: Vector> Instance<Ret> {
-    pub(super) fn new(tape: &Tape) -> Self {
-        let (module, code) = compile(tape, Ret::LEN != 1);
+impl<Params: Schema, Ret: Schema> Cranelift<Params, Ret> {
+    pub fn new(artifact: &Artifact<Params, Ret>) -> Self {
+        let tape = artifact.tape();
+        let (module, code) = compile::<Params, Ret>(&tape, Ret::NUM_FIELDS != 1);
 
         Self {
-            num_args: tape.num_args(),
+            num_args: tape.num_params(),
             num_results: tape.num_results(),
             module: Arc::new(ModuleGuard(Some(module))),
             code,
             _marker: PhantomData,
         }
     }
+}
 
-    #[inline(always)]
-    pub(super) fn evaluate_into(&self, args: &[RawValue], results: &mut [RawValue]) {
-        debug_assert_eq!(args.len(), self.num_args);
-        debug_assert_eq!(results.len(), self.num_results);
+impl<Params: Schema, Ret: Schema> Kernel<Params, Ret> for Cranelift<Params, Ret> {
+    type Evaluator<'a>
+        = &'a Self
+    where
+        Self: 'a;
 
-        if Ret::LEN == 1 {
-            let func = unsafe { mem::transmute::<*const u8, SingleEvalFunc>(self.code) };
-            results[0] = RawValue::from_f32(func(args.as_ptr().cast()));
-        } else {
-            let func = unsafe { mem::transmute::<*const u8, MultiEvalFunc>(self.code) };
-            func(args.as_ptr().cast(), results.as_mut_ptr().cast());
-        }
+    fn evaluator(&self) -> Self::Evaluator<'_> {
+        self
     }
 }
 
-fn compile(tape: &Tape, multi: bool) -> (JITModule, *const u8) {
+unsafe impl<Params: Schema, Ret: Schema> Evaluate<Params, Ret> for Cranelift<Params, Ret> {
+    #[inline]
+    fn evaluate(&self, params: Params) -> Ret {
+        let mut result: MaybeUninit<Ret> = MaybeUninit::uninit();
+
+        if Ret::NUM_FIELDS == 1 {
+            let func = unsafe { mem::transmute::<*const u8, SingleEvalFunc>(self.code) };
+            let raw_result = func(&params as *const Params as *const ());
+            match Ret::field(0).ty {
+                FieldType::I32 => result.write_i32(0, [raw_result.to_bits() as i32]),
+                FieldType::F32 => result.write_f32(0, [raw_result]),
+            };
+        } else {
+            let func = unsafe { mem::transmute::<*const u8, MultiEvalFunc>(self.code) };
+            func(
+                &params as *const Params as *const (),
+                result.as_mut_ptr().cast(),
+            );
+        }
+
+        unsafe { result.assume_init() }
+    }
+}
+
+fn compile<Params: Schema, Ret: Schema>(tape: &Tape, multi: bool) -> (JITModule, *const u8) {
     let mut module = create_module();
     let lib_funcs = declare_lib_funcs(&mut module);
 
     let mut ctx = module.make_context();
     let func_id = declare_eval(&mut module, &mut ctx.func.signature, multi);
 
-    Translator {
+    Translator::<Params, Ret> {
         builder: FunctionBuilder::new(&mut ctx.func, &mut FunctionBuilderContext::new()),
         module: &mut module,
         lib_funcs,
+        _marker: PhantomData,
     }
     .translate(tape, multi);
 
@@ -192,13 +222,14 @@ fn declare_eval(module: &mut JITModule, sig: &mut Signature, multi: bool) -> Fun
         .unwrap()
 }
 
-struct Translator<'a> {
+struct Translator<'a, Params, Ret> {
     builder: FunctionBuilder<'a>,
     module: &'a mut JITModule,
     lib_funcs: LibFuncMap,
+    _marker: PhantomData<fn(Params) -> Ret>,
 }
 
-impl Translator<'_> {
+impl<Params: Schema, Ret: Schema> Translator<'_, Params, Ret> {
     fn translate(mut self, tape: &Tape, multi: bool) {
         let block = self.builder.create_block();
         self.builder.append_block_params_for_function_params(block);
@@ -206,9 +237,9 @@ impl Translator<'_> {
         self.builder.seal_block(block);
         let base = self.builder.block_params(block)[0];
 
-        let mut values = Vec::with_capacity(tape.num_args() + tape.instrs().len());
-        for i in 0..tape.num_args() {
-            let offset = i32::try_from(4 * i).unwrap();
+        let mut values = Vec::with_capacity(tape.num_params() + tape.instrs().len());
+        for field in Params::fields() {
+            let offset = i32::try_from(field.offset).unwrap();
             values.push(
                 self.builder
                     .ins()
@@ -224,8 +255,8 @@ impl Translator<'_> {
         if multi {
             let out = self.builder.block_params(block)[1];
             let results = &values[values.len() - tape.num_results()..];
-            for (i, &result) in results.iter().enumerate() {
-                let offset = i32::try_from(4 * i).unwrap();
+            for (&result, field) in iter::zip(results.iter(), Ret::fields()) {
+                let offset = i32::try_from(field.offset).unwrap();
                 self.builder
                     .ins()
                     .store(MemFlagsData::trusted(), result, out, offset);
@@ -426,221 +457,6 @@ impl Translator<'_> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use isoplot_tape::ValueType;
-
-    use super::*;
-
-    fn eval(inst: &Instance<f32>, args: &[f32]) -> f32 {
-        let mut output = [RawValue::ZERO];
-        inst.evaluate_into(bytemuck::cast_slice(args), &mut output);
-        output[0].as_f32()
-    }
-
-    #[test]
-    fn f32_ops() {
-        let mut b = Tape::builder(vec![ValueType::F32, ValueType::F32], vec![ValueType::F32]);
-        let x = b.arg(0);
-        let y = b.arg(1);
-        let sum = b.f32_add(x, y);
-        let prod = b.f32_mul(sum, x);
-        let diff = b.f32_sub(prod, y);
-        let quot = b.f32_div(diff, y);
-        let neg = b.f32_neg(quot);
-        let abs = b.f32_abs(neg);
-        let abs = b.copy_f32(abs);
-        let min = b.f32_min(abs, x);
-        let max = b.f32_max(min, y);
-        let c = b.f32_const(0.5);
-        b.f32_add(max, c);
-        let tape = b.build().unwrap();
-
-        let (x, y) = (1.75f32, -0.5f32);
-        let expected = (-((x + y) * x - y) / y).abs().min(x).max(y) + 0.5;
-        assert_eq!(eval(&Instance::<f32>::new(&tape), &[x, y]), expected);
-    }
-
-    #[test]
-    fn f32_fn_calls() {
-        let mut b = Tape::builder(vec![ValueType::F32, ValueType::F32], vec![ValueType::F32]);
-        let x = b.arg(0);
-        let y = b.arg(1);
-        let sin = b.f32_sin(x);
-        let cos = b.f32_cos(y);
-        let tan = b.f32_tan(x);
-        let cot = b.f32_cot(y);
-        let exp = b.f32_exp(x);
-        let ln = b.f32_ln(y);
-        let lg = b.f32_lg(x);
-        let pow = b.f32_powf(x, y);
-
-        let mut acc = sin;
-        for v in [cos, tan, cot, exp, ln, lg, pow] {
-            acc = b.f32_add(acc, v);
-        }
-
-        let tape = b.build().unwrap();
-        let inst = Instance::<f32>::new(&tape);
-
-        let (x, y) = (0.7f32, 1.3f32);
-        let expected = x.sin()
-            + y.cos()
-            + x.tan()
-            + y.tan().recip()
-            + x.exp()
-            + y.ln()
-            + x.log10()
-            + x.powf(y);
-
-        assert_eq!(eval(&inst, &[x, y]), expected);
-    }
-
-    #[test]
-    fn f32_div_clamped() {
-        let mut b = Tape::builder(vec![ValueType::F32, ValueType::F32], vec![ValueType::F32]);
-        let x = b.arg(0);
-        let y = b.arg(1);
-        b.f32_div(x, y);
-        let tape = b.build().unwrap();
-        let inst = Instance::<f32>::new(&tape);
-
-        let peak = 1.0 / MIN_F32_MAGNITUDE;
-        assert_eq!(eval(&inst, &[3.0, -2.0]), -1.5);
-        assert_eq!(eval(&inst, &[1.0, 0.0]), peak);
-        assert_eq!(eval(&inst, &[1.0, -0.0]), -peak);
-        assert_eq!(eval(&inst, &[2.0, 1.0e-40]), 2.0 * peak);
-    }
-
-    #[test]
-    fn i32_ops() {
-        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
-        let x = b.arg(0);
-        let three = b.i32_const(3);
-        let two = b.i32_const(2);
-        let five = b.i32_add(three, two);
-        let diff = b.i32_sub(five, two);
-        let six = b.i32_mul(diff, two);
-        let sixf = b.f32_from_i32(six);
-        let cube = b.f32_powi(x, diff);
-        b.f32_add(sixf, cube);
-
-        let tape = b.build().unwrap();
-        let inst = Instance::<f32>::new(&tape);
-
-        let x = 1.5f32;
-        assert_eq!(eval(&inst, &[x]), 6.0 + x.powi(3));
-    }
-
-    #[test]
-    fn f32_sign() {
-        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
-        let x = b.arg(0);
-        b.f32_sign(x);
-        let tape = b.build().unwrap();
-        let inst = Instance::<f32>::new(&tape);
-
-        assert_eq!(eval(&inst, &[-3.5]), -1.0);
-        assert_eq!(eval(&inst, &[2.0]), 1.0);
-        assert_eq!(eval(&inst, &[0.0]), 1.0);
-        assert_eq!(eval(&inst, &[-0.0]), -1.0);
-    }
-
-    #[test]
-    fn f32_floor() {
-        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
-        let x = b.arg(0);
-        b.f32_floor(x);
-        let tape = b.build().unwrap();
-        let inst = Instance::<f32>::new(&tape);
-
-        assert_eq!(eval(&inst, &[2.7]), 2.0);
-        assert_eq!(eval(&inst, &[-2.3]), -3.0);
-        assert_eq!(eval(&inst, &[4.0]), 4.0);
-    }
-
-    #[test]
-    fn f32_select() {
-        // f = if 0 < x && x < y { x } else { y }
-        let mut b = Tape::builder(vec![ValueType::F32, ValueType::F32], vec![ValueType::F32]);
-        let x = b.arg(0);
-        let y = b.arg(1);
-        let zero = b.f32_const(0.0);
-        let lt = b.f32_lt(x, y);
-        let pos = b.f32_gt(x, zero);
-        let both = b.and(lt, pos);
-        b.f32_sel(both, x, y);
-        let tape = b.build().unwrap();
-        let inst = Instance::<f32>::new(&tape);
-
-        assert_eq!(eval(&inst, &[1.0, 2.0]), 1.0);
-        assert_eq!(eval(&inst, &[-1.0, 2.0]), 2.0);
-        assert_eq!(eval(&inst, &[3.0, 2.0]), 2.0);
-    }
-
-    #[test]
-    fn bool_i32_ops() {
-        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
-        let x = b.arg(0);
-        let two = b.i32_const(2);
-        let three = b.i32_const(3);
-        let lt = b.i32_lt(two, three); // true
-        let ge = b.i32_ge(two, three); // false
-        let yes = b.bool_const(true);
-        let xor = b.xor(lt, yes); // false
-        let any = b.or(xor, ge); // false
-        let not = b.not(any); // true
-        let sel = b.i32_sel(not, two, three); // 2
-        let bump = b.i32_from_bool(lt); // 1
-        let sum = b.i32_add(sel, bump); // 3
-        let sum = b.f32_from_i32(sum);
-        let one = b.f32_from_bool(not); // 1.0
-        let sum = b.f32_add(sum, one); // 4.0
-        b.f32_add(sum, x);
-        let tape = b.build().unwrap();
-        let inst = Instance::<f32>::new(&tape);
-
-        assert_eq!(eval(&inst, &[0.5]), 4.5);
-    }
-
-    #[test]
-    fn multi_results() {
-        let mut b = Tape::builder(
-            vec![ValueType::F32, ValueType::F32],
-            vec![ValueType::F32; 3],
-        );
-        let x = b.arg(0);
-        let y = b.arg(1);
-        b.f32_add(x, y);
-        b.f32_mul(x, y);
-        b.f32_sub(x, y);
-        let tape = b.build().unwrap();
-
-        let (x, y) = (1.5f32, 2.25f32);
-        let mut results = [0.0f32; 3];
-        Instance::<[f32; 3]>::new(&tape).evaluate_into(
-            bytemuck::cast_slice(&[x, y]),
-            bytemuck::cast_slice_mut(&mut results),
-        );
-        assert_eq!(results, [x + y, x * y, x - y]);
-    }
-
-    #[test]
-    fn clone_outlives_original() {
-        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
-        let x = b.arg(0);
-        let c = b.f32_const(1.0);
-        b.f32_add(x, c);
-
-        let tape = b.build().unwrap();
-        let inst = Instance::<f32>::new(&tape);
-        let clone = inst.clone();
-        drop(inst);
-
-        assert_eq!(eval(&clone, &[2.0]), 3.0);
-    }
-}
-
 extern "C" fn powf(x: f32, y: f32) -> f32 {
     ensure_magnitude(x).powf(y)
 }
@@ -675,4 +491,200 @@ extern "C" fn tan(x: f32) -> f32 {
 
 extern "C" fn cot(x: f32) -> f32 {
     x.tan().recip()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use isoplot_tape::ValueType;
+
+    #[test]
+    fn f32_ops() {
+        let mut b = Tape::builder(vec![ValueType::F32, ValueType::F32], vec![ValueType::F32]);
+        let [x, y] = [b.param(0), b.param(1)];
+
+        let sum = b.f32_add(x, y);
+        let prod = b.f32_mul(sum, x);
+        let diff = b.f32_sub(prod, y);
+        let quot = b.f32_div(diff, y);
+        let neg = b.f32_neg(quot);
+        let abs = b.f32_abs(neg);
+        let abs = b.copy_f32(abs);
+        let min = b.f32_min(abs, x);
+        let max = b.f32_max(min, y);
+        let c = b.f32_const(0.5);
+        b.f32_add(max, c);
+
+        let artifact: Artifact<_, f32> = Artifact::from_tape(b.build().unwrap());
+
+        let (v_x, v_y) = (1.75f32, -0.5f32);
+        let expected = (-((v_x + v_y) * v_x - v_y) / v_y).abs().min(v_x).max(v_y) + 0.5;
+
+        assert_eq!(
+            Cranelift::new(&artifact).evaluator().evaluate([v_x, v_y]),
+            expected
+        );
+    }
+
+    #[test]
+    fn f32_fn_calls() {
+        let mut b = Tape::builder(vec![ValueType::F32, ValueType::F32], vec![ValueType::F32]);
+        let x = b.param(0);
+        let y = b.param(1);
+        let sin = b.f32_sin(x);
+        let cos = b.f32_cos(y);
+        let tan = b.f32_tan(x);
+        let cot = b.f32_cot(y);
+        let exp = b.f32_exp(x);
+        let ln = b.f32_ln(y);
+        let lg = b.f32_lg(x);
+        let pow = b.f32_powf(x, y);
+
+        let mut acc = sin;
+        for v in [cos, tan, cot, exp, ln, lg, pow] {
+            acc = b.f32_add(acc, v);
+        }
+
+        let artifact: Artifact<_, f32> = Artifact::from_tape(b.build().unwrap());
+
+        let (x, y) = (0.7f32, 1.3f32);
+        let expected = x.sin()
+            + y.cos()
+            + x.tan()
+            + y.tan().recip()
+            + x.exp()
+            + y.ln()
+            + x.log10()
+            + x.powf(y);
+
+        assert_eq!(
+            Cranelift::new(&artifact).evaluator().evaluate([x, y]),
+            expected
+        );
+    }
+
+    #[test]
+    fn i32_ops() {
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
+        let x = b.param(0);
+        let three = b.i32_const(3);
+        let two = b.i32_const(2);
+        let five = b.i32_add(three, two);
+        let diff = b.i32_sub(five, two);
+        let six = b.i32_mul(diff, two);
+        let sixf = b.f32_from_i32(six);
+        let cube = b.f32_powi(x, diff);
+        b.f32_add(sixf, cube);
+
+        let artifact: Artifact<_, f32> = Artifact::from_tape(b.build().unwrap());
+
+        let x = 1.5f32;
+        assert_eq!(
+            Cranelift::new(&artifact).evaluator().evaluate(x),
+            6.0 + x.powi(3)
+        );
+    }
+
+    #[test]
+    fn f32_div_clamped() {
+        let mut b = Tape::builder(vec![ValueType::F32, ValueType::F32], vec![ValueType::F32]);
+        let x = b.param(0);
+        let y = b.param(1);
+        b.f32_div(x, y);
+
+        let artifact: Artifact<_, f32> = Artifact::from_tape(b.build().unwrap());
+
+        let kernel = Cranelift::new(&artifact);
+        let evaluator = kernel.evaluator();
+
+        let peak = 1.0 / MIN_F32_MAGNITUDE;
+        assert_eq!(evaluator.evaluate([3.0, -2.0]), -1.5);
+        assert_eq!(evaluator.evaluate([1.0, 0.0]), peak);
+        assert_eq!(evaluator.evaluate([1.0, -0.0]), -peak);
+        assert_eq!(evaluator.evaluate([2.0, 1.0e-40]), 2.0 * peak);
+    }
+
+    #[test]
+    fn f32_sign() {
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
+        let x = b.param(0);
+        b.f32_sign(x);
+
+        let artifact: Artifact<_, f32> = Artifact::from_tape(b.build().unwrap());
+
+        let kernel = Cranelift::new(&artifact);
+        let evaluator = kernel.evaluator();
+
+        assert_eq!(evaluator.evaluate(-3.5), -1.0);
+        assert_eq!(evaluator.evaluate(2.0), 1.0);
+        assert_eq!(evaluator.evaluate(0.0), 1.0);
+        assert_eq!(evaluator.evaluate(-0.0), -1.0);
+    }
+
+    #[test]
+    fn f32_select() {
+        // f = if 0 < x && x < y { x } else { y }
+        let mut b = Tape::builder(vec![ValueType::F32, ValueType::F32], vec![ValueType::F32]);
+        let x = b.param(0);
+        let y = b.param(1);
+        let zero = b.f32_const(0.0);
+        let lt = b.f32_lt(x, y);
+        let pos = b.f32_gt(x, zero);
+        let both = b.and(lt, pos);
+        b.f32_sel(both, x, y);
+
+        let artifact: Artifact<_, f32> = Artifact::from_tape(b.build().unwrap());
+
+        let kernel = Cranelift::new(&artifact);
+        let evaluator = kernel.evaluator();
+
+        assert_eq!(evaluator.evaluate([1.0, 2.0]), 1.0);
+        assert_eq!(evaluator.evaluate([-1.0, 2.0]), 2.0);
+        assert_eq!(evaluator.evaluate([3.0, 2.0]), 2.0);
+    }
+
+    #[test]
+    fn bool_i32_ops() {
+        let mut b = Tape::builder(vec![ValueType::F32], vec![ValueType::F32]);
+        let x = b.param(0);
+        let two = b.i32_const(2);
+        let three = b.i32_const(3);
+        let lt = b.i32_lt(two, three); // true
+        let ge = b.i32_ge(two, three); // false
+        let yes = b.bool_const(true);
+        let xor = b.xor(lt, yes); // false
+        let any = b.or(xor, ge); // false
+        let not = b.not(any); // true
+        let sel = b.i32_sel(not, two, three); // 2
+        let bump = b.i32_from_bool(lt); // 1
+        let sum = b.i32_add(sel, bump); // 3
+        let sum = b.f32_from_i32(sum);
+        let one = b.f32_from_bool(not); // 1.0
+        let sum = b.f32_add(sum, one); // 4.0
+        b.f32_add(sum, x);
+
+        let artifact: Artifact<_, f32> = Artifact::from_tape(b.build().unwrap());
+        assert_eq!(Cranelift::new(&artifact).evaluator().evaluate(0.5), 4.5);
+    }
+
+    #[test]
+    fn multi_results() {
+        let mut b = Tape::builder(
+            vec![ValueType::F32, ValueType::F32],
+            vec![ValueType::F32; 3],
+        );
+        let x = b.param(0);
+        let y = b.param(1);
+        b.f32_add(x, y);
+        b.f32_mul(x, y);
+        b.f32_sub(x, y);
+
+        let artifact: Artifact<_, [f32; 3]> = Artifact::from_tape(b.build().unwrap());
+
+        let (x, y) = (1.5f32, 2.25f32);
+        assert_eq!(
+            Cranelift::new(&artifact).evaluator().evaluate([x, y]),
+            [x + y, x * y, x - y]
+        );
+    }
 }

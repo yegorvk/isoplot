@@ -19,8 +19,8 @@ use crate::{
     plot::{Plot, PlotPlugin},
 };
 
-// const DEFAULT_EQUATION: &str = "max(x^2 + y^2 - z^3 - 8, y - (x^2 + z^2))";
-const DEFAULT_EQUATION: &str = "y - sin(x^2 + z^2)";
+const DEFAULT_EQUATION: &str = "max(x^2 + y^2 - z^3 - 8.0, y - (x^2 + z^2))";
+//const DEFAULT_EQUATION: &str = "y - sin(x^2 + z^2)";
 
 #[derive(Resource)]
 struct ActivePlot {

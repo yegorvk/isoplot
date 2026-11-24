@@ -4,11 +4,11 @@ mod pretty;
 mod symbol;
 mod token;
 
-use std::{error::Error, fmt, iter};
+use std::{collections::HashSet, error::Error, fmt, hash::Hash, marker::PhantomData};
 
 use crate::{
     diag::Diagnostic,
-    layout::{Layout, SchemaType, TypedValue},
+    schema::{FieldType, FieldValue, Schema},
 };
 use isoplot_tape::{NewValueId, Tape, TapeBuilder, ValueType};
 
@@ -64,7 +64,6 @@ pub(crate) fn parse(source: &str) -> (Parsed, Vec<Diagnostic>) {
     let mut interner = Interner::default();
     let mut diagnostics = Vec::new();
     let ast = parser::parse(token::tokenize(source), &mut interner, &mut diagnostics);
-
     (Parsed { ast, interner }, diagnostics)
 }
 
@@ -78,12 +77,15 @@ impl Parsed {
         PrettyPrintAst::new(&self.ast, &self.interner)
     }
 
-    pub(crate) fn validate(&self, bindings: &Bindings) -> Result<Validated<'_>, ValidateError> {
+    pub(crate) fn validate<Params: Schema>(
+        &self,
+        params: &ParamBindings<Params>,
+    ) -> Result<Validated<'_>, ValidateError> {
         let mut diagnostics = Vec::new();
 
         let resolver = VarResolver {
             interner: &self.interner,
-            bindings,
+            params,
             ast: &self.ast,
             diags: &mut diagnostics,
         };
@@ -97,12 +99,11 @@ impl Parsed {
 
         Ok(Validated {
             ast: &self.ast,
-            arg_types: bindings
-                .args
+            arg_types: params
+                .params
                 .iter()
-                .map(|&(_, ty)| translate_type(ty))
+                .map(|&(_, ty)| field_type(ty))
                 .collect(),
-            consts: bindings.consts.iter().map(|&(_, value)| value).collect(),
             vars,
             ty,
         })
@@ -112,7 +113,6 @@ impl Parsed {
 pub(crate) struct Validated<'a> {
     ast: &'a Ast,
     arg_types: Vec<ValueType>,
-    consts: Vec<TypedValue>,
     vars: SparseMap<VarSlot>,
     ty: DenseMap<ValueType>,
 }
@@ -123,7 +123,6 @@ impl Validated<'_> {
 
         let generator = Generator {
             vars: &self.vars,
-            consts: &self.consts,
             ty: &self.ty,
             builder: &mut builder,
         };
@@ -139,14 +138,14 @@ impl Validated<'_> {
     }
 }
 
-struct VarResolver<'a> {
+struct VarResolver<'a, Params> {
     interner: &'a Interner,
-    bindings: &'a Bindings<'a>,
+    params: &'a ParamBindings<'a, Params>,
     ast: &'a Ast,
     diags: &'a mut Vec<Diagnostic>,
 }
 
-impl Visitor for VarResolver<'_> {
+impl<Params: Schema> Visitor for VarResolver<'_, Params> {
     type In<'a> = Option<&'a VarSlot>;
     type Out = Option<VarSlot>;
 
@@ -186,19 +185,8 @@ impl Visitor for VarResolver<'_> {
     fn var(&mut self, id: ExprId, name: Symbol) -> Option<VarSlot> {
         let name = self.interner.resolve(name).unwrap();
 
-        if let Some(index) = self.bindings.args.iter().position(|&(var, _)| var == name) {
-            let ty = translate_type(self.bindings.args[index].1);
-            return Some(VarSlot::Arg(VarIndex(index as u32), ty));
-        }
-
-        if let Some(index) = self
-            .bindings
-            .consts
-            .iter()
-            .position(|&(var, _)| var == name)
-        {
-            let ty = translate_type(self.bindings.consts[index].1.ty());
-            return Some(VarSlot::Const(VarIndex(index as u32), ty));
+        if let Some((index, ty)) = self.params.get(name) {
+            return Some(VarSlot::Param(index, ty));
         }
 
         self.diags.push(Diagnostic::new(
@@ -249,7 +237,7 @@ impl Visitor for TypeChecker<'_> {
 
     fn var(&mut self, id: ExprId, _name: Symbol) -> ValueType {
         match self.vars.get(id) {
-            Some(VarSlot::Const(_, ty) | VarSlot::Arg(_, ty)) => *ty,
+            Some(slot) => slot.ty(),
             None => ValueType::F32,
         }
     }
@@ -268,7 +256,6 @@ impl Visitor for TypeChecker<'_> {
 
 struct Generator<'a> {
     vars: &'a SparseMap<VarSlot>,
-    consts: &'a [TypedValue],
     ty: &'a DenseMap<ValueType>,
     builder: &'a mut TapeBuilder,
 }
@@ -379,18 +366,13 @@ impl Visitor for Generator<'_> {
 
     fn var(&mut self, id: ExprId, _name: Symbol) -> Self::Out {
         match *self.vars.get(id).unwrap() {
-            VarSlot::Const(index, ty) => {
-                let value = self.consts[index.0 as usize].value();
-                match ty {
-                    ValueType::I32 => Operand::I32(self.builder.i32_const(value.as_i32())),
-                    ValueType::Bool => unreachable!(),
-                    ValueType::F32 => Operand::F32(self.builder.f32_const(value.as_f32())),
-                }
-            }
-            VarSlot::Arg(index, ty) => match ty {
-                ValueType::I32 => Operand::I32(self.builder.arg(index.0 as usize)),
-                ValueType::Bool => unreachable!(),
-                ValueType::F32 => Operand::F32(self.builder.arg(index.0 as usize)),
+            VarSlot::Param(index, ty) => match ty {
+                FieldType::I32 => Operand::I32(self.builder.param(index.0 as usize)),
+                FieldType::F32 => Operand::F32(self.builder.param(index.0 as usize)),
+            },
+            VarSlot::Const(value) => match value.ty() {
+                FieldType::I32 => Operand::I32(self.builder.i32_const(value.unwrap_i32())),
+                FieldType::F32 => Operand::F32(self.builder.f32_const(value.unwrap_f32())),
             },
         }
     }
@@ -407,51 +389,78 @@ impl Visitor for Generator<'_> {
     }
 }
 
-pub(crate) struct Bindings<'a> {
-    args: Vec<(&'a str, SchemaType)>,
-    consts: &'a [(&'a str, TypedValue)],
+pub(crate) struct ParamBindings<'a, S> {
+    params: &'a [(&'a str, FieldType)],
+    _marker: PhantomData<fn() -> S>,
 }
 
-impl<'a> Bindings<'a> {
-    pub(crate) fn new<Args: Layout>(args: &[&'a str], consts: &'a [(&'a str, TypedValue)]) -> Self {
-        assert_eq!(
-            args.len(),
-            Args::LEN,
-            "argument names do not match the argument layout"
+impl<'a, S: Schema> ParamBindings<'a, S> {
+    pub(crate) fn new(params: &'a [(&'a str, FieldType)]) -> Self {
+        let param_ty = params.iter().map(|(_, ty)| *ty);
+        assert!(
+            param_ty.eq(S::fields().map(|field| field.ty)),
+            "parameters do not match the schema fields"
         );
 
-        let all_vars = || {
-            args.iter()
-                .copied()
-                .chain(consts.iter().map(|&(name, _)| name))
-        };
-        for (i, name) in all_vars().enumerate() {
-            if all_vars().take(i).any(|prev| prev == name) {
-                panic!("duplicate variable `{name}`");
-            }
+        if let Some((name, _)) = find_duplicate(params) {
+            panic!("duplicate parameter `{name}`");
         }
 
         Self {
-            args: iter::zip(args.iter().copied(), Args::types()).collect(),
-            consts,
+            params,
+            _marker: PhantomData,
         }
+    }
+
+    fn get(&self, name: &str) -> Option<(ParamIndex, FieldType)> {
+        self.params
+            .iter()
+            .enumerate()
+            .find_map(|(i, (field_name, ty))| {
+                (name == *field_name).then_some((ParamIndex(i as u32), *ty))
+            })
     }
 }
 
-pub(crate) fn translate_type(ty: SchemaType) -> ValueType {
+const fn field_type(ty: FieldType) -> ValueType {
     match ty {
-        SchemaType::I32 => ValueType::I32,
-        SchemaType::F32 => ValueType::F32,
+        FieldType::I32 => ValueType::I32,
+        FieldType::F32 => ValueType::F32,
     }
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-struct VarIndex(u32);
+struct ParamIndex(u32);
 
 #[derive(Copy, Clone, Debug)]
 enum VarSlot {
-    Const(VarIndex, ValueType),
-    Arg(VarIndex, ValueType),
+    Param(ParamIndex, FieldType),
+    Const(FieldValue),
+}
+
+impl VarSlot {
+    fn ty(self) -> ValueType {
+        field_type(match self {
+            VarSlot::Param(_, ty) => ty,
+            VarSlot::Const(value) => value.ty(),
+        })
+    }
+}
+
+fn find_duplicate<T, I>(elems: I) -> Option<T>
+where
+    T: Copy + Eq + Hash,
+    I: IntoIterator<Item = T>,
+{
+    let mut seen = HashSet::new();
+
+    for elem in elems.into_iter() {
+        if !seen.insert(elem) {
+            return Some(elem);
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -461,7 +470,7 @@ mod tests {
     fn diagnostics(source: &str) -> Vec<(String, usize, usize)> {
         let (parsed, mut diagnostics) = parse(source);
 
-        if let Err(error) = parsed.validate(&Bindings::new::<f32>(&["x"], &[])) {
+        if let Err(error) = parsed.validate(&ParamBindings::<f32>::new(&[("x", FieldType::F32)])) {
             diagnostics.extend(error.diagnostics);
         }
 

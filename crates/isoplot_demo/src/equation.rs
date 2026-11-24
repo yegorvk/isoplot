@@ -1,8 +1,8 @@
 use std::array;
 
 use isoplot_expr::{
-    Bounds, CompileError, DefaultBackend, Diagnostic, Evaluator, Gradient, Instance, Interval,
-    Program, ProgramDesc,
+    Artifact, CompileError, Cranelift, Diagnostic, Dual, Evaluate, FieldType, Interval, Kernel,
+    Schema, Shape,
 };
 use isoplot_math::Vec3;
 use isoplot_mesh::{NormalField, ScalarField};
@@ -12,52 +12,56 @@ use crate::plot::PlotSource;
 const MIN_NORMAL_ALIGNMENT: f32 = 0.98;
 
 pub struct Equation {
-    field: Instance<DefaultBackend, [f32; 3], f32>,
-    grad: Instance<DefaultBackend, [f32; 3], Gradient<[f32; 3]>>,
-    bounds: Instance<DefaultBackend, [Interval; 3], Bounds>,
-    grad_bounds: Instance<DefaultBackend, [Interval; 3], Gradient<[Bounds; 3]>>,
+    field: Cranelift<[f32; 3], f32>,
+    grad: Cranelift<[f32; 3], Dual<f32, 3>>,
+    bounds: Cranelift<[Interval<f32>; 3], Interval<f32>>,
+    grad_bounds: Cranelift<[Interval<f32>; 3], Dual<Interval<f32>, 3>>,
 }
 
 impl Equation {
     pub fn new(equation: &str) -> Result<Self, CompileError> {
-        let program = Program::compile(&ProgramDesc::new(&["x", "y", "z"], &[]), equation)?;
-        let grad = program.autodiff();
+        let artifact = Artifact::compile(
+            &Shape {
+                params: &[
+                    ("x", FieldType::F32),
+                    ("y", FieldType::F32),
+                    ("z", FieldType::F32),
+                ],
+            },
+            equation,
+        )?;
+
+        let grad = artifact.autodiff();
 
         Ok(Self {
-            grad_bounds: grad.interval().instantiate(),
-            grad: grad.instantiate(),
-            bounds: program.interval().instantiate(),
-            field: program.instantiate(),
+            grad_bounds: Cranelift::new(&grad.interval()),
+            grad: Cranelift::new(&grad),
+            bounds: Cranelift::new(&artifact.interval()),
+            field: Cranelift::new(&artifact),
         })
     }
 
-    fn create_source(&self) -> DynamicSource {
-        DynamicSource {
-            field: self.field.evaluator(),
-            grad: self.grad.evaluator(),
-            field_bounds: self.bounds.evaluator(),
-            grad_bounds: self.grad_bounds.evaluator(),
-        }
-    }
+    // fn create_source(&self) -> DynamicSource {
+    //     DynamicSource {
+    //         field: self.field.evaluator(),
+    //         grad: self.grad.evaluator(),
+    //         field_bounds: self.bounds.evaluator(),
+    //         grad_bounds: self.grad_bounds.evaluator(),
+    //     }
+    // }
 }
 
-impl PlotSource for Equation {
-    fn field(&self) -> impl NormalField {
-        self.create_source()
-    }
-}
+// struct DynamicSource<Params: Schema, Ret: Schema, K: Kernel<Params, Ret>> {
+//     field: Evaluator<DefaultBackend, [f32; 3], f32>,
+//     field_bounds: Evaluator<DefaultBackend, [Interval; 3], MaybeInterval>,
+//     grad: Evaluator<DefaultBackend, [f32; 3], Gradient<[f32; 3]>>,
+//     grad_bounds: Evaluator<DefaultBackend, [Interval; 3], Gradient<[MaybeInterval; 3]>>,
+// }
 
-struct DynamicSource {
-    field: Evaluator<DefaultBackend, [f32; 3], f32>,
-    field_bounds: Evaluator<DefaultBackend, [Interval; 3], Bounds>,
-    grad: Evaluator<DefaultBackend, [f32; 3], Gradient<[f32; 3]>>,
-    grad_bounds: Evaluator<DefaultBackend, [Interval; 3], Gradient<[Bounds; 3]>>,
-}
-
-impl ScalarField for DynamicSource {
+impl ScalarField for Equation {
     #[inline]
     fn sample(&self, point: Vec3<f32>) -> f32 {
-        self.field.evaluate(&point.into())
+        self.field.evaluate(point.into())
     }
 
     #[inline]
@@ -94,16 +98,14 @@ impl ScalarField for DynamicSource {
         let max = min + Vec3::splat(size);
 
         let cell = [
-            Interval::new(min.x, max.x),
-            Interval::new(min.y, max.y),
-            Interval::new(min.z, max.z),
+            Interval::<f32>::new(min.x, max.x),
+            Interval::<f32>::new(min.y, max.y),
+            Interval::<f32>::new(min.z, max.z),
         ];
 
-        let Some(bounds) = self.field_bounds.evaluate(&cell).get() else {
-            return false;
-        };
+        let bounds = self.bounds.evaluate(cell);
 
-        !bounds.contains_zero()
+        bounds.is_finite() && !bounds.contains_zero()
     }
 
     #[inline]
@@ -111,16 +113,16 @@ impl ScalarField for DynamicSource {
         let max = min + Vec3::splat(size);
 
         let cell = [
-            Interval::new(min.x, max.x),
-            Interval::new(min.y, max.y),
-            Interval::new(min.z, max.z),
+            Interval::<f32>::new(min.x, max.x),
+            Interval::<f32>::new(min.y, max.y),
+            Interval::<f32>::new(min.z, max.z),
         ];
 
-        let [x, y, z] = self.grad_bounds.evaluate(&cell).gradient.map(|x| x.get());
+        let [x, y, z] = self.grad_bounds.evaluate(cell).derivative;
 
-        let (Some(x), Some(y), Some(z)) = (x, y, z) else {
+        if !x.is_finite() || !y.is_finite() || !z.is_finite() {
             return false;
-        };
+        }
 
         let g = [x, y, z];
 
@@ -131,7 +133,7 @@ impl ScalarField for DynamicSource {
         let c_n = Vec3::from(g.map(|x| x.center())).normalize_or_zero();
 
         (0..8u8).all(|i| {
-            let pick = |x: Interval, bit: u8| {
+            let pick = |x: Interval<f32>, bit: u8| {
                 if i & bit != 0 { x.max() } else { x.min() }
             };
 
@@ -146,23 +148,22 @@ impl ScalarField for DynamicSource {
     }
 }
 
-impl DynamicSource {
+impl Equation {
     fn is_bounded(&self, a: Vec3<f32>, b: Vec3<f32>) -> bool {
-        let range = self.field_bounds.evaluate(&array::from_fn(|i| {
-            Interval::new(a[i].min(b[i]), a[i].max(b[i]))
+        let range = self.bounds.evaluate(array::from_fn(|i| {
+            Interval::<f32>::new(a[i].min(b[i]), a[i].max(b[i]))
         }));
-
-        range.get().is_some()
+        range.is_finite()
     }
 
     #[inline]
     fn sample_with_gradient(&self, point: Vec3<f32>) -> (f32, Vec3<f32>) {
-        let gradient = self.grad.evaluate(&point.into());
-        (gradient.value, gradient.gradient.into())
+        let gradient = self.grad.evaluate(point.into());
+        (gradient.value, gradient.derivative.into())
     }
 }
 
-impl NormalField for DynamicSource {
+impl NormalField for Equation {
     #[inline]
     fn sample_normal(&self, point: Vec3<f32>) -> Vec3<f32> {
         self.sample_with_gradient(point).1.normalize_or_zero()

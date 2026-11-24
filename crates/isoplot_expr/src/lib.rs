@@ -1,22 +1,21 @@
+mod artifact;
 mod autodiff;
 mod backend;
 mod diag;
 mod frontend;
 mod interval;
-mod layout;
-mod program;
+mod kernel;
+mod schema;
 
 pub(crate) const MIN_F32_MAGNITUDE: f32 = 1e-6;
 
+pub use artifact::{Artifact, CompileError, Shape, dump_ast};
+pub use autodiff::Dual;
+pub use backend::Fallback;
 pub use diag::{BytePos, Diagnostic, Span};
-pub use program::dump_ast;
-
-pub use backend::{Backend, DefaultBackend, Evaluator, Fallback, Instance};
-
-pub use autodiff::Gradient;
-pub use interval::{Bounds, Interval};
-pub use layout::{Layout, SchemaType, TypedValue};
-pub use program::{CompileError, Program, ProgramDesc};
+pub use interval::Interval;
+pub use kernel::{Evaluate, Kernel};
+pub use schema::{FieldType, FieldValue, Schema};
 
 #[cfg(feature = "cranelift")]
 pub use backend::Cranelift;

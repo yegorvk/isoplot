@@ -1,6 +1,6 @@
 use super::{
     RawValueId, Tape,
-    instr::{Instr, NewValueId, ValueType, ValueId, ValueRepr},
+    instr::{Instr, NewValueId, ValueId, ValueRepr, ValueType},
 };
 
 #[derive(Debug)]
@@ -14,30 +14,32 @@ pub struct Inlined<'a> {
 impl Inlined<'_> {
     /// Turns a `ValueId` from the inlined tape into a `NewValueId` in the main tape.
     pub fn convert<T: ValueRepr>(&self, src_id: ValueId<T>) -> NewValueId<T> {
-        assert!(src_id.index() < self.tape.args.len() + self.tape.instrs.len());
+        assert!(src_id.index() < self.tape.params.len() + self.tape.instrs.len());
         NewValueId::from_index(self.base.index() + src_id.index())
     }
 
     pub fn result<T: ValueRepr>(&self, index: usize) -> NewValueId<T> {
-        let id = RawValueId::new(self.tape.instrs.len() - self.tape.results.len() + index);
-        assert_eq!(self.tape.instrs[id.index()].result_type(), T::TYPE);
-        NewValueId::from_raw_id(id)
+        let tape_index = self.tape.instrs.len() - self.tape.results.len() + index;
+        assert_eq!(self.tape.instrs[tape_index].result_type(), T::TYPE);
+        NewValueId::from_raw_id(RawValueId::new(
+            tape_index + self.base.index() + self.tape.num_params(),
+        ))
     }
 }
 
 pub struct TapeBuilder {
-    num_args: usize,
+    num_params: usize,
     instrs: Vec<Instr>,
     values: Vec<ValueType>,
     results: Vec<ValueType>,
 }
 
 impl TapeBuilder {
-    pub(super) fn new(args: Vec<ValueType>, results: Vec<ValueType>) -> Self {
-        const MAX_ARGS: usize = u8::MAX as usize;
+    pub(super) fn new(params: Vec<ValueType>, results: Vec<ValueType>) -> Self {
+        const MAX_PARAMS: usize = u8::MAX as usize;
         assert!(
-            args.len() <= MAX_ARGS,
-            "a tape can take at most {MAX_ARGS} arguments",
+            params.len() <= MAX_PARAMS,
+            "a tape can take at most {MAX_PARAMS} parameters",
         );
 
         const MAX_RESULTS: usize = u8::MAX as usize;
@@ -47,25 +49,25 @@ impl TapeBuilder {
         );
 
         Self {
-            num_args: args.len(),
-            values: args,
+            num_params: params.len(),
+            values: params,
             instrs: vec![],
             results,
         }
     }
 
-    pub fn arg<T: ValueRepr>(&self, index: usize) -> NewValueId<T> {
-        assert!(index < self.num_args && self.values[index] == T::TYPE);
+    pub fn param<T: ValueRepr>(&self, index: usize) -> NewValueId<T> {
+        assert!(index < self.num_params && self.values[index] == T::TYPE);
         NewValueId::from_index(index)
     }
 
     pub fn extend<'a>(&mut self, tape: &'a Tape) -> Inlined<'a> {
         assert!(
-            self.values.ends_with(&tape.args),
-            "tape arguments must match the last values in the builder"
+            self.values.ends_with(&tape.params),
+            "tape parameters must match the last values in the builder"
         );
 
-        let base = RawValueId::new(self.values.len() - tape.args.len());
+        let base = RawValueId::new(self.values.len() - tape.params.len());
 
         self.values
             .extend(tape.instrs.iter().map(Instr::result_type));
@@ -87,17 +89,17 @@ impl TapeBuilder {
 
     pub fn build(mut self) -> Result<Tape, ValidateError> {
         self.validate()?;
-        self.values.truncate(self.num_args);
+        self.values.truncate(self.num_params);
         Ok(Tape {
-            args: self.values,
+            params: self.values,
             results: self.results,
             instrs: self.instrs,
         })
     }
 
     fn validate(&self) -> Result<(), ValidateError> {
-        // Enforce that arguments are not implicitly used as results.
-        if self.values.len() < self.num_args + self.results.len() {
+        // Enforce that parameters are not implicitly used as results.
+        if self.values.len() < self.num_params + self.results.len() {
             return Err(ValidateError(()));
         }
 
@@ -106,7 +108,7 @@ impl TapeBuilder {
         }
 
         for (index, &instr) in self.instrs.iter().enumerate() {
-            let cur_dst = self.num_args + index;
+            let cur_dst = self.num_params + index;
 
             match instr {
                 Instr::I32Const(_) | Instr::BoolConst(_) | Instr::F32Const(_) => {}
