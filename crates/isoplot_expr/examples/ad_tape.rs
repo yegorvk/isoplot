@@ -13,5 +13,5 @@ fn main() {
     )
     .unwrap();
 
-    println!("{:#?}", artifact.autodiff());
+    println!("{:#?}", artifact.lower_autodiff());
 }

@@ -1,13 +1,10 @@
 use std::array;
 
 use isoplot_expr::{
-    Artifact, CompileError, Cranelift, Diagnostic, Dual, Evaluate, FieldType, Interval, Kernel,
-    Schema, Shape,
+    Artifact, CompileError, Cranelift, Diagnostic, Dual, Evaluate, FieldType, Interval, Shape,
 };
 use isoplot_math::Vec3;
 use isoplot_mesh::{NormalField, ScalarField};
-
-use crate::plot::PlotSource;
 
 const MIN_NORMAL_ALIGNMENT: f32 = 0.98;
 
@@ -31,12 +28,12 @@ impl Equation {
             equation,
         )?;
 
-        let grad = artifact.autodiff();
+        let grad = artifact.lower_autodiff();
 
         Ok(Self {
-            grad_bounds: Cranelift::new(&grad.interval()),
+            grad_bounds: Cranelift::new(&grad.lower_interval()),
             grad: Cranelift::new(&grad),
-            bounds: Cranelift::new(&artifact.interval()),
+            bounds: Cranelift::new(&artifact.lower_interval()),
             field: Cranelift::new(&artifact),
         })
     }

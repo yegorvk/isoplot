@@ -2,7 +2,7 @@ use std::{fmt::Debug, mem::offset_of};
 
 use crate::{
     artifact::Artifact,
-    schema::{Field, Schema},
+    schema::{CastSchemaSafe, Field, Schema, SchemaTemplate, Slot, Tile},
 };
 use isoplot_tape::{Inlined, Instr, NewValueId, Tape, TapeBuilder, ValueId, ValueType};
 
@@ -46,9 +46,21 @@ where
     }
 }
 
-pub(crate) fn autodiff<const TILE_LEN: usize, const N: usize>(
-    source: &Artifact<[[f32; TILE_LEN]; N], [f32; TILE_LEN]>,
-) -> Artifact<[[f32; TILE_LEN]; N], Dual<[f32; TILE_LEN], N>> {
+unsafe impl<const TILE_LEN: usize, const N: usize, V, U> CastSchemaSafe<TILE_LEN, Dual<U, N>>
+    for Dual<V, N>
+where
+    V: Schema<TILE_LEN> + CastSchemaSafe<TILE_LEN, U>,
+    U: Schema<TILE_LEN>,
+{
+}
+
+unsafe impl<const TILE_LEN: usize, const N: usize> SchemaTemplate<TILE_LEN> for Dual<Slot<f32>, N> {
+    type With<I32, F32> = Dual<F32, N>;
+}
+
+pub(crate) fn lower_autodiff<const TILE_LEN: usize, const N: usize>(
+    source: &Artifact<[Tile<f32, TILE_LEN>; N], Tile<f32, TILE_LEN>, TILE_LEN>,
+) -> Artifact<[Tile<f32, TILE_LEN>; N], Dual<Tile<f32, TILE_LEN>, N>, TILE_LEN> {
     Artifact::from_tape(Autodiff::new(source.tape()).run())
 }
 

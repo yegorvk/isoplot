@@ -1,4 +1,4 @@
-use std::mem::MaybeUninit;
+use std::{marker::PhantomData, mem::MaybeUninit};
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub enum FieldType {
@@ -20,13 +20,6 @@ impl FieldValue {
         }
     }
 
-    pub(crate) fn into_bits(self) -> u32 {
-        match self {
-            Self::I32(value) => value as u32,
-            Self::F32(value) => value.to_bits(),
-        }
-    }
-
     pub(crate) fn unwrap_i32(self) -> i32 {
         match self {
             Self::I32(value) => value,
@@ -40,6 +33,12 @@ impl FieldValue {
             _ => panic!(),
         }
     }
+}
+
+#[derive(Copy, Clone)]
+#[repr(transparent)]
+pub struct Tile<T: Copy, const N: usize> {
+    pub values: [T; N],
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -152,10 +151,7 @@ unsafe impl Schema for f32 {
     }
 }
 
-unsafe impl<const TILE_LEN: usize> Schema<TILE_LEN> for [i32; TILE_LEN]
-where
-    ConstUsize<TILE_LEN>: IsTileLen,
-{
+unsafe impl<const TILE_LEN: usize> Schema<TILE_LEN> for Tile<i32, TILE_LEN> {
     const NUM_FIELDS: usize = 1;
 
     fn field(index: usize) -> Field {
@@ -164,10 +160,7 @@ where
     }
 }
 
-unsafe impl<const TILE_LEN: usize> Schema<TILE_LEN> for [f32; TILE_LEN]
-where
-    ConstUsize<TILE_LEN>: IsTileLen,
-{
+unsafe impl<const TILE_LEN: usize> Schema<TILE_LEN> for Tile<f32, TILE_LEN> {
     const NUM_FIELDS: usize = 1;
 
     fn field(index: usize) -> Field {
@@ -192,8 +185,52 @@ where
     }
 }
 
-struct ConstUsize<const N: usize>;
+// It is currently impossible to verify this at compile time because `Schema::field()` cannot be `const`.
+pub(crate) unsafe trait CastSchemaSafe<const TILE_LEN: usize, S: Schema<TILE_LEN>>:
+    Schema<TILE_LEN>
+{
+}
 
-unsafe trait IsTileLen {}
-unsafe impl IsTileLen for ConstUsize<4> {}
-unsafe impl IsTileLen for ConstUsize<8> {}
+unsafe impl CastSchemaSafe<1, Tile<f32, 1>> for f32 {}
+unsafe impl CastSchemaSafe<1, f32> for Tile<f32, 1> {}
+
+unsafe impl<const TILE_LEN: usize, const N: usize, S, U> CastSchemaSafe<TILE_LEN, [S; N]> for [U; N]
+where
+    S: Schema<TILE_LEN> + CastSchemaSafe<TILE_LEN, U>,
+    U: Schema<TILE_LEN>,
+{
+}
+
+pub(crate) struct Slot<T> {
+    _marker: (!, PhantomData<T>),
+}
+
+pub(crate) unsafe trait SchemaTemplate<const TILE_LEN: usize> {
+    type With<I32, F32>;
+}
+
+unsafe impl<const TILE_LEN: usize> SchemaTemplate<TILE_LEN> for Slot<i32> {
+    type With<I32, F32> = I32;
+}
+
+unsafe impl<const TILE_LEN: usize> SchemaTemplate<TILE_LEN> for Slot<f32> {
+    type With<I32, F32> = F32;
+}
+
+unsafe impl<const TILE_LEN: usize, const N: usize> SchemaTemplate<TILE_LEN> for [Slot<i32>; N] {
+    type With<I32, F32> = [I32; N];
+}
+
+unsafe impl<const TILE_LEN: usize, const N: usize> SchemaTemplate<TILE_LEN> for [Slot<f32>; N] {
+    type With<I32, F32> = [F32; N];
+}
+
+pub(crate) trait SchemaWith<const TILE_LEN: usize, I32, F32>:
+    SchemaTemplate<TILE_LEN, With<I32, F32>: Schema<TILE_LEN>>
+{
+}
+
+impl<const TILE_LEN: usize, I32, F32, S> SchemaWith<TILE_LEN, I32, F32> for S where
+    S: SchemaTemplate<TILE_LEN, With<I32, F32>: Schema<TILE_LEN>>
+{
+}

@@ -4,9 +4,8 @@ use std::{
 };
 
 use crate::{
-    Dual,
     artifact::Artifact,
-    schema::{Field, Schema},
+    schema::{Field, Schema, SchemaWith},
 };
 use isoplot_tape::{Instr, NewValueId, Tape, TapeBuilder, ValueId, ValueRepr, ValueType};
 
@@ -80,15 +79,14 @@ impl<S: Copy + Debug> fmt::Debug for Interval<S> {
     }
 }
 
-pub(crate) fn interval<const TILE_LEN: usize, const N: usize, const M: usize>(
-    artifact: &Artifact<[[f32; TILE_LEN]; N], [[f32; TILE_LEN]; M]>,
-) -> Artifact<[Interval<[f32; TILE_LEN]>; N], [Interval<[f32; TILE_LEN]>; M]> {
-    Artifact::from_tape(translate(artifact.tape()))
-}
-
-pub(crate) fn interval_d<const TILE_LEN: usize, const N: usize, const M: usize>(
-    artifact: &Artifact<[[f32; TILE_LEN]; N], Dual<[f32; TILE_LEN], M>>,
-) -> Artifact<[Interval<[f32; TILE_LEN]>; N], Dual<Interval<[f32; TILE_LEN]>, M>> {
+pub(crate) fn lower_interval<const TILE_LEN: usize, V, Params, Ret>(
+    artifact: &Artifact<Params::With<!, V>, Ret::With<!, V>, TILE_LEN>,
+) -> Artifact<Params::With<!, Interval<V>>, Ret::With<!, Interval<V>>, TILE_LEN>
+where
+    V: Schema<TILE_LEN>,
+    Params: SchemaWith<TILE_LEN, !, V> + SchemaWith<TILE_LEN, !, Interval<V>>,
+    Ret: SchemaWith<TILE_LEN, !, V> + SchemaWith<TILE_LEN, !, Interval<V>>,
+{
     Artifact::from_tape(translate(artifact.tape()))
 }
 

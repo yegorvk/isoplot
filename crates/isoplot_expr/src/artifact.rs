@@ -1,15 +1,15 @@
-use std::{marker::PhantomData, mem};
+use std::marker::PhantomData;
 use thiserror::Error;
 
 use isoplot_tape::{Tape, ValueType};
 
 use crate::{
     Interval,
-    autodiff::{Dual, autodiff},
+    autodiff::{Dual, lower_autodiff},
     diag::Diagnostic,
     frontend::{ParamBindings, ParseError, Parsed, ValidateError, parse},
-    interval::{interval, interval_d},
-    schema::{FieldType, Schema},
+    interval::lower_interval,
+    schema::{CastSchemaSafe, FieldType, Schema, Slot, Tile},
 };
 
 #[derive(Error, Debug)]
@@ -42,7 +42,7 @@ pub struct Shape<'a> {
 }
 
 #[derive(Debug)]
-pub struct Artifact<Params, Ret> {
+pub struct Artifact<Params, Ret, const TILE_LEN: usize = 1> {
     tape: Tape,
     _marker: PhantomData<fn(Params) -> Ret>,
 }
@@ -66,33 +66,51 @@ impl<Params: Schema> Artifact<Params, f32> {
 }
 
 impl<const N: usize> Artifact<[f32; N], f32> {
-    pub fn autodiff(&self) -> Artifact<[f32; N], Dual<f32, N>> {
-        autodiff(self.into()).into()
+    pub fn lower_autodiff(&self) -> Artifact<[f32; N], Dual<f32, N>> {
+        lower_autodiff(self.cast_ref()).cast()
+    }
+
+    pub fn lower_interval(&self) -> Artifact<[Interval<f32>; N], Interval<f32>> {
+        lower_interval::<1, f32, [Slot<f32>; N], Slot<f32>>(self)
     }
 }
 
-impl<const N: usize> Artifact<[f32; N], f32> {
-    pub fn interval(&self) -> Artifact<[Interval<f32>; N], Interval<f32>> {
-        let artifact: &Artifact<[[f32; 1]; N], [[f32; 1]; 1]> = unsafe { mem::transmute(self) };
-        Artifact::from_tape(interval(artifact).into_tape())
-    }
-}
-
-impl<const N: usize, const M: usize> Artifact<[f32; N], [f32; M]> {
-    pub fn interval(&self) -> Artifact<[Interval<f32>; N], [Interval<f32>; M]> {
-        let artifact: &Artifact<[[f32; 1]; N], [[f32; 1]; M]> = self.into();
-        interval(artifact).into()
+impl<const TILE_LEN: usize, const N: usize, const M: usize>
+    Artifact<[Tile<f32, TILE_LEN>; N], [Tile<f32, TILE_LEN>; M], TILE_LEN>
+{
+    pub fn lower_interval(
+        &self,
+    ) -> Artifact<[Interval<Tile<f32, TILE_LEN>>; N], [Interval<Tile<f32, TILE_LEN>>; M], TILE_LEN>
+    {
+        lower_interval::<TILE_LEN, Tile<f32, TILE_LEN>, [Slot<f32>; N], [Slot<f32>; M]>(self)
     }
 }
 
 impl<const N: usize, const M: usize> Artifact<[f32; N], Dual<f32, M>> {
-    pub fn interval(&self) -> Artifact<[Interval<f32>; N], Dual<Interval<f32>, M>> {
-        let artifact: &Artifact<[[f32; 1]; N], Dual<[f32; 1], M>> = unsafe { mem::transmute(self) };
-        Artifact::from_tape(interval_d(artifact).into_tape())
+    pub fn lower_interval(&self) -> Artifact<[Interval<f32>; N], Dual<Interval<f32>, M>> {
+        lower_interval::<1, f32, [Slot<f32>; N], Dual<Slot<f32>, M>>(self)
     }
 }
 
-impl<Params: Schema, Ret: Schema> Artifact<Params, Ret> {
+impl<const TILE_LEN: usize, const N: usize, const M: usize>
+    Artifact<[Tile<f32, TILE_LEN>; N], Dual<Tile<f32, TILE_LEN>, M>, TILE_LEN>
+{
+    pub fn lower_interval(
+        &self,
+    ) -> Artifact<
+        [Interval<Tile<f32, TILE_LEN>>; N],
+        Dual<Interval<Tile<f32, TILE_LEN>>, M>,
+        TILE_LEN,
+    > {
+        lower_interval::<TILE_LEN, Tile<f32, TILE_LEN>, [Slot<f32>; N], Dual<Slot<f32>, M>>(self)
+    }
+}
+
+impl<const TILE_LEN: usize, Params, Ret> Artifact<Params, Ret, TILE_LEN>
+where
+    Params: Schema<TILE_LEN>,
+    Ret: Schema<TILE_LEN>,
+{
     pub(crate) fn from_tape(tape: Tape) -> Self {
         assert!(
             tape.param_types()
@@ -116,46 +134,31 @@ impl<Params: Schema, Ret: Schema> Artifact<Params, Ret> {
         }
     }
 
+    pub(crate) fn cast<P, R>(self) -> Artifact<P, R, TILE_LEN>
+    where
+        P: Schema<TILE_LEN> + CastSchemaSafe<TILE_LEN, Params>,
+        R: Schema<TILE_LEN>,
+        Ret: CastSchemaSafe<TILE_LEN, R>,
+    {
+        Artifact::from_tape(self.into_tape())
+    }
+
+    pub(crate) fn cast_ref<P, R>(&self) -> &Artifact<P, R, TILE_LEN>
+    where
+        P: Schema<TILE_LEN> + CastSchemaSafe<TILE_LEN, Params>,
+        R: Schema<TILE_LEN>,
+        Ret: CastSchemaSafe<TILE_LEN, R>,
+    {
+        let ptr: *const Artifact<P, R, TILE_LEN> = (self as *const Self).cast();
+        unsafe { ptr.as_ref_unchecked() }
+    }
+
     pub(crate) fn into_tape(self) -> Tape {
         self.tape
     }
 
     pub(crate) fn tape(&self) -> &Tape {
         &self.tape
-    }
-}
-
-impl<const N: usize> From<Artifact<[f32; N], f32>> for Artifact<[[f32; 1]; N], [f32; 1]> {
-    fn from(value: Artifact<[f32; N], f32>) -> Self {
-        Self {
-            tape: value.tape,
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<const N: usize> From<&Artifact<[f32; N], f32>> for &Artifact<[[f32; 1]; N], [f32; 1]> {
-    fn from(value: &Artifact<[f32; N], f32>) -> Self {
-        unsafe { mem::transmute(value) }
-    }
-}
-
-impl<const N: usize, const M: usize> From<Artifact<[f32; N], [f32; M]>>
-    for Artifact<[[f32; 1]; N], [[f32; 1]; M]>
-{
-    fn from(value: Artifact<[f32; N], [f32; M]>) -> Self {
-        Self {
-            tape: value.tape,
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<const N: usize, const M: usize> From<&Artifact<[f32; N], [f32; M]>>
-    for &Artifact<[[f32; 1]; N], [[f32; 1]; M]>
-{
-    fn from(value: &Artifact<[f32; N], [f32; M]>) -> Self {
-        unsafe { mem::transmute(value) }
     }
 }
 
