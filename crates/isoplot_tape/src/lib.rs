@@ -1,3 +1,4 @@
+mod schema;
 mod tape;
 
 pub use tape::{

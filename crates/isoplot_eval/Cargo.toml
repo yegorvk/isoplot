@@ -1,0 +1,22 @@
+[package]
+name = "isoplot-eval"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+isoplot-tape.workspace = true
+
+# [dependencies.bytemuck]
+# workspace = true
+# features = ["derive", "min_const_generics", "must_cast"]
+
+[dependencies.cranelift]
+version = "0.134"
+optional = true
+features = ["jit", "module", "native"]
+
+[features]
+cranelift = ["dep:cranelift"]

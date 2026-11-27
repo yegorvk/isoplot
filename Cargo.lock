@@ -3435,6 +3435,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "isoplot-eval"
+version = "0.1.0"
+dependencies = [
+ "cranelift",
+ "isoplot-tape",
+]
+
+[[package]]
 name = "isoplot-expr"
 version = "0.1.0"
 dependencies = [

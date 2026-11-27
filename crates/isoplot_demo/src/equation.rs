@@ -115,7 +115,7 @@ impl ScalarField for Equation {
             Interval::<f32>::new(min.z, max.z),
         ];
 
-        let [x, y, z] = self.grad_bounds.evaluate(cell).derivative;
+        let [x, y, z] = self.grad_bounds.evaluate(cell).der;
 
         if !x.is_finite() || !y.is_finite() || !z.is_finite() {
             return false;
@@ -156,7 +156,7 @@ impl Equation {
     #[inline]
     fn sample_with_gradient(&self, point: Vec3<f32>) -> (f32, Vec3<f32>) {
         let gradient = self.grad.evaluate(point.into());
-        (gradient.value, gradient.derivative.into())
+        (gradient.value, gradient.der.into())
     }
 }
 
